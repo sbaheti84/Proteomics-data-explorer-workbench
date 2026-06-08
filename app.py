@@ -4,34 +4,87 @@ import os
 import sys
 import time
 import importlib
+import importlib.util
 import traceback
 
 import streamlit as st
 
 
 # =============================================================================
-# PATH HANDLING
+# PYINSTALLER / STREAMLIT-DESKTOP COMPATIBILITY
 # =============================================================================
-current_dir = os.path.dirname(os.path.abspath(__file__))
+def get_resource_path(relative_path=""):
+    """
+    Return an absolute path that works both during normal Streamlit execution
+    and inside a PyInstaller / streamlit-desktop-app packaged build.
+    """
+    try:
+        base_path = sys._MEIPASS
+    except AttributeError:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+
+    return os.path.normpath(os.path.join(base_path, relative_path))
+
+
+# Runtime root directory used by both local execution and packaged builds.
+current_dir = get_resource_path("")
 bundle_dir = getattr(sys, "_MEIPASS", current_dir)
 
-for p in [current_dir, bundle_dir]:
+for p in [current_dir, bundle_dir, os.path.dirname(os.path.abspath(__file__))]:
     if p and p not in sys.path:
         sys.path.insert(0, p)
 
 
 def resource_path(*parts):
     """
-    Return a path that works both during normal Streamlit execution
-    and inside a PyInstaller/streamlit-desktop-app packaged app.
+    Compatibility wrapper used by this dashboard for assets.
     """
-    packaged_path = os.path.join(bundle_dir, *parts)
-    normal_path = os.path.join(current_dir, *parts)
+    return get_resource_path(os.path.join(*parts))
 
-    if os.path.exists(packaged_path):
-        return packaged_path
 
-    return normal_path
+def load_module_safely(module_name: str):
+    """
+    Load <module_name>.py dynamically from the runtime root directory.
+
+    This follows the same approach used in the Lipidomics Workbench launcher and
+    is more robust for PyInstaller/streamlit-desktop-app standalone builds than
+    a plain importlib.import_module call.
+    """
+    module_file = get_resource_path(f"{module_name}.py")
+
+    if not os.path.exists(module_file):
+        files_found = []
+        try:
+            files_found = os.listdir(current_dir)
+        except Exception:
+            pass
+
+        raise FileNotFoundError(
+            f"Could not find expected launcher file:\n{module_file}\n\n"
+            f"Files found in app directory:\n{files_found}"
+        )
+
+    # Reload cleanly when switching between apps during the same Streamlit session.
+    if module_name in sys.modules:
+        del sys.modules[module_name]
+
+    spec = importlib.util.spec_from_file_location(module_name, module_file)
+
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not build import spec for: {module_file}")
+
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+
+    try:
+        spec.loader.exec_module(module)
+    except ModuleNotFoundError as e:
+        raise ModuleNotFoundError(
+            f"While loading '{module_name}.py', Python could not import: '{e.name}'. "
+            f"The file exists, but one dependency/module is missing."
+        ) from e
+
+    return module
 
 
 # =============================================================================
@@ -283,10 +336,11 @@ if st.session_state.pending_app not in valid_apps:
 # =============================================================================
 # SIDEBAR
 # =============================================================================
-logo_path = resource_path("assets", "pandeylab_logo.png")
-
-if os.path.exists(logo_path):
-    st.sidebar.image(logo_path, width=160)
+for logo_name in ["pandeylab_logo.png", "pandyelab_logo.png", "logo.png"]:
+    logo_path = resource_path("assets", logo_name)
+    if os.path.exists(logo_path):
+        st.sidebar.image(logo_path, width=160)
+        break
 
 st.sidebar.title("Workbench Menu")
 
@@ -307,6 +361,18 @@ st.sidebar.selectbox(
 )
 
 st.sidebar.markdown("---")
+
+if st.sidebar.button("Reset App & Clear Cache", use_container_width=True):
+    try:
+        st.cache_data.clear()
+        st.cache_resource.clear()
+    except Exception:
+        pass
+
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+
+    st.rerun()
 
 
 # =============================================================================
@@ -458,11 +524,11 @@ def render_active_app():
             render_loading_panel(app_choice)
 
     # ------------------------------------------------------------
-    # Step 1: Import selected launcher module
+    # Step 1: Load selected launcher module from file
     # ------------------------------------------------------------
     try:
         import_start = time.perf_counter()
-        app_module = importlib.import_module(module_name)
+        app_module = load_module_safely(module_name)
         import_seconds = time.perf_counter() - import_start
 
         st.session_state.last_loaded_module = module_name
@@ -470,20 +536,34 @@ def render_active_app():
 
         loading_placeholder.empty()
 
-    except ModuleNotFoundError as e:
+    except FileNotFoundError as e:
         loading_placeholder.empty()
 
-        st.error(f"Could not import launcher module: `{module_name}`")
-
+        expected_module_path = get_resource_path(f"{module_name}.py")
+        st.error(f"Could not find launcher module file: `{expected_module_path}`")
         st.info(
-            "For the desktop build, make sure this module is included as a hidden import. "
-            "Use the module name without `.py`."
+            "Make sure the launcher .py file is bundled in your PyInstaller/streamlit-desktop-app build. "
+            "Add it with `--add-data` or ensure it is present in the runtime folder."
         )
-
-        st.code(f"--hidden-import {module_name}", language="bash")
+        st.code(f'--add-data "{module_name}.py;."', language="bash")
 
         with st.expander("Technical details", expanded=False):
             st.code(str(e), language="text")
+            st.code(traceback.format_exc(), language="text")
+
+        return
+
+    except ModuleNotFoundError as e:
+        loading_placeholder.empty()
+
+        st.error("A required Python package or internal helper module is missing.")
+        st.warning(
+            f"The launcher file `{module_name}.py` exists, but one of its imports failed. "
+            "For packaged builds, check hidden imports and bundled folders such as `ge`, `tp`, `faq`, and `assets`."
+        )
+        st.code(str(e), language="text")
+
+        with st.expander("Technical details", expanded=False):
             st.code(traceback.format_exc(), language="text")
 
         return
@@ -492,7 +572,7 @@ def render_active_app():
         loading_placeholder.empty()
 
         st.exception(e)
-        st.warning(f"Unexpected error while importing `{module_name}`.")
+        st.warning(f"Unexpected error while loading `{module_name}.py`.")
 
         with st.expander("Technical traceback", expanded=False):
             st.code(traceback.format_exc(), language="text")
