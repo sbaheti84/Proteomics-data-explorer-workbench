@@ -18,17 +18,7 @@ ENV/
 .idea/
 .vscode/
 rsconnect-python/
-# Data / outputs
-*.csv
-*.xlsx
-*.xls
-*.tsv
-*.zip
-*.pdf
-*.png
-*.svg
-*.html
-assets/glycan_images/Thumbs.db
+
 # Build/dist
 build/
 dist/
