@@ -6,13 +6,11 @@ Write-Host "Cleaning old builds..."
 Remove-Item -Recurse -Force build, dist -ErrorAction SilentlyContinue
 Remove-Item -Force "$APP_NAME.spec" -ErrorAction SilentlyContinue
 
-# --- FIX FOR CI/CD PIPELINE ---
 # Ensure the 'assets' directory exists before PyInstaller runs
 if (!(Test-Path -Path "assets")) {
     Write-Host "Creating missing 'assets' directory for PyInstaller..."
     New-Item -ItemType Directory -Force -Path "assets" | Out-Null
 }
-# ------------------------------
 
 Write-Host "Building Windows app..."
 
@@ -72,7 +70,6 @@ streamlit-desktop-app build app.py `
     --add-data "faq;faq" `
     --add-data "ge;ge" `
     --add-data "tp;tp" `
-    --add-data "pandyelab_logo.png;." `
     --collect-all streamlit `
     --collect-all plotly `
     --collect-all openpyxl `
