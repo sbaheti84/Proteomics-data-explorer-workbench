@@ -1,0 +1,3167 @@
+#!/usr/bin/env python3
+"""
+################################################################################
+GlycoExplorer — Label-Free Quantification (LFQ) Workflow 
+################################################################################
+"""
+__author__ = ("Saurabh Baheti: baheti.saurabh@mayo.edu")
+
+import os, re, math, time, warnings
+import base64
+import textwrap
+import zipfile
+import datetime
+from io import BytesIO
+from pathlib import Path
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+
+from PIL import Image
+from scipy.stats import ttest_ind, f_oneway, ttest_rel, mannwhitneyu, wilcoxon
+from statsmodels.stats.multitest import multipletests
+from statsmodels.stats.multicomp import pairwise_tukeyhsd
+
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+import seaborn as sns
+import plotly.express as px
+
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+
+from streamlit.errors import StreamlitAPIException
+
+try:
+    from st_aggrid import AgGrid, GridOptionsBuilder
+except Exception:
+    AgGrid = None
+    GridOptionsBuilder = None
+
+from ge.qc_utils import * 
+from ge.diff_results_utility import * 
+from ge.misc_utility import * 
+from ge.volcanoplot import * 
+from ge.boxplot import * 
+from ge.heatmap import * 
+from ge.lollipop import * 
+from ge.report_utility import * 
+from ge.ui_utility import * 
+from faq.faq_GE_LF import * 
+from ge.waterfall_lf import *
+
+# Optional import for ComBat Batch Correction
+try:
+    from neuroCombat import neuroCombat
+    HAS_COMBAT = True
+except ImportError:
+    HAS_COMBAT = False
+
+warnings.filterwarnings("ignore")
+Image.MAX_IMAGE_PIXELS = 500_000_000  # safety
+
+# =============================================================================
+# DESKTOP-SAFE FILE SAVE HELPERS
+# =============================================================================
+def _get_downloads_dir():
+    """
+    Return a safe Downloads folder path for macOS/Windows/Linux.
+    """
+    downloads = Path.home() / "Downloads"
+    if downloads.exists():
+        return downloads
+    return Path.home()
+
+
+def _safe_download_filename(filename):
+    """
+    Clean filename and avoid characters that can cause issues on macOS/Windows/Linux.
+    """
+    filename = str(filename).strip()
+    filename = re.sub(r"[^A-Za-z0-9._-]+", "_", filename)
+    filename = filename.strip("_")
+    return filename or "downloaded_file"
+
+
+def _coerce_to_bytes(data):
+    """
+    Convert common report/export objects to bytes.
+    Also handles the case where a report generator returns a filepath string.
+    """
+    if data is None:
+        return None
+
+    if isinstance(data, BytesIO):
+        return data.getvalue()
+
+    if isinstance(data, memoryview):
+        return data.tobytes()
+
+    if isinstance(data, bytearray):
+        return bytes(data)
+
+    if isinstance(data, bytes):
+        return data
+
+    if isinstance(data, Path):
+        return data.read_bytes()
+
+    if isinstance(data, str):
+        possible_path = Path(data).expanduser()
+        if possible_path.exists() and possible_path.is_file():
+            return possible_path.read_bytes()
+        return data.encode("utf-8")
+
+    try:
+        return bytes(data)
+    except Exception as e:
+        raise TypeError(f"Cannot convert object of type {type(data)} to bytes: {e}")
+
+
+def _save_bytes_to_downloads(data, filename):
+    """
+    Save bytes directly to the user's Downloads folder.
+    This is more reliable than browser download inside packaged desktop apps.
+    Existing files are not overwritten; a numeric suffix is added.
+    """
+    data = _coerce_to_bytes(data)
+    if data is None:
+        raise ValueError("No file data was available to save.")
+
+    outdir = _get_downloads_dir()
+    filename = _safe_download_filename(filename)
+    outpath = outdir / filename
+
+    base_outpath = outpath
+    counter = 1
+    while outpath.exists():
+        outpath = base_outpath.with_name(f"{base_outpath.stem}_{counter}{base_outpath.suffix}")
+        counter += 1
+
+    outpath.write_bytes(data)
+    return outpath
+
+
+def _save_file_to_downloads(source_path, filename=None):
+    """
+    Save an existing file to the user's Downloads folder.
+    Used for bundled example datasets in the standalone desktop app.
+    """
+    source_path = Path(source_path)
+    if filename is None:
+        filename = source_path.name
+    return _save_bytes_to_downloads(source_path.read_bytes(), filename)
+
+
+def _save_dataframe_csv_to_downloads(df, filename):
+    """Save a DataFrame as CSV to Downloads."""
+    csv_bytes = df.to_csv(index=False).encode("utf-8")
+    return _save_bytes_to_downloads(csv_bytes, filename)
+
+
+def _save_dataframe_excel_to_downloads(df, filename, sheet_name="Sheet1"):
+    """Save a DataFrame as Excel to Downloads."""
+    buffer = BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
+    return _save_bytes_to_downloads(buffer.getvalue(), filename)
+
+
+
+def _save_matplotlib_figure_to_downloads(fig, filename, fmt=None):
+    """
+    Save a Matplotlib figure directly to Downloads.
+    Works reliably in packaged desktop builds where browser downloads may fail.
+    """
+    if fig is None:
+        raise ValueError("No Matplotlib figure was available to save.")
+    buffer = BytesIO()
+    save_kwargs = {"bbox_inches": "tight", "dpi": 300}
+    if fmt:
+        save_kwargs["format"] = fmt
+    fig.savefig(buffer, **save_kwargs)
+    return _save_bytes_to_downloads(buffer.getvalue(), filename)
+
+
+def _save_plotly_figure_to_downloads(fig, filename, fmt="html"):
+    """
+    Save a Plotly figure directly to Downloads.
+    HTML does not require extra dependencies. Static image export requires kaleido.
+    """
+    if fig is None:
+        raise ValueError("No Plotly figure was available to save.")
+    fmt = (fmt or "html").lower()
+    if fmt == "html":
+        return _save_bytes_to_downloads(fig.to_html(include_plotlyjs="cdn"), filename)
+    img_bytes = fig.to_image(format=fmt, scale=2)
+    return _save_bytes_to_downloads(img_bytes, filename)
+
+
+def _add_desktop_plot_save_buttons(fig, base_filename, key_prefix, include_svg=True, include_pdf=True):
+    """
+    Add desktop-safe plot save buttons. This mirrors the working GE TMT behavior
+    by saving files directly into the user's Downloads folder instead of relying
+    only on browser download behavior.
+    """
+    if fig is None:
+        try:
+            current_fig = plt.gcf()
+            if current_fig is not None and getattr(current_fig, "axes", None):
+                fig = current_fig
+        except Exception:
+            fig = None
+
+    if fig is None:
+        return
+
+    safe_base = _safe_download_filename(base_filename).rsplit('.', 1)[0]
+
+    try:
+        is_plotly = hasattr(fig, "to_html") and hasattr(fig, "to_image")
+    except Exception:
+        is_plotly = False
+
+    if is_plotly:
+        cols = st.columns(3)
+        if cols[0].button("Save HTML", key=f"{key_prefix}_save_html", width="stretch"):
+            try:
+                outpath = _save_plotly_figure_to_downloads(fig, f"{safe_base}.html", fmt="html")
+                st.success(f"Saved HTML to: {outpath}")
+            except Exception as e:
+                st.error(f"Could not save HTML: {e}")
+        if cols[1].button("Save PNG", key=f"{key_prefix}_save_png", width="stretch"):
+            try:
+                outpath = _save_plotly_figure_to_downloads(fig, f"{safe_base}.png", fmt="png")
+                st.success(f"Saved PNG to: {outpath}")
+            except Exception as e:
+                st.error(f"Could not save PNG. Plotly static export may require kaleido: {e}")
+        if cols[2].button("Save SVG", key=f"{key_prefix}_save_svg", width="stretch"):
+            try:
+                outpath = _save_plotly_figure_to_downloads(fig, f"{safe_base}.svg", fmt="svg")
+                st.success(f"Saved SVG to: {outpath}")
+            except Exception as e:
+                st.error(f"Could not save SVG. Plotly static export may require kaleido: {e}")
+    else:
+        ncols = 3 if include_pdf else 2
+        cols = st.columns(ncols)
+        if cols[0].button("Save PNG", key=f"{key_prefix}_save_png", width="stretch"):
+            try:
+                outpath = _save_matplotlib_figure_to_downloads(fig, f"{safe_base}.png", fmt="png")
+                st.success(f"Saved PNG to: {outpath}")
+            except Exception as e:
+                st.error(f"Could not save PNG: {e}")
+        if include_svg and cols[1].button("Save SVG", key=f"{key_prefix}_save_svg", width="stretch"):
+            try:
+                outpath = _save_matplotlib_figure_to_downloads(fig, f"{safe_base}.svg", fmt="svg")
+                st.success(f"Saved SVG to: {outpath}")
+            except Exception as e:
+                st.error(f"Could not save SVG: {e}")
+        if include_pdf and cols[-1].button("Save PDF", key=f"{key_prefix}_save_pdf", width="stretch"):
+            try:
+                outpath = _save_matplotlib_figure_to_downloads(fig, f"{safe_base}.pdf", fmt="pdf")
+                st.success(f"Saved PDF to: {outpath}")
+            except Exception as e:
+                st.error(f"Could not save PDF: {e}")
+
+
+
+# -----------------------------------------------------------------------------
+# Streamlit page config
+# -----------------------------------------------------------------------------
+try_set_page_config(page_title="GlycoExplorer LFQ | Mayo Clinic", layout="wide")
+inject_custom_css() 
+
+ss = st.session_state
+
+# ---------------- GLOBAL sample/group selection (shared across modules) ----------------
+ss.setdefault("global_sample_cols", [])          
+ss.setdefault("global_group_samples", [])        
+ss.setdefault("global_group_labels", [])         
+ss.setdefault("global_n_groups", 2)              
+ss.setdefault("global_control_group_idx", 0)     
+ss.setdefault("global_all_groups", [])           
+
+ss.setdefault("batch_dict", {})
+ss.setdefault("batch_corrected", False)
+
+# One-time session defaults
+ss.setdefault("merged_ready", False)
+ss.setdefault("raw_merged_df", None)
+ss.setdefault("merged_df", None)
+ss.setdefault("diffexp_df", None)
+ss.setdefault("filtered_df", None)
+ss.setdefault("diff_done", False)
+ss.setdefault("show_overview", False)
+ss.setdefault("show_suite", False)
+ss.setdefault("show_global_select", False)
+ss.setdefault("upload_sig", None)  
+ss.setdefault("show_report", False)
+
+# Explore tab flags
+for k in [
+    "run_pca", "run_corr", "run_overview_heatmap", 
+    "run_peptide_freq", "run_abundance", "run_glycan_class"
+]:
+    ss.setdefault(k, False)
+
+# Gene plot flags
+ss.setdefault("box_gene_list", [])
+ss.setdefault("box_gene_plot", False)
+ss.setdefault("box_gene_cleared", False)
+ss.setdefault("lollipop_gene_ids", "")
+ss.setdefault("lollipop_gene_list", [])
+ss.setdefault("lollipop_gene_plot", False)
+
+# Differential flags
+ss.setdefault("control_group_idx", 0)
+ss.setdefault("compare_open", False)
+ss.setdefault("filter_open", False)
+ss.setdefault("filtered_ready", False)
+
+# Misc tab
+ss.setdefault("explore_mode_user", None)
+ss.setdefault("misc_user_df", None)
+ss.setdefault("misc_user_df_valid", False)
+
+ss.setdefault("tool_usage", {})
+
+# =============================================================================
+# BATCH CORRECTION LOGIC
+# =============================================================================
+def apply_batch_correction(df: pd.DataFrame, batch_list: list[list[str]], method: str) -> pd.DataFrame:
+    out = df.copy()
+    
+    if method == "Median Centering":
+        global_med = out.median(axis=1)
+        for b_cols in batch_list:
+            valid = [c for c in b_cols if c in out.columns]
+            if valid:
+                b_med = out[valid].median(axis=1)
+                out[valid] = out[valid].sub(b_med, axis=0).add(global_med, axis=0)
+                
+    elif method == "Mean Centering":
+        global_mean = out.mean(axis=1)
+        for b_cols in batch_list:
+            valid = [c for c in b_cols if c in out.columns]
+            if valid:
+                b_mean = out[valid].mean(axis=1)
+                out[valid] = out[valid].sub(b_mean, axis=0).add(global_mean, axis=0)
+                
+    elif method == "Standardize (Mean + Variance)":
+        global_mean = out.mean(axis=1)
+        global_std = out.std(axis=1).replace(0, 1e-9) 
+        
+        for b_cols in batch_list:
+            valid = [c for c in b_cols if c in out.columns]
+            if len(valid) > 1:
+                b_mean = out[valid].mean(axis=1)
+                b_std = out[valid].std(axis=1).replace(0, 1e-9)
+                out[valid] = out[valid].sub(b_mean, axis=0).div(b_std, axis=0).mul(global_std, axis=0).add(global_mean, axis=0)
+            elif len(valid) == 1:
+                b_mean = out[valid].mean(axis=1)
+                out[valid] = out[valid].sub(b_mean, axis=0).add(global_mean, axis=0)
+                
+    elif method == "ComBat (Empirical Bayes)":
+        if not HAS_COMBAT:
+            raise ImportError("The 'neuroCombat' package is not installed. Please run `pip install neuroCombat` to use this feature.")
+            
+        sample_to_batch = {}
+        for idx, b_cols in enumerate(batch_list):
+            for c in b_cols:
+                if c in out.columns:
+                    sample_to_batch[c] = idx + 1
+                    
+        valid_cols = list(sample_to_batch.keys())
+        if not valid_cols:
+            return out
+            
+        dat = out[valid_cols].copy()
+        
+        na_mask = dat.isna()
+        
+        row_medians = dat.median(axis=1)
+        dat_imputed = dat.apply(lambda col: col.fillna(row_medians)).fillna(0)
+        
+        covars = pd.DataFrame({"batch": [sample_to_batch[c] for c in valid_cols]}, index=valid_cols)
+        
+        try:
+            combat_res = neuroCombat(dat=dat_imputed, covars=covars, batch_col="batch")
+            corrected_df = pd.DataFrame(combat_res["data"], index=dat.index, columns=valid_cols)
+            
+            corrected_df[na_mask] = np.nan
+            out[valid_cols] = corrected_df
+            
+        except Exception as e:
+            raise RuntimeError(f"ComBat correction failed: {e}. Ensure batches have enough samples and non-zero variances.")
+
+    return out
+
+
+# =============================================================================
+# CORE LFQ STATISTICAL & FILTERING LOGIC
+# =============================================================================
+
+def replace_zeros_rowwise_min_fraction(
+    df: pd.DataFrame, 
+    sample_cols: list[str], 
+    frac: float = 0.2,          
+    replace_nan: bool = True, 
+    add_debug: bool = True
+) -> pd.DataFrame:
+    out = df.copy()
+    cols = [c for c in sample_cols if c in out.columns]
+    if not cols:
+        return out
+
+    X = out[cols].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+    pos_mask = np.isfinite(X) & (X > 0)
+    has_pos = pos_mask.any(axis=1)
+
+    pos_vals = np.where(pos_mask, X, np.nan)
+    row_min_pos = np.nanmin(pos_vals, axis=1)   
+    fill = row_min_pos * float(frac)
+
+    if replace_nan:
+        repl_mask = (X == 0) | (~np.isfinite(X))
+    else:
+        repl_mask = (X == 0)
+
+    X_new = X.copy()
+    good = has_pos & np.isfinite(fill)
+    if np.any(good):
+        X_new[good] = np.where(repl_mask[good], fill[good, None], X[good])
+        out[cols] = X_new
+
+    if add_debug:
+        tmp = np.where(pos_mask, X, np.inf)
+        min_idx = np.argmin(tmp, axis=1)
+        min_col = np.array(cols, dtype=object)[min_idx]
+        min_col = np.where(has_pos, min_col, None)
+        
+        out["__min_pos_col__"] = min_col
+        out["__min_pos_val__"] = np.where(has_pos, row_min_pos, np.nan)
+        out["__impute_fill__"] = np.where(has_pos, fill, np.nan)
+        
+    return out
+
+
+def filter_by_presence_rule(
+    df: pd.DataFrame, 
+    all_samples: list[str], 
+    group_samples: list[list[str]],
+    min_frac: float = 0.40, 
+    presence_rule: str = "or",   
+) -> pd.DataFrame:
+    out = df.copy()
+    all_cols = [c for c in all_samples if c in out.columns]
+    if not all_cols:
+        return out
+
+    X = out[all_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
+    pres_all = X.gt(0)
+    frac_all = pres_all.mean(axis=1)
+    keep_all = frac_all >= float(min_frac)
+
+    keep_group = pd.Series(False, index=out.index)
+    for g in group_samples or []:
+        gcols = [c for c in (g or []) if c in out.columns]
+        if not gcols:
+            continue
+        pres_g = out[gcols].apply(pd.to_numeric, errors="coerce").fillna(0).gt(0)
+        keep_group = keep_group | (pres_g.mean(axis=1) >= float(min_frac))
+
+    rule = (presence_rule or "or").strip().lower()
+    if rule == "all_only":
+        keep = keep_all
+    elif rule == "group_only":
+        keep = keep_group
+    elif rule == "and":
+        keep = keep_all & keep_group
+    else:
+        keep = keep_all | keep_group
+    
+    return out.loc[keep].copy()
+
+# =============================================================================
+# PGLYCO LABEL-FREE PARSING LOGIC
+# =============================================================================
+
+def clean_cols(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = pd.Index(df.columns).map(lambda x: str(x).replace("\xa0", " ").strip())
+    return df
+
+def _clean_colname(x) -> str:
+    x = str(x).replace("\ufeff", "").replace("\xa0", " ").strip()
+    return x
+
+def normalize_pglyco_df(pglyco_df: pd.DataFrame) -> pd.DataFrame:
+    df = pglyco_df.copy()
+    df.columns = [_clean_colname(c) for c in df.columns]
+    if df.columns[0] in {"0", "Unnamed: 0", "index", "Index"}:
+        df = df.drop(columns=[df.columns[0]])
+    return df
+
+def read_pglyco_file(uploaded_file) -> pd.DataFrame:
+    suffix = Path(uploaded_file.name).suffix.lower()
+    if suffix == ".csv":
+        df = pd.read_csv(uploaded_file)
+    elif suffix in [".txt", ".tsv"]:
+        df = pd.read_csv(uploaded_file, sep="\t", engine="python")
+    elif suffix in [".xlsx", ".xls"]:
+        df = pd.read_excel(uploaded_file, engine="openpyxl")
+    else:
+        raise ValueError(f"Unsupported file type: {suffix}.")
+    
+    df.columns = [str(c).strip() for c in df.columns]
+    return df
+
+def classify_glycan(glycan_str: str) -> str:
+    if pd.isna(glycan_str):
+        return "Unknown"
+    
+    match = re.match(r"(\d+)\s+(\d+)\s+(\d+)\s+(\d+)", str(glycan_str))
+    if not match:
+        return "Unknown"
+    
+    H, N, A, F = map(int, match.groups())
+    
+    if 4 <= H <= 12 and N == 2 and A == 0 and F in [0, 1]:
+        return "High-mannose"
+    elif 0 <= H <= 3 and N in [1, 2] and A == 0 and F in [0, 1]:
+        return "Paucimannose"
+    else:
+        return "Complex/Hybrid"
+
+def build_label_free_matrix_from_pglyco(
+    pglyco_df: pd.DataFrame, 
+    species: str = "Human", 
+    version_label: str = "v3"
+) -> pd.DataFrame:
+    df = pglyco_df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+
+    def _safe_str_series(s: pd.Series) -> pd.Series:
+        return s.astype("string").fillna("").str.strip()
+
+    if "IsotopeArea" not in df.columns or not df["IsotopeArea"].notna().any():
+        raise ValueError("Missing RAW intensity column: IsotopeArea")
+
+    iso = df["IsotopeArea"].astype("string").fillna("").str.replace(",", "", regex=False).str.strip()
+    df["IsotopeArea"] = pd.to_numeric(iso, errors="coerce")
+
+    if pd.notna(df["IsotopeArea"]).any() and df["IsotopeArea"].max(skipna=True) < 1_000:
+        raise ValueError("IsotopeArea appears log-transformed (max < 1000). Export RAW intensities.")
+
+    df["IsotopeArea"] = df["IsotopeArea"].fillna(0).round(0).astype("int64")
+
+    required_cols = ["Peptide", "Genes", "Proteins", "ProSites", "RawName"]
+    for c in required_cols:
+        if c not in df.columns:
+            raise ValueError(f"Missing required column: {c}")
+
+    for c in required_cols:
+        df[c] = _safe_str_series(df[c])
+
+    def _has_real(series: pd.Series) -> bool:
+        if series is None:
+            return False
+        s = _safe_str_series(series).replace({
+            "": pd.NA, 
+            "nan": pd.NA, 
+            "NaN": pd.NA, 
+            "None": pd.NA, 
+            "NA": pd.NA, 
+            "N/A": pd.NA
+        }).dropna()
+        if s.empty:
+            return False
+        return s.astype("string").str.contains(r"\d", regex=True).any()
+
+    glycan_src, glycan_style = None, None
+    for col in df.columns:
+        clean_col = re.sub(r'\s+', '', str(col)).lower()
+        if clean_col in ["correctedglycan(h,n,a,g,f)", "glycan(h,n,a,g,f)"] and _has_real(df[col]):
+            glycan_src, glycan_style = col, "mouse"
+            break
+        elif clean_col in ["correctedglycan(h,n,a,f)", "glycan(h,n,a,f)"] and _has_real(df[col]):
+            glycan_src, glycan_style = col, "human"
+            break
+
+    if not glycan_src:
+        raise ValueError("No usable glycan column found")
+        
+    df["Glycan"] = _safe_str_series(df[glycan_src])
+
+    def canonical_glycan_key(x: str) -> str:
+        s = re.sub(r"\s+", " ", str(x).strip())
+        nums = list(map(int, re.findall(r"\d+", s)))
+        if glycan_style == "mouse":
+            nums = (nums + [0] * 5)[:5]
+            return f"H{nums[0]}_N{nums[1]}_A{nums[2]}_G{nums[3]}_F{nums[4]}"
+        else:
+            nums = (nums + [0] * 4)[:4]
+            return f"H{nums[0]}_N{nums[1]}_A{nums[2]}_F{nums[3]}"
+
+    df["Glycan_key"] = df["Glycan"].apply(canonical_glycan_key)
+
+    def canonical_prosites(ps: str):
+        if ps is None:
+            return ("", "__EMPTY__")
+        s = str(ps).strip()
+        if s == "" or s.lower() in {"nan", "none", "na", "n/a"}:
+            return ("", "__EMPTY__")
+        parts = [re.sub(r"[^\w\(\)\-]+$", "", p.strip()) for p in re.split(r"[;,|\s]+", s) if p.strip()]
+        norm = ";".join(sorted(parts))
+        return (norm, "__" + norm)
+
+    pros_norm_key = df["ProSites"].apply(canonical_prosites)
+    df["ProSites_norm"] = pros_norm_key.apply(lambda x: x[0]).astype("string").fillna("")
+    df["ProSites_key"]  = pros_norm_key.apply(lambda x: x[1]).astype("string").fillna("__EMPTY__")
+
+    df["GlycanClass"] = df["Glycan"].apply(lambda g: classify_glycan(str(g)))
+
+    df["Glycopeptide"] = (
+        df["Peptide"] + "||" + 
+        df["Glycan"] + "||" + 
+        df["Genes"] + "||" + 
+        df["ProSites_norm"]
+    )
+
+    group_keys = ["RawName", "Peptide", "Glycan_key", "ProSites_key"]
+    df = df.sort_values(group_keys, kind="mergesort")
+
+    uniq_sum = df.groupby(group_keys)["IsotopeArea"].apply(
+        lambda s: int(np.unique(s.astype("int64")).sum())
+    ).reset_index(name="IsotopeArea")
+    
+    df_rep = df.drop_duplicates(subset=group_keys, keep="first").copy()
+    df_rep = df_rep.drop(columns=["IsotopeArea"]).merge(uniq_sum, on=group_keys, how="left")
+
+    wide = df_rep.groupby(["Glycopeptide", "RawName"])["IsotopeArea"].sum().unstack(fill_value=0)
+
+    meta = df_rep.drop_duplicates("Glycopeptide", keep="first").set_index("Glycopeptide")[
+        ["Peptide", "Glycan", "Genes", "Proteins", "ProSites_norm", "GlycanClass"]
+    ].rename(columns={"ProSites_norm": "ProSites"})
+    
+    merged_df = meta.join(wide, how="left").reset_index().rename(columns={"index": "Glycopeptide"})
+
+    return merged_df
+
+# =============================================================================
+# MSFRAGGER LABEL-FREE PARSING LOGIC
+# =============================================================================
+
+def _msfragger_to_pglyco(glycan_str):
+    """Converts MSFragger string 'HexNAc(4)Hex(5)NeuAc(2)' into pGlyco '5 4 2 0' (H, N, A, F)"""
+    if pd.isna(glycan_str):
+        return None
+    
+    clean_str = str(glycan_str).split('%')[0].strip()
+    h = re.search(r'Hex\((\d+)\)', clean_str)
+    n = re.search(r'HexNAc\((\d+)\)', clean_str)
+    a = re.search(r'NeuAc\((\d+)\)', clean_str)
+    f = re.search(r'Fuc\((\d+)\)', clean_str)
+    
+    return f"{h.group(1) if h else '0'} {n.group(1) if n else '0'} {a.group(1) if a else '0'} {f.group(1) if f else '0'}"
+
+def _calculate_prosite(row):
+    """Calculates absolute protein position of modified Asparagine (N)."""
+    start_col = 'Protein Start' if 'Protein Start' in row else 'Start'
+    
+    if pd.isna(row.get('Assigned Modifications')) or pd.isna(row.get(start_col)):
+        return "Unknown"
+    
+    try:
+        start_pos = int(row[start_col])
+    except ValueError:
+        return "Unknown"
+        
+    matches = re.findall(r'(\d+)N\(([\d\.]+)\)', str(row['Assigned Modifications']))
+    valid_sites = [start_pos + int(pos) - 1 for pos, mass in matches if float(mass) > 300]
+    
+    if valid_sites:
+        return "; ".join(map(str, sorted(list(set(valid_sites)))))
+    else:
+        return "Unknown"
+
+def process_msfragger_lfq_files(uploaded_files):
+    """Parses multiple MSFragger LFQ TSV files, standardizes, and outer joins them into a unified matrix."""
+    all_data = []
+    
+    for file in uploaded_files:
+        sample_name = Path(file.name).stem 
+        df = pd.read_csv(file, sep='\t', low_memory=False)
+        
+        if 'Total Glycan Composition' not in df.columns:
+            continue
+            
+        df = df[df['Total Glycan Composition'].notna()].copy()
+        if df.empty:
+            continue
+            
+        df['Glycan(H,N,A,F)'] = df['Total Glycan Composition'].apply(_msfragger_to_pglyco)
+        df['Glycan'] = df['Glycan(H,N,A,F)']
+        df['GlycanClass'] = df['Glycan(H,N,A,F)'].apply(classify_glycan)
+        df['ProSites'] = df.apply(_calculate_prosite, axis=1)
+        
+        if 'Gene' in df.columns:
+            df.rename(columns={'Gene': 'Genes'}, inplace=True)
+        if 'Protein ID' in df.columns:
+            df.rename(columns={'Protein ID': 'Proteins'}, inplace=True)
+            
+        intensity_col = 'Intensity'
+        if intensity_col not in df.columns:
+            int_cols = [c for c in df.columns if 'intensity' in c.lower() and 'na' not in c.lower()]
+            if int_cols:
+                intensity_col = int_cols[0]
+            else:
+                continue 
+        
+        df['PSM_Count'] = 1
+        agg_dict = {
+            'Proteins': 'first', 
+            'Genes': 'first', 
+            'ProSites': 'first', 
+            'GlycanClass': 'first', 
+            'PSM_Count': 'sum', 
+            intensity_col: 'max'
+        }
+        
+        if 'Protein Description' in df.columns:
+            agg_dict['Protein Description'] = 'first'
+            
+        grouped = df.groupby(['Peptide', 'Glycan(H,N,A,F)', 'Glycan']).agg(agg_dict).reset_index()
+        grouped.rename(columns={intensity_col: f"Abundance: {sample_name}"}, inplace=True)
+        all_data.append(grouped)
+        
+    if not all_data:
+        return pd.DataFrame()
+        
+    merge_keys = ['Peptide', 'Glycan(H,N,A,F)', 'Glycan', 'Genes', 'ProSites', 'GlycanClass', 'Proteins']
+    if 'Protein Description' in all_data[0].columns:
+        merge_keys.append('Protein Description')
+        
+    master_df = all_data[0]
+    for i in range(1, len(all_data)):
+        master_df = pd.merge(master_df, all_data[i].drop(columns=['PSM_Count']), on=merge_keys, how='outer')
+        if 'PSM_Count' in all_data[i].columns:
+            temp_counts = master_df.pop('PSM_Count') if 'PSM_Count' in master_df.columns else pd.Series(0, index=master_df.index)
+            master_df['PSM_Count'] = temp_counts.add(all_data[i]['PSM_Count'], fill_value=0)
+
+    abundance_cols = [c for c in master_df.columns if c.startswith('Abundance:')]
+    master_df[abundance_cols] = master_df[abundance_cols].fillna(0)
+    
+    master_df["Glycopeptide"] = (
+        master_df["Peptide"].astype(str) + "||" + 
+        master_df["Glycan"].astype(str) + "||" + 
+        master_df["Genes"].astype(str) + "||" + 
+        master_df["ProSites"].astype(str)
+    )
+    return master_df
+
+# =============================================================================
+# DIFFERENTIAL TESTING 
+# =============================================================================
+
+def compute_diffexp(
+    df: pd.DataFrame, 
+    control_cols: list[str], 
+    test_cols: list[str], 
+    control_label: str = "Control", 
+    test_label: str = "Test",
+    test_type: str = "Student's t-test (Independent, Equal Variance)", 
+    do_zero_impute: bool = True, 
+    zero_frac: float = 0.2,              
+    do_presence_filter: bool = True, 
+    presence_min_frac: float = 0.40, 
+    presence_rule: str = "or", 
+    group_samples_for_presence: list[list[str]] | None = None,
+    min_n_per_group: int = 2, 
+    add_debug_cols: bool = True
+) -> pd.DataFrame:
+    
+    df = df.copy()
+    ctrl = [c for c in control_cols if c in df.columns]
+    test = [c for c in test_cols if c in df.columns]
+    all_cols = list(dict.fromkeys(ctrl + test))
+    
+    if not ctrl or not test:
+        raise ValueError("Need at least 1 valid sample column in both control and test groups.")
+        
+    for c in all_cols:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    if do_presence_filter:
+        df = filter_by_presence_rule(
+            df=df, 
+            all_samples=all_cols, 
+            group_samples=group_samples_for_presence or [ctrl, test], 
+            min_frac=presence_min_frac, 
+            presence_rule=presence_rule
+        )
+
+    if add_debug_cols:
+        raw_vals = df[all_cols].to_numpy(dtype=float)
+        raw_zero_count = np.sum((raw_vals == 0) | (~np.isfinite(raw_vals)), axis=1)
+        pos_raw = np.where((raw_vals > 0) & np.isfinite(raw_vals), raw_vals, np.nan)
+        true_row_min = np.nanmin(pos_raw, axis=1)
+
+    if do_zero_impute:
+        df = replace_zeros_rowwise_min_fraction(
+            df=df, 
+            sample_cols=all_cols, 
+            frac=zero_frac, 
+            replace_nan=True, 
+            add_debug=False
+        )
+
+    for c in all_cols:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    if add_debug_cols:
+        df["__row_min_pos__"] = true_row_min
+        df["__impute_fill__"] = true_row_min * float(zero_frac)
+        df["__zeros_or_na_before__"] = raw_zero_count
+        post_vals = df[all_cols].to_numpy(dtype=float)
+        df["__zeros_or_na_after__"] = np.sum((post_vals == 0) | (~np.isfinite(post_vals)), axis=1)
+
+    df[control_label] = df[ctrl].mean(axis=1)
+    df[test_label] = df[test].mean(axis=1)
+    pseudo = 1.0
+    df["log2FC"] = np.log2(df[test_label] + pseudo) - np.log2(df[control_label] + pseudo)
+
+    pvals = []
+    is_paired = "Paired" in test_type
+    
+    for i in range(len(df)):
+        v1_raw = df.iloc[i][ctrl].astype(float).values
+        v2_raw = df.iloc[i][test].astype(float).values
+
+        if is_paired:
+            if len(v1_raw) == len(v2_raw):
+                mask = ~np.isnan(v1_raw) & ~np.isnan(v2_raw)
+                v1, v2 = v1_raw[mask], v2_raw[mask]
+            else:
+                v1, v2 = [], [] 
+        else:
+            v1, v2 = v1_raw[~np.isnan(v1_raw)], v2_raw[~np.isnan(v2_raw)]
+
+        if len(v1) >= min_n_per_group and len(v2) >= min_n_per_group:
+            try:
+                if test_type == "Student's t-test (Independent, Equal Variance)":
+                    pval = float(ttest_ind(v1, v2, equal_var=True, nan_policy="omit")[1])
+                elif test_type == "Welch's t-test (Independent, Unequal Variance)":
+                    pval = float(ttest_ind(v1, v2, equal_var=False, nan_policy="omit")[1])
+                elif test_type == "Paired t-test (Matched Samples)":
+                    pval = float(ttest_rel(v1, v2, nan_policy="omit")[1])
+                elif test_type == "Mann-Whitney U (Non-parametric Independent)":
+                    pval = float(mannwhitneyu(v1, v2, nan_policy="omit")[1])
+                elif test_type == "Wilcoxon Signed-Rank (Non-parametric Paired)":
+                    pval = float(wilcoxon(v1, v2, nan_policy="omit")[1])
+                else:
+                    pval = np.nan
+            except Exception:
+                pval = np.nan
+        else:
+            pval = np.nan
+            
+        pvals.append(pval)
+
+    df["p-value"] = pvals
+    df["adj.p-value"] = multipletests(np.nan_to_num(df["p-value"], nan=1.0), method="fdr_bh")[1]
+    df["q-value"] = df["adj.p-value"]
+
+    df["Regulation"] = "Not Significant"
+    df.loc[(df["q-value"] < 0.05) & (df["log2FC"] > 1), "Regulation"] = "Upregulated"
+    df.loc[(df["q-value"] < 0.05) & (df["log2FC"] < -1), "Regulation"] = "Downregulated"
+    df["__reg_sort__"] = df["Regulation"].map({
+        "Upregulated": 0, 
+        "Downregulated": 1, 
+        "Not Significant": 2
+    }).fillna(3)
+
+    base_cols = ["Peptide", "Glycan", "Genes", "Proteins", "ProSites", "GlycanClass"]
+    stats_cols = [control_label, test_label, "log2FC", "p-value", "q-value", "Regulation"]
+    debug_cols = ["__row_min_pos__", "__impute_fill__", "__zeros_or_na_before__", "__zeros_or_na_after__"] if add_debug_cols else []
+    
+    keep_cols = (
+        [c for c in base_cols if c in df.columns] + 
+        stats_cols + 
+        debug_cols + 
+        all_cols
+    )
+    
+    return df.sort_values(
+        by=["__reg_sort__", "q-value"], 
+        ascending=[True, True], 
+        na_position="last"
+    ).drop(columns=["__reg_sort__"], errors="ignore")[keep_cols]
+
+
+def compute_diffexp_anova(
+    df: pd.DataFrame, 
+    group1_cols: list[str], 
+    group2_cols: list[str], 
+    group3_cols: list[str], 
+    group1_label: str = "Group1", 
+    group2_label: str = "Group2", 
+    group3_label: str = "Group3",
+    run_tukey: bool = False, 
+    tukey_limit: int = 100, 
+    do_zero_impute: bool = True, 
+    zero_frac: float = 0.2, 
+    do_presence_filter: bool = True, 
+    presence_min_frac: float = 0.40, 
+    presence_rule: str = "or"
+) -> pd.DataFrame:
+    
+    df = df.copy()
+    g1 = [c for c in group1_cols if c in df.columns]
+    g2 = [c for c in group2_cols if c in df.columns]
+    g3 = [c for c in group3_cols if c in df.columns]
+    
+    all_cols = list(dict.fromkeys(g1 + g2 + g3))
+
+    if not (g1 and g2 and g3):
+        raise ValueError("ANOVA requires 3 non-empty groups.")
+        
+    if do_presence_filter:
+        df = filter_by_presence_rule(
+            df=df, 
+            all_samples=all_cols, 
+            group_samples=[g1, g2, g3], 
+            min_frac=presence_min_frac, 
+            presence_rule=presence_rule
+        )
+        
+    if do_zero_impute:
+        df = replace_zeros_rowwise_min_fraction(
+            df=df, 
+            sample_cols=all_cols, 
+            frac=zero_frac, 
+            replace_nan=True
+        )
+
+    for c in all_cols:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+        
+    df[group1_label] = df[g1].mean(axis=1)
+    df[group2_label] = df[g2].mean(axis=1)
+    df[group3_label] = df[g3].mean(axis=1)
+
+    pvals = []
+    for _, row in df.iterrows():
+        v1 = row[g1].dropna().astype(float).values
+        v2 = row[g2].dropna().astype(float).values
+        v3 = row[g3].dropna().astype(float).values
+        
+        if len(v1) < 2 or len(v2) < 2 or len(v3) < 2:
+            pvals.append(np.nan)
+        else:
+            try:
+                pvals.append(float(f_oneway(v1, v2, v3).pvalue))
+            except Exception:
+                pvals.append(np.nan)
+
+    df["p-value"] = pvals
+    df["adj.p-value"] = multipletests(df["p-value"].fillna(1.0), method="fdr_bh")[1]
+    df["q-value"] = df["adj.p-value"]
+    df["Regulation"] = np.where(df["q-value"] < 0.05, "Significant", "Not Significant")
+    
+    base_cols = ["Peptide", "Glycan", "Genes", "Proteins", "ProSites", "GlycanClass"]
+    keep = (
+        [c for c in base_cols if c in df.columns] + 
+        [group1_label, group2_label, group3_label, "p-value", "q-value", "Regulation"] + 
+        all_cols
+    )
+    return df.sort_values("adj.p-value", na_position="last")[keep]
+
+
+
+# -----------------------------------------------------------------------------
+# APP LOGIC
+# -----------------------------------------------------------------------------
+
+def _reset_all_data(clear_cache: bool = False):
+    ss["global_sample_cols"] = []
+    ss["global_group_samples"] = []
+    ss["global_group_labels"] = []
+    ss["global_n_groups"] = 2
+    ss["global_control_group_idx"] = 0
+    ss["global_all_groups"] = []
+    
+    ss["batch_dict"] = {}
+    ss["batch_corrected"] = False
+    
+    ss["show_report"] = False
+    ss["merged_ready"] = False
+    ss["raw_merged_df"] = None
+    ss["merged_df"] = None
+    ss["diffexp_df"] = None
+    ss["filtered_df"] = None
+    ss["diff_done"] = False
+    ss["filtered_ready"] = False
+
+    for k in [
+        "run_pca", "run_corr", "run_overview_heatmap", 
+        "run_peptide_freq", "run_abundance", "run_glycan_class"
+    ]:
+        ss[k] = False
+        
+    for key in [
+        "show_volcano", "show_box", "show_heatmap", 
+        "show_box_gene", "show_lollipop", "show_waterfall"
+    ]:
+        ss[key] = False
+
+    ss["box_gene_list"] = []
+    ss["box_gene_plot"] = False
+    ss["box_gene_cleared"] = False
+    ss["lollipop_gene_ids"] = ""
+    ss["lollipop_gene_list"] = []
+    ss["lollipop_gene_plot"] = False
+    ss["compare_open"] = False
+    ss["filter_open"] = False
+    ss["misc_user_df"] = None
+    ss["misc_user_df_valid"] = False
+
+    ss.pop("final_pdf_bytes", None)
+    ss.pop("final_report_zip_bytes", None)
+    ss.pop("report_waterfall_fig", None)
+    
+    if clear_cache:
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
+
+def _make_upload_sig(*files):
+    if any(f is None for f in files):
+        return None
+    return tuple((f.name, f.size) for f in files)
+
+def init_session_state_defaults():
+    defaults = {
+        "merged_ready": False, 
+        "diff_done": False,
+        "raw_merged_df": None,
+        "merged_df": None, 
+        "diffexp_df": None, 
+        "design_df": None, 
+        "group_col": None, 
+        "batch_col": None, 
+        "tool_usage": {}
+    }
+    for k, v in defaults.items():
+        ss.setdefault(k, v)
+
+def _plot_genes_cb():
+    ss["box_gene_plot"] = True
+
+def _clear_genes_cb(): 
+    ss["box_gene_list"] = []
+    ss["box_gene_plot"] = False
+    ss["box_gene_cleared"] = True
+
+def _plot_lollipop_cb():
+    ss["lollipop_gene_plot"] = True
+
+def _clear_lollipop_cb():
+    ss["lollipop_gene_ids"] = ""
+    ss["lollipop_gene_list"] = []
+    ss["lollipop_gene_plot"] = False
+
+
+def render_professional_lfq_start_panel(pipeline_choice: str, merge_disabled: bool):
+    """Professional first-run landing panel for the GlycoExplorer LFQ app."""
+    if pipeline_choice == "pGlyco (LFQ)":
+        upload_text = "Upload your pGlyco LFQ data matrix using the left sidebar."
+        process_text = "Click Compile LFQ Data Matrix to create the glycopeptide abundance table."
+    else:
+        upload_text = "Upload one or more MSFragger LFQ sample-run files using the left sidebar."
+        process_text = "Click Compile LFQ Data Matrix to join sample runs into one glycopeptide abundance table."
+
+    button_text = "Upload data to enable processing" if merge_disabled else "Compile LFQ Data Matrix"
+
+    st.markdown(
+        """
+        <style>
+        .ge-start-title {
+            font-size: 1.8rem;
+            font-weight: 700;
+            color: #005a9c;
+            margin-bottom: 0.2rem;
+        }
+        .ge-start-subtitle {
+            font-size: 1rem;
+            color: #333333;
+            margin-bottom: 1.5rem;
+            line-height: 1.45;
+        }
+        .ge-step-card {
+            border: 1px solid #d9e2ef;
+            border-radius: 10px;
+            padding: 22px 24px;
+            background: #f8fbff;
+            min-height: 135px;
+        }
+        .ge-step-number {
+            width: 42px;
+            height: 42px;
+            border-radius: 50%;
+            background: #005a9c;
+            color: white;
+            font-weight: 700;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            margin-right: 14px;
+            font-size: 1rem;
+        }
+        .ge-step-heading {
+            font-size: 1.15rem;
+            font-weight: 700;
+            color: #005a9c;
+        }
+        .ge-step-body {
+            color: #333333;
+            margin-left: 58px;
+            margin-top: 8px;
+            font-size: 0.95rem;
+            line-height: 1.45;
+        }
+        .ge-info-box {
+            background: #eef6ff;
+            border-radius: 8px;
+            padding: 16px 20px;
+            margin-top: 24px;
+            color: #004b8d;
+            font-weight: 600;
+        }
+        .ge-warning-box {
+            background: #fff8e5;
+            border-radius: 8px;
+            padding: 16px 20px;
+            margin-top: 14px;
+            color: #8a5a00;
+            font-weight: 600;
+        }
+        .ge-muted-button {
+            border: 1px solid #d9dfe8;
+            border-radius: 7px;
+            padding: 10px 18px;
+            text-align: center;
+            color: #8a94a6;
+            font-weight: 600;
+            margin-top: 28px;
+            background: #ffffff;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        """
+        <div class="ge-start-title">Start Here</div>
+        <div class="ge-start-subtitle">
+            Begin your label-free glycopeptide analysis by uploading the required data from the left panel.
+            Once uploaded, compile the LFQ matrix before moving to group setup, QC, statistics, and visualization.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    col1, arrow_col, col2 = st.columns([0.46, 0.08, 0.46])
+
+    with col1:
+        st.markdown(
+            f"""
+            <div class="ge-step-card">
+                <div>
+                    <span class="ge-step-number">1</span>
+                    <span class="ge-step-heading">Upload Data</span>
+                </div>
+                <div class="ge-step-body">{upload_text}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with arrow_col:
+        st.markdown(
+            "<div style='text-align:center; font-size:2rem; color:#8a94a6; padding-top:45px;'>›</div>",
+            unsafe_allow_html=True,
+        )
+
+    with col2:
+        st.markdown(
+            f"""
+            <div class="ge-step-card">
+                <div>
+                    <span class="ge-step-number">2</span>
+                    <span class="ge-step-heading">Compile Matrix</span>
+                </div>
+                <div class="ge-step-body">{process_text}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.markdown(
+        """
+        <div class="ge-info-box">
+            Upload data using the left sidebar
+            <div style="font-weight:400; margin-top:6px;">
+                Use the file upload section in the left panel to add your LFQ input file(s).
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if merge_disabled:
+        st.markdown(
+            """
+            <div class="ge-warning-box">
+                No data uploaded yet
+                <div style="font-weight:400; margin-top:6px;">
+                    Please upload the required file(s) to enable LFQ data processing.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.markdown(f"<div class='ge-muted-button'>{button_text}</div>", unsafe_allow_html=True)
+
+
+def _create_lf_waterfall_report_fig(
+    diff_df: pd.DataFrame,
+    sig_col: str = "q-value",
+    alpha_thr: float = 0.05,
+    fc_thr: float = 1.0,
+    top_n: int = 5,
+):
+    if diff_df is None or diff_df.empty or "log2FC" not in diff_df.columns:
+        return None
+
+    metric_col = sig_col if sig_col in diff_df.columns else ("q-value" if "q-value" in diff_df.columns else "p-value")
+    if metric_col not in diff_df.columns:
+        return None
+
+    wfl = diff_df.copy()
+    wfl["log2FC"] = pd.to_numeric(wfl["log2FC"], errors="coerce")
+    wfl[metric_col] = pd.to_numeric(wfl[metric_col], errors="coerce")
+    wfl = wfl.dropna(subset=["log2FC", metric_col]).sort_values("log2FC", ascending=False).reset_index(drop=True)
+    if wfl.empty:
+        return None
+
+    wfl["Rank"] = wfl.index + 1
+    wfl["Status"] = "Not Significant"
+    wfl.loc[(wfl["log2FC"] >= fc_thr) & (wfl[metric_col] <= alpha_thr), "Status"] = "Up regulated"
+    wfl.loc[(wfl["log2FC"] <= -fc_thr) & (wfl[metric_col] <= alpha_thr), "Status"] = "Down regulated"
+
+    top_up = wfl[wfl["Status"] == "Up regulated"].head(top_n)
+    top_down = wfl[wfl["Status"] == "Down regulated"].sort_values("log2FC", ascending=True).head(top_n)
+    label_df = pd.concat([top_up, top_down], ignore_index=True)
+
+    if not label_df.empty:
+        label_df = label_df.copy()
+        label_df["Point_ID"] = range(1, len(label_df) + 1)
+        wfl["Point_ID"] = wfl["Rank"].map(label_df.set_index("Rank")["Point_ID"].to_dict())
+    else:
+        wfl["Point_ID"] = np.nan
+
+    colors = {
+        "Up regulated": "#d62728",
+        "Down regulated": "#1f77b4",
+        "Not Significant": "#bdbdbd",
+    }
+
+    fig, ax = plt.subplots(figsize=(8.8, 6.2))
+    for status, sub in wfl.groupby("Status"):
+        ax.scatter(
+            sub["Rank"],
+            sub["log2FC"],
+            s=20,
+            alpha=0.85,
+            color=colors.get(status, "#999999"),
+            label=status,
+        )
+
+    label_plot = wfl.dropna(subset=["Point_ID"]).copy()
+    if not label_plot.empty:
+        x_offset = max(float(wfl["Rank"].max()), 1.0) * 0.012
+        y_offset = max(float(wfl["log2FC"].max() - wfl["log2FC"].min()), 1.0) * 0.018
+        for _, row in label_plot.iterrows():
+            x0 = float(row["Rank"])
+            y0 = float(row["log2FC"])
+            x1 = x0 + x_offset
+            y1 = y0 + (y_offset if y0 >= 0 else -y_offset)
+            ax.plot([x0, x1], [y0, y1], color="gray", linewidth=0.6, alpha=0.8)
+            ax.text(
+                x1,
+                y1,
+                str(int(row["Point_ID"])),
+                fontsize=8,
+                ha="left",
+                va="center",
+                fontweight="bold",
+            )
+
+    ax.axhline(0, color="black", linewidth=1)
+    ax.axhline(fc_thr, color="gray", linestyle="--", linewidth=0.9)
+    ax.axhline(-fc_thr, color="gray", linestyle="--", linewidth=0.9)
+
+    metric_label = "q-value" if "q" in str(metric_col).lower() else "p-value"
+    ax.set_title(
+        f"LFQ Glycopeptide Waterfall ({metric_label} < {alpha_thr}, |log2FC| > {fc_thr})",
+        fontweight="bold",
+    )
+    ax.set_xlabel("Glycopeptide Rank", fontweight="bold")
+    ax.set_ylabel("log2 Fold-Change", fontweight="bold")
+    ax.grid(False)
+    ax.legend(frameon=False, fontsize=8, bbox_to_anchor=(1.02, 1), loc="upper left")
+
+    for spine in ["top", "right"]:
+        ax.spines[spine].set_visible(False)
+
+    fig.tight_layout()
+    return fig
+
+
+def _prepare_lfq_report_figures_for_export():
+    diff_df = ss.get("diffexp_df")
+    if isinstance(diff_df, pd.DataFrame) and not diff_df.empty and "log2FC" in diff_df.columns:
+        if ss.get("report_waterfall_fig") is None:
+            ss["report_waterfall_fig"] = _create_lf_waterfall_report_fig(
+                diff_df=diff_df,
+                sig_col=ss.get("lfq_wfl_sig_col", "q-value" if "q-value" in diff_df.columns else "p-value"),
+                alpha_thr=ss.get("lfq_wfl_alpha", 0.05),
+                fc_thr=ss.get("lfq_wfl_fc", 1.0),
+                top_n=ss.get("lfq_wfl_topn", 5),
+            )
+
+
+def main():
+    init_session_state_defaults()
+
+    st.sidebar.markdown("### GlycoExplorer (LFQ)")
+    st.sidebar.caption("v1.0 | Bioinformatics Workflow")
+    st.sidebar.divider()
+
+    species = "Human"
+    version_label = "v3"
+
+    pipeline_choice = st.sidebar.radio("Select Pipeline Engine", ["pGlyco (LFQ)", "MSFragger (LFQ)"])
+
+    pglyco_upload = None
+    msfragger_uploads = None
+
+    if pipeline_choice == "pGlyco (LFQ)":
+        pglyco_help = """**Required Columns:** `Peptide`, `Genes`, `Proteins`, `ProSites`, `RawName`, `IsotopeArea`, `Glycan(H,N,A,F)`"""
+        pglyco_upload = st.sidebar.file_uploader(
+            "Upload pGlyco LFQ Data Matrix", 
+            type=["csv", "txt", "tsv", "xlsx", "xls"], 
+            key="pglyco_lfq", 
+            help=pglyco_help
+        )
+        merge_disabled = not pglyco_upload
+        new_sig = _make_upload_sig(pglyco_upload)
+    else:
+        msf_help = """**Upload MULTIPLE TSV files** (one per LFQ sample run). E.g., `663_NL.tsv`. Required: `Total Glycan Composition`, `Intensity`, `Peptide`, `Protein ID`"""
+        msfragger_uploads = st.sidebar.file_uploader(
+            "Upload MSFragger Sample Runs", 
+            type=["tsv", "txt"], 
+            accept_multiple_files=True, 
+            key="msf_lfq", 
+            help=msf_help
+        )
+        merge_disabled = len(msfragger_uploads) == 0 if msfragger_uploads else True
+        new_sig = tuple((f.name, f.size) for f in msfragger_uploads) if msfragger_uploads else None
+
+    with st.sidebar.expander("Download Example Datasets", expanded=False):
+        st.caption("Use these example files to see the required formatting and test the LFQ workflow.")
+        script_dir = Path(__file__).resolve().parent
+        example_pglyco_lfq = script_dir / "assets" / "example" / "GELF" / "pGlycoDB.csv"
+        example_msf1 = script_dir / "assets" / "example" / "GELF" / "MSFragger_sample1.tsv"
+        example_msf2 = script_dir / "assets" / "example" / "GELF" / "MSFragger_sample2.tsv"
+
+        st.markdown("**pGlyco (LFQ)**")
+        if example_pglyco_lfq.exists():
+            if st.button(
+                "Save pGlycoDB.csv to Downloads",
+                key="save_ex_pglyco_lfq",
+                width='stretch',
+                help="Save a sample pGlyco LFQ dataset to your Downloads folder."
+            ):
+                try:
+                    outpath = _save_file_to_downloads(example_pglyco_lfq, "pGlycoDB_LFQ_example.csv")
+                    st.success(f"Saved example file to: {outpath}")
+                except Exception as e:
+                    st.error(f"Could not save example file: {e}")
+
+        st.markdown("<div style='padding-top: 10px;'></div>", unsafe_allow_html=True)
+
+        st.markdown("**MSFragger (LFQ)**")
+        col1, col2 = st.columns(2)
+
+        if example_msf1.exists():
+            if col1.button(
+                "Save Sample 1",
+                key="save_ex_msf1",
+                width='stretch',
+                help="Save MSFragger LFQ sample 1 to your Downloads folder."
+            ):
+                try:
+                    outpath = _save_file_to_downloads(example_msf1, "MSFragger_sample1.tsv")
+                    st.success(f"Saved example file to: {outpath}")
+                except Exception as e:
+                    st.error(f"Could not save example file: {e}")
+
+        if example_msf2.exists():
+            if col2.button(
+                "Save Sample 2",
+                key="save_ex_msf2",
+                width='stretch',
+                help="Save MSFragger LFQ sample 2 to your Downloads folder."
+            ):
+                try:
+                    outpath = _save_file_to_downloads(example_msf2, "MSFragger_sample2.tsv")
+                    st.success(f"Saved example file to: {outpath}")
+                except Exception as e:
+                    st.error(f"Could not save example file: {e}")
+
+    if st.sidebar.button(
+        "Reset session data", 
+        key="main_reset_btn", 
+        help="Clear all uploaded files, selections, and generated plots to start a fresh analysis."
+    ):
+        _reset_all_data(clear_cache=True)
+        st.sidebar.success("Session data cleared.")
+        st.rerun()
+
+    if new_sig != ss.get("upload_sig"):
+        ss["upload_sig"] = new_sig
+        if ss.get("merged_ready") or ss.get("diff_done") or ss.get("merged_df") is not None or ss.get("diffexp_df") is not None:
+            _reset_all_data()
+
+    script_dir = Path(__file__).resolve().parent
+    default_dir = script_dir / "assets" / "glycan_images"
+    st.sidebar.subheader("Glycan Image Directory")
+    user_input = st.sidebar.text_input(
+        "Enter folder path (optional):", 
+        value=str(default_dir) if default_dir.exists() else "", 
+        help="Leave blank to use the default path detected automatically."
+    )
+    glycan_image_dir = Path(user_input).expanduser().resolve() if user_input else default_dir
+    
+    if glycan_image_dir.is_dir():
+        st.sidebar.success(f"Glycan image folder found:\n{glycan_image_dir}")
+    else:
+        st.sidebar.error(f"Folder not found:\n{glycan_image_dir}")
+        st.stop()
+
+    # ---------------------- Merge & Process Data ----------------------
+    with st.container(border=True):
+        main_merge_label = "Compile LFQ Data Matrix" if not merge_disabled else "Upload data to enable processing"
+
+        if st.button(
+            main_merge_label,
+            type="primary",
+            disabled=merge_disabled,
+            key="btn_merge",
+            help="Compiles label-free glycopeptide identifications and intensities into an abundance matrix."
+        ):
+            if pipeline_choice == "pGlyco (LFQ)":
+                try:
+                    pglyco_df = read_pglyco_file(pglyco_upload)
+                    pglyco_df = clean_cols(pglyco_df)
+                    pglyco_df = normalize_pglyco_df(pglyco_df)
+
+                    required_common = ["Peptide", "Genes", "Proteins", "ProSites", "RawName"]
+                    glycan_col = None
+                    for col in pglyco_df.columns:
+                        clean_col = re.sub(r'\s+', '', str(col)).lower()
+                        if clean_col in [
+                            "glycan(h,n,a,g,f)", 
+                            "glycan(h,n,a,f)", 
+                            "correctedglycan(h,n,a,g,f)", 
+                            "correctedglycan(h,n,a,f)"
+                        ]:
+                            glycan_col = col
+                            break
+
+                    missing = [c for c in required_common if c not in pglyco_df.columns]
+                    if glycan_col is None:
+                        missing.append("Glycan(H,N,A,G,F) or Glycan(H,N,A,F)")
+                    
+                    if missing:
+                        st.error(f"pGlyco file is missing required columns: {', '.join(missing)}")
+                        st.stop()
+
+                    if pglyco_df.empty:
+                        st.error("Uploaded pGlyco file is empty or unreadable.")
+                        st.stop()
+
+                    merged = build_label_free_matrix_from_pglyco(
+                        pglyco_df, 
+                        species=species, 
+                        version_label=version_label
+                    )
+                    
+                    ss["merged_df"] = merged
+                    ss["raw_merged_df"] = merged.copy()
+                    ss["merged_ready"] = True
+                    ss["diff_done"] = False
+                    ss["diffexp_df"] = None
+                    ss["filtered_df"] = None
+                    ss["filtered_ready"] = False
+                    ss["batch_corrected"] = False
+                    st.success("Successfully built pGlyco label-free matrix!")
+                except Exception as e:
+                    st.error(f"Processing failed: {e}")
+
+            elif pipeline_choice == "MSFragger (LFQ)":
+                try:
+                    with st.spinner(f"Processing and joining {len(msfragger_uploads)} LFQ files..."):
+                        merged = process_msfragger_lfq_files(msfragger_uploads)
+                        if merged.empty:
+                            st.error("No valid glycopeptides found after parsing the uploaded files.")
+                        else:
+                            ss["merged_df"] = merged
+                            ss["raw_merged_df"] = merged.copy()
+                            ss["merged_ready"] = True
+                            ss["diff_done"] = False
+                            ss["diffexp_df"] = None
+                            ss["filtered_df"] = None
+                            ss["filtered_ready"] = False
+                            ss["batch_corrected"] = False
+                            st.success(f"Successfully joined {len(msfragger_uploads)} files into {len(merged)} unique MSFragger glycoforms!")
+                except Exception as e:
+                    st.error(f"MSFragger LFQ Processing failed: {e}")
+
+    # --------------------------------------
+
+    # ---------------------- Show merged LFQ output after processing ----------------------
+    downstream_active = (
+        ss.get("show_global_select") or 
+        ss.get("show_overview") or 
+        ss.get("show_suite") or 
+        ss.get("show_report")
+    )
+
+    if not downstream_active and ss.get("merged_ready") and not df_is_empty(ss.get("merged_df")):
+        merged_display_df = ss["merged_df"]
+
+        with st.expander("Integrated LFQ Glycopeptide Abundance Matrix", expanded=True):
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Total Glycoforms", f"{len(merged_display_df):,}")
+
+            numeric_cols = [
+                c for c in merged_display_df.columns
+                if pd.api.types.is_numeric_dtype(merged_display_df[c]) and c != "PSM_Count"
+            ]
+            m2.metric("Samples Detected", len(numeric_cols))
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            dl_col1, dl_col2, spacer = st.columns([1.5, 1.5, 7])
+
+            csv_bytes = merged_display_df.to_csv(index=False).encode("utf-8")
+
+            if dl_col1.button(
+                "Save CSV",
+                key="save_lfq_master_csv",
+                width="stretch",
+                help="Save the LFQ master matrix as a CSV file."
+            ):
+                try:
+                    outpath = _save_bytes_to_downloads(csv_bytes, "LFQ_master_matrix.csv")
+                    st.success(f"Saved CSV to: {outpath}")
+                except Exception as e:
+                    st.error(f"Could not save CSV: {e}")
+
+            buffer_excel = BytesIO()
+            with pd.ExcelWriter(buffer_excel, engine="openpyxl") as writer:
+                merged_display_df.to_excel(writer, index=False, sheet_name="LFQ_Data")
+            excel_bytes = buffer_excel.getvalue()
+
+            if dl_col2.button(
+                "Save Excel",
+                key="save_lfq_master_excel",
+                width="stretch",
+                help="Save the LFQ master matrix as an Excel spreadsheet."
+            ):
+                try:
+                    outpath = _save_bytes_to_downloads(excel_bytes, "LFQ_master_matrix.xlsx")
+                    st.success(f"Saved Excel to: {outpath}")
+                except Exception as e:
+                    st.error(f"Could not save Excel: {e}")
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            show_grid(merged_display_df, page_size=15, height=450)
+
+
+    if not ss.get("merged_ready") or df_is_empty(ss.get("merged_df")):
+        ss["show_overview"] = False
+        ss["show_suite"] = False
+        ss["show_global_select"] = False
+
+        render_professional_lfq_start_panel(
+            pipeline_choice=pipeline_choice,
+            merge_disabled=merge_disabled
+        )
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        faq_section()
+        return
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    def _reset_overview_flags():
+        ss.update({
+            "run_pca": False, 
+            "run_corr": False, 
+            "run_overview_heatmap": False, 
+            "run_peptide_freq": False, 
+            "run_abundance": False, 
+            "run_glycan_class": False
+        })
+
+    c1, c2, c3, c4 = st.columns(4)
+
+    if c1.button(
+        ("▸ " if not ss["show_global_select"] else "▾ ") + "Data Filtering & Group Specification", 
+        use_container_width=True, 
+        key="btn_global_select"
+    ):
+        ss["show_global_select"] = not ss["show_global_select"]
+        if ss["show_global_select"]:
+            ss["show_overview"], ss["show_suite"], ss["show_report"] = False, False, False 
+            _reset_overview_flags()
+        else:
+            _reset_overview_flags()
+
+    if c2.button(
+        ("▸ " if not ss["show_overview"] else "▾ ") + "Data Integrity Check & Sanity Profiling", 
+        use_container_width=True, 
+        key="btn_overview"
+    ):
+        ss["show_overview"] = not ss["show_overview"]
+        if ss["show_overview"]:
+            ss["show_suite"], ss["show_global_select"], ss["show_report"] = False, False, False 
+            _reset_overview_flags()
+        else:
+            _reset_overview_flags()
+
+    if c3.button(
+        ("▸ " if not ss["show_suite"] else "▾ ") + "Statistical Analysis Suite", 
+        use_container_width=True, 
+        key="btn_suite"
+    ):
+        ss["show_suite"] = not ss["show_suite"]
+        if ss["show_suite"]:
+            ss["show_overview"], ss["show_global_select"], ss["show_report"] = False, False, False 
+            _reset_overview_flags()
+        else:
+            _reset_overview_flags()
+
+    if c4.button(
+        ("▸ " if not ss["show_report"] else "▾ ") + "Results Download", 
+        use_container_width=True, 
+        key="btn_report"
+    ):
+        ss["show_report"] = not ss["show_report"]
+        if ss["show_report"]:
+            ss["show_overview"], ss["show_global_select"], ss["show_suite"] = False, False, False 
+            _reset_overview_flags()
+        else:
+            _reset_overview_flags()
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ====================== DATA FILTERING & GROUP SPECIFICATION ======================
+    if ss["show_global_select"]:
+        df = ss["merged_df"]
+        numeric_cols = sorted(
+            [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and c != 'PSM_Count'], 
+            key=str
+        )
+
+        def clean_label(name: str) -> str:
+            s = re.sub(r"^\s*Abundance\s*:\s*", "", str(name))
+            if ":" in s:
+                s = s.split(":", 1)[-1]
+            return s.strip()
+
+        pretty_labels = {c: clean_label(c) for c in numeric_cols}
+        fmt = lambda x: pretty_labels.get(x, x)
+
+        def _sanitize(selected, allowed):
+            allowed_set = set(allowed)
+            return list(dict.fromkeys([x for x in (selected or []) if x in allowed_set]))
+
+        left, right = st.columns([0.42, 0.58], gap="large")
+
+        with left:
+            with st.container(border=True):
+                st.markdown("#### Define Experimental Groups")
+                default_samples = ss.get("global_sample_cols") or numeric_cols
+                ss["global_sample_cols_ui"] = _sanitize(default_samples, numeric_cols)
+
+                sample_cols = st.multiselect(
+                    "Sample/abundance columns (used everywhere)", 
+                    options=numeric_cols, 
+                    format_func=fmt, 
+                    key="global_sample_cols_ui"
+                )
+                sample_cols = _sanitize(sample_cols, numeric_cols)
+
+                if not sample_cols:
+                    st.warning("Select at least 1 sample column.")
+                    ss.update({
+                        "global_sample_cols": [], 
+                        "global_group_samples": [], 
+                        "global_group_labels": [], 
+                        "global_all_groups": [],
+                        "batch_dict": {}
+                    })
+                else:
+                    ss["global_sample_cols"] = sample_cols
+
+                st.divider()
+                n_groups = st.radio(
+                    "Number of groups", 
+                    [2, 3], 
+                    index=0 if ss.setdefault("global_n_groups_ui", 2) == 2 else 1, 
+                    horizontal=True, 
+                    key="global_n_groups_ui"
+                )
+                ss["global_n_groups"] = n_groups
+
+                n = len(sample_cols)
+                d1 = sample_cols[: max(1, n//3)]
+                d2 = sample_cols[max(1, n//3): max(2, 2*n//3)]
+                d3 = sample_cols[max(2, 2*n//3):]
+                
+                g_groups = ss.get("global_group_samples") or []
+                g_labels = ss.get("global_group_labels") or []
+
+                ss["global_grp1"] = _sanitize(
+                    ss.get("global_grp1", g_groups[0] if len(g_groups) > 0 else d1), 
+                    sample_cols
+                )
+                grp1 = _sanitize(
+                    st.multiselect(
+                        "Group 1 columns", 
+                        options=sample_cols, 
+                        format_func=fmt, 
+                        key="global_grp1"
+                    ), 
+                    sample_cols
+                )
+                g1_label = st.text_input(
+                    "Group 1 label", 
+                    value=ss.setdefault("global_g1_label", g_labels[0] if len(g_labels) > 0 else "Group1"), 
+                    key="global_g1_label"
+                )
+
+                options_g2 = [c for c in sample_cols if c not in set(grp1)]
+                ss["global_grp2"] = _sanitize(
+                    ss.get("global_grp2", g_groups[1] if len(g_groups) > 1 else d2), 
+                    options_g2
+                )
+                grp2 = _sanitize(
+                    st.multiselect(
+                        "Group 2 columns", 
+                        options=options_g2, 
+                        format_func=fmt, 
+                        key="global_grp2"
+                    ), 
+                    options_g2
+                )
+                g2_label = st.text_input(
+                    "Group 2 label", 
+                    value=ss.setdefault("global_g2_label", g_labels[1] if len(g_labels) > 1 else "Group2"), 
+                    key="global_g2_label"
+                )
+
+                grp3, g3_label = [], None
+                if n_groups == 3:
+                    options_g3 = [c for c in sample_cols if c not in set(grp1) and c not in set(grp2)]
+                    ss["global_grp3"] = _sanitize(
+                        ss.get("global_grp3", g_groups[2] if len(g_groups) > 2 else d3), 
+                        options_g3
+                    )
+                    grp3 = _sanitize(
+                        st.multiselect(
+                            "Group 3 columns", 
+                            options=options_g3, 
+                            format_func=fmt, 
+                            key="global_grp3"
+                        ), 
+                        options_g3
+                    )
+                    g3_label = st.text_input(
+                        "Group 3 label", 
+                        value=ss.setdefault("global_g3_label", g_labels[2] if len(g_labels) > 2 else "Group3"), 
+                        key="global_g3_label"
+                    )
+                else:
+                    ss.pop("global_grp3", None)
+                    ss.pop("global_g3_label", None)
+
+                grp2 = _sanitize([c for c in grp2 if c not in set(grp1)], sample_cols)
+                if n_groups == 3:
+                    grp3 = _sanitize([c for c in grp3 if c not in set(grp1) and c not in set(grp2)], sample_cols)
+
+                global_group_samples = [grp1, grp2] + ([grp3] if n_groups == 3 else [])
+                global_group_labels  = [g1_label, g2_label] + ([g3_label] if n_groups == 3 else [])
+
+                ss.update({
+                    "global_group_samples": global_group_samples, 
+                    "global_group_labels": global_group_labels, 
+                    "global_all_groups": list(dict.fromkeys(grp1 + grp2 + (grp3 if n_groups == 3 else [])))
+                })
+
+                nonempty_groups = [
+                    (i, lbl, cols) 
+                    for i, (lbl, cols) in enumerate(zip(global_group_labels, global_group_samples)) 
+                    if cols
+                ]
+                
+                if nonempty_groups:
+                    valid_idxs = [i for i, _, _ in nonempty_groups]
+                    current = ss.get("global_control_group_idx", valid_idxs[0])
+                    if current not in valid_idxs:
+                        current = valid_idxs[0]
+
+                    control_choice = st.selectbox(
+                        "Global Reference (Baseline) Group", 
+                        options=valid_idxs, 
+                        format_func=lambda i: global_group_labels[i], 
+                        index=valid_idxs.index(current), 
+                        key="global_control_choice"
+                    )
+                    ss["global_control_group_idx"] = control_choice
+                    st.caption(f"Global reference set to: **{global_group_labels[control_choice]}**")
+                else:
+                    ss["global_control_group_idx"] = 0
+                    st.info("Select at least one column in any group to set a global reference.")
+
+            # ---- BATCH CORRECTION UI ----
+            with st.container(border=True):
+                st.markdown("#### Batch Effect Correction")
+                apply_batch = st.toggle("Apply Batch Effect Correction", value=ss.get("batch_corrected", False))
+                
+                if apply_batch:
+                    batch_method = st.selectbox(
+                        "Batch Correction Method",
+                        options=[
+                            "ComBat (Empirical Bayes)", 
+                            "Median Centering", 
+                            "Mean Centering", 
+                            "Standardize (Mean + Variance)"
+                        ],
+                        help="ComBat is recommended for LFQ. Requires the 'neuroCombat' package."
+                    )
+                    
+                    num_batches = st.number_input("Number of Batches", min_value=2, max_value=10, value=2)
+                    batch_dict = {}
+                    unassigned_cols = sample_cols.copy()
+                    
+                    for b in range(num_batches):
+                        default_b = unassigned_cols[:max(1, len(unassigned_cols)//(num_batches-b))] if unassigned_cols else []
+                        b_cols = st.multiselect(
+                            f"Batch {b+1} Samples",
+                            options=sample_cols,
+                            default=default_b,
+                            format_func=fmt,
+                            key=f"batch_sel_{b}"
+                        )
+                        batch_dict[f"Batch {b+1}"] = b_cols
+                        unassigned_cols = [c for c in unassigned_cols if c not in b_cols]
+
+                    if st.button("Run Batch Correction", type="primary"):
+                        assigned_samples = set(c for cols in batch_dict.values() for c in cols)
+                        if not assigned_samples:
+                            st.error("Assign at least one sample to a batch.")
+                        else:
+                            try:
+                                # Pre-process for log2 (required for LFQ batch correction methods)
+                                tmp_vals = ss["raw_merged_df"][sample_cols].astype(float)
+                                tmp_vals[tmp_vals <= 0] = np.nan
+                                tmp_log = np.log2(tmp_vals)
+                                
+                                batch_list = list(batch_dict.values())
+                                
+                                corrected_log = apply_batch_correction(tmp_log, batch_list, batch_method)
+                                corrected_raw = (2 ** corrected_log).fillna(0)
+                                
+                                corrected_df = ss["raw_merged_df"].copy()
+                                corrected_df[sample_cols] = corrected_raw
+                                
+                                ss["merged_df"] = corrected_df
+                                ss["batch_dict"] = batch_dict
+                                ss["batch_corrected"] = True
+                                
+                                # Invalidate downstream
+                                ss["diffexp_df"] = None
+                                ss["diff_done"] = False
+                                st.success(f"{batch_method} applied successfully! Downstream analysis will use corrected abundances.")
+                                
+                            except ImportError as i_err:
+                                st.error(str(i_err))
+                            except RuntimeError as r_err:
+                                st.error(str(r_err))
+                            except Exception as e:
+                                st.error(f"Batch correction failed: {e}")
+                else:
+                    if ss.get("batch_corrected", False):
+                        st.info("Batch correction disabled. Restoring raw uncorrected data.")
+                        ss["merged_df"] = ss["raw_merged_df"].copy()
+                        ss["batch_corrected"] = False
+                        ss["diffexp_df"] = None
+                        ss["diff_done"] = False
+                        st.rerun()
+
+        with right:
+            with st.container(border=True):
+                st.markdown("#### Sample Mapping Summary")
+                sample_cols = ss.get("global_sample_cols", [])
+                group_samples = ss.get("global_group_samples", [])
+                group_labels = ss.get("global_group_labels", [])
+                control_idx = ss.get("global_control_group_idx", 0)
+                batch_dict = ss.get("batch_dict", {})
+
+                rows = []
+                for col in sample_cols:
+                    grp_name, grp_num = "Unassigned", None
+                    for i, cols in enumerate(group_samples):
+                        if col in (cols or []):
+                            grp_name = group_labels[i] if i < len(group_labels) else f"Group{i+1}"
+                            grp_num = i + 1
+                            break
+                            
+                    batch_name = "N/A"
+                    for b_name, b_cols in batch_dict.items():
+                        if col in b_cols:
+                            batch_name = b_name if ss.get("batch_corrected") else "Unassigned"
+                            break
+
+                    rows.append({
+                        "Column": col, 
+                        "Sample": fmt(col), 
+                        "Group": grp_name, 
+                        "Group_Number": grp_num, 
+                        "Batch": batch_name,
+                        "Is_Reference": (grp_num is not None and (grp_num - 1) == control_idx)
+                    })
+
+                meta_df = pd.DataFrame(rows)
+                st.dataframe(meta_df, use_container_width=True, hide_index=True)
+                if st.button(
+                    "Save sample metadata CSV to Downloads",
+                    key="save_sample_metadata_csv",
+                    use_container_width=True,
+                    help="Save the sample metadata mapping table to your Downloads folder."
+                ):
+                    try:
+                        outpath = _save_bytes_to_downloads(
+                            meta_df.to_csv(index=False).encode("utf-8"),
+                            "sample_metadata_mapping.csv"
+                        )
+                        st.success(f"Saved sample metadata to: {outpath}")
+                    except Exception as e:
+                        st.error(f"Could not save sample metadata: {e}")
+
+                if not meta_df.empty and (meta_df["Group"] == "Unassigned").sum() > 0:
+                    unassigned_count = (meta_df['Group'] == 'Unassigned').sum()
+                    st.warning(f"{unassigned_count} selected sample(s) are not assigned to any group.")
+
+    # ====================== DATA INTEGRITY CHECK & SANITY PROFILING ======================
+    elif ss.show_overview:
+        df = ss.merged_df
+        numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c]) and c != 'PSM_Count']
+
+        def clean_label(name: str) -> str:
+            s = re.sub(r"^\s*Abundance\s*:\s*", "", str(name))
+            if ":" in s:
+                s = s.split(":", 1)[-1]
+            return s.strip()
+
+        pretty_labels = {c: clean_label(c) for c in numeric_cols}
+        fmt = lambda x: pretty_labels.get(x, x)
+
+        sample_cols = ss.get("global_sample_cols") or numeric_cols
+        group_samples = ss.get("global_group_samples") or []
+        group_labels = ss.get("global_group_labels") or []
+        n_groups = ss.get("global_n_groups", 2)
+
+        if not sample_cols:
+            st.warning("No numeric abundance columns detected.")
+        else:
+            if not group_samples or not any(group_samples):
+                n = len(sample_cols)
+                if n_groups == 3:
+                    group_samples = [
+                        sample_cols[: max(1, n // 3)], 
+                        sample_cols[max(1, n // 3): max(2, 2 * n // 3)], 
+                        sample_cols[max(2, 2 * n // 3):]
+                    ]
+                    group_labels = ["Group1", "Group2", "Group3"]
+                else:
+                    group_samples = [sample_cols[:max(1, n // 2)], sample_cols[max(1, n // 2):]]
+                    group_labels = ["Group1", "Group2"]
+
+            all_groups = ss.get("global_all_groups") or list(dict.fromkeys([c for g in group_samples for c in g]))
+            if not all_groups:
+                all_groups = sample_cols
+
+            left, right = st.columns([0.42, 0.58], gap="large")
+
+            with left:
+                with st.container(border=True):
+                    with st.expander("Assigned Sample Mapping", expanded=False):
+                        if not sample_cols:
+                            st.info("No samples selected in Data Filtering & Group Specification.")
+                        else:
+                            rows = []
+                            for col in sample_cols:
+                                grp_name, grp_num, is_ctrl = "Unassigned", None, False
+                                for i, enumerate_cols in enumerate(group_samples or []):
+                                    if col in (enumerate_cols or []):
+                                        grp_name = group_labels[i] if i < len(group_labels) else f"Group{i+1}"
+                                        grp_num = i + 1
+                                        is_ctrl = (ss.get("global_control_group_idx", None) is not None and i == ss.get("global_control_group_idx", None))
+                                        break
+                                rows.append({
+                                    "Sample": fmt(col), 
+                                    "Group": grp_name, 
+                                    "Group #": grp_num, 
+                                    "Is Reference": is_ctrl
+                                })
+                                
+                            assigned_df = pd.DataFrame(rows)[pd.DataFrame(rows)["Group"] != "Unassigned"].copy()
+                            
+                            if assigned_df.empty:
+                                st.info("No selected samples are assigned to a group yet.")
+                            else:
+                                st.dataframe(assigned_df, use_container_width=True, hide_index=True)
+
+                    mode = st.radio(
+                        "Analysis Module", 
+                        [
+                            "Principal Component Analysis (PCA)", 
+                            "Correlation Matrix", 
+                            "Heatmap", 
+                            "Glycan Classification Summary"
+                        ], 
+                        index=None, 
+                        key="overview_mode",
+                        label_visibility="collapsed"
+                    )
+                    top_n_peptides = st.session_state.get("topn_pf", 20)
+                    
+                    if (mode or "").strip().lower() == "feature frequency profiling": 
+                        top_n_peptides = st.slider("Top N peptides", 5, 50, top_n_peptides, 5, key="topn_pf")
+
+                    if mode == "Principal Component Analysis (PCA)":
+                        st.markdown("**PCA Display Options**")
+                        data_for_pca = df[all_groups].dropna()
+                        if not data_for_pca.empty and len(data_for_pca.columns) > 0:
+                            n_comps = min(10, data_for_pca.shape[0], data_for_pca.shape[1])
+                            pc_cols = [f"PC{i+1}" for i in range(n_comps)]
+                        else:
+                            pc_cols = ["PC1", "PC2"]
+                        
+                        col_x, col_y = st.columns(2)
+                        with col_x:
+                            ss["pca_x"] = st.selectbox("X-axis Component", options=pc_cols, index=0, key="pca_x_ui")
+                        with col_y:
+                            ss["pca_y"] = st.selectbox(
+                                "Y-axis Component", 
+                                options=pc_cols, 
+                                index=1 if len(pc_cols) > 1 else 0, 
+                                key="pca_y_ui"
+                            )
+                            
+                        ss["pca_draw_ellipses"] = st.checkbox("Draw confidence ellipses", value=True, key="pca_ellipses_ui")
+                        
+                        st.markdown("**Customize Group Colors**")
+                        default_palette = ["#b3e2cd", "#fdcdac", "#cbd5e8", "#decbe4", "#ccebc5", "#fed9a6"]
+                        ss["pca_palette"] = {}
+                        cols = st.columns(len(group_labels))
+                        for i, label in enumerate(group_labels):
+                            with cols[i % len(cols)]:
+                                ss["pca_palette"][label] = st.color_picker(
+                                    label, 
+                                    value=default_palette[i % len(default_palette)], 
+                                    key=f"pca_color_{i}_ui"
+                                )    
+                    if mode == "Heatmap":
+                        st.markdown("**Overview Heatmap options**")
+                        ss["overview_hm_topn"] = st.slider("Top N most variable features", 10, 200, 50, key="overview_hm_topn_ui")
+                        ss["overview_hm_norm"] = st.radio("Data Scaling", ["Z-score", "Raw Abundance"], key="overview_hm_norm_ui", horizontal=True)
+
+                    flags = {
+                        "Principal Component Analysis (PCA)": dict(
+                            run_pca=True, run_corr=False, run_overview_heatmap=False, 
+                            run_peptide_freq=False, run_abundance=False, run_glycan_class=False
+                        ), 
+                        "Correlation Matrix": dict(
+                            run_pca=False, run_corr=True, run_overview_heatmap=False, 
+                            run_peptide_freq=False, run_abundance=False, run_glycan_class=False
+                        ), 
+                        "Heatmap": dict(
+                            run_pca=False, run_corr=False, run_overview_heatmap=True, 
+                            run_peptide_freq=False, run_abundance=False, run_glycan_class=False
+                        ),
+                        "Glycan Classification Summary": dict(
+                            run_pca=False, run_corr=False, run_overview_heatmap=False, 
+                            run_peptide_freq=False, run_abundance=False, run_glycan_class=True
+                        )
+                    }
+                    
+                    for k in [
+                        "run_pca", "run_corr", "run_overview_heatmap", 
+                        "run_peptide_freq", "run_abundance", "run_glycan_class"
+                    ]:
+                        ss[k] = False
+                        
+                    if mode is not None:
+                        ss.update(flags[mode])
+
+            with right:
+                if ss.get("run_pca", False):
+                    if len(all_groups) >= 1:
+                        if ss.get("batch_corrected", False) and ss.get("raw_merged_df") is not None:
+                            #st.subheader("PCA: Before vs. After Batch Correction")
+                            pca_col1, pca_col2 = st.columns(2)
+                            
+                            with pca_col1:
+                                st.markdown("**Before Correction (Raw Data)**")
+                                create_pca_plot(
+                                    df=ss["raw_merged_df"], 
+                                    group_samples=group_samples, 
+                                    group_labels=group_labels,
+                                    pc_x=ss.get("pca_x", "PC1"),
+                                    pc_y=ss.get("pca_y", "PC2"),
+                                    draw_ellipses=ss.get("pca_draw_ellipses", False),
+                                    palette=ss.get("pca_palette", None),
+                                    quant_mode="LFQ",
+                                    key_suffix="before_batch"
+                                )
+                                
+                            with pca_col2:
+                                st.markdown("**After Correction (Batch-Corrected)**")
+                                create_pca_plot(
+                                    df=df, # currently active df 
+                                    group_samples=group_samples, 
+                                    group_labels=group_labels,
+                                    pc_x=ss.get("pca_x", "PC1"),
+                                    pc_y=ss.get("pca_y", "PC2"),
+                                    draw_ellipses=ss.get("pca_draw_ellipses", False),
+                                    palette=ss.get("pca_palette", None),
+                                    quant_mode="LFQ",
+                                    key_suffix="after_batch"
+                                )
+                        else:
+                            create_pca_plot(
+                                df=df, 
+                                group_samples=group_samples, 
+                                group_labels=group_labels,
+                                pc_x=ss.get("pca_x", "PC1"),
+                                pc_y=ss.get("pca_y", "PC2"),
+                                draw_ellipses=ss.get("pca_draw_ellipses", False),
+                                palette=ss.get("pca_palette", None),
+                                quant_mode="LFQ",
+                                key_suffix="single_pca"
+                            )
+                    else:
+                        st.info("No samples available for PCA (check global selection).")
+                elif ss.get("run_corr", False):
+                    if len(all_groups) >= 2:
+                        fig_obj = create_sample_corr_heatmap(df, all_groups)
+                        _add_desktop_plot_save_buttons(
+                            fig_obj,
+                            "LFQ_sample_correlation_heatmap",
+                            "lfq_corr_heatmap"
+                        )
+                    else:
+                        st.warning("Need at least two sample columns for correlation heatmap.")
+                elif ss.get("run_overview_heatmap", False):
+                    if len(all_groups) >= 2:
+                        fig_obj = create_overview_heatmap(
+                            df=df, 
+                            sample_cols=all_groups, 
+                            top_n=ss.get("overview_hm_topn", 50), 
+                            norm_type=ss.get("overview_hm_norm", "Z-score"),
+                            quant_mode="LFQ"
+                        )
+                        if fig_obj is not None:
+                            st.session_state["report_overview_heatmap_fig"] = fig_obj
+                        
+                    else:
+                        st.warning("Need at least two sample columns to generate a heatmap.")
+                elif ss.get("run_peptide_freq", False):
+                    fig_obj = create_peptide_frequency_plot(df, "Peptide", top_n_peptides)
+                    _add_desktop_plot_save_buttons(
+                        fig_obj,
+                        "LFQ_peptide_frequency",
+                        "lfq_peptide_frequency"
+                    )
+                elif ss.get("run_abundance", False):
+                    if len(all_groups) >= 1:
+                        fig_obj = create_abundance_density(df, all_groups)
+                        _add_desktop_plot_save_buttons(
+                            fig_obj,
+                            "LFQ_abundance_density",
+                            "lfq_abundance_density"
+                        )
+                    else:
+                        st.info("No numeric sample columns detected for abundance density.")
+                elif ss.get("run_glycan_class", False):
+                    fig_obj = create_glycan_class_summary(df, "GlycanClass")
+                    
+                else:
+                    st.info("Choose an Analysis Module on the left to begin.")
+
+    # ====================== STATISTICAL ANALYSIS SUITE ======================
+    if ss["show_suite"]:
+        tabs = st.tabs(["Differential Analysis", "Results Visualization"])
+
+        with tabs[0]:
+            merged_df = ss.get("merged_df")
+            if df_is_empty(merged_df):
+                st.info("Upload and process data first.")
+            else:
+                group_samples = ss.get("global_group_samples", [])
+                group_labels = ss.get("global_group_labels", [])
+                n_groups = ss.get("global_n_groups", 2)
+                ctrl_idx = ss.get("global_control_group_idx", 0)
+                
+                nonempty_groups = [
+                    (i, lbl, cols) 
+                    for i, (lbl, cols) in enumerate(zip(group_labels, group_samples)) 
+                    if cols
+                ]
+                
+                if len(nonempty_groups) < 2: 
+                    st.warning("You must assign samples to at least **two different groups** in the 'Data Filtering & Group Specification' module before running statistical analysis.")
+                else:
+                    valid_idxs = [i for i, _, _ in nonempty_groups]
+                    if ctrl_idx not in valid_idxs:
+                        ctrl_idx = valid_idxs[0]
+                        ss["global_control_group_idx"] = valid_idxs[0]
+                        
+                    ss.update({
+                        "group_samples": group_samples, 
+                        "group_labels": group_labels, 
+                        "control_group_idx": ctrl_idx, 
+                        "all_groups": list(dict.fromkeys([c for g in group_samples for c in g]))
+                    })
+
+                    with st.expander("Current Group Specification (read-only)", expanded=True):
+                        st.write(f"**Number of groups:** {n_groups}\n**Reference group:** {group_labels[ctrl_idx]}")
+                        for i, (lbl, cols) in enumerate(zip(group_labels, group_samples), start=1):
+                            st.write(f"**Group {i} — {lbl}:** {len(cols)} samples")
+                            st.caption(", ".join([str(c) for c in cols]) if cols else "(empty)")
+
+                    ss.setdefault("compare_open", False)
+                    ss.setdefault("filter_open", False)
+                    
+                    if st.button(
+                        ("▸ " if not ss["compare_open"] else "▾ ") + "Select Statistical Test", 
+                        key="btn_toggle_compare", 
+                        use_container_width=True
+                    ):
+                        ss["compare_open"] = not ss["compare_open"]
+
+                    if not ss["compare_open"]:
+                        st.info("Click Select Statistical Test to choose pairwise or ANOVA and run the analysis.")
+                    else:
+                        with st.container(border=True):
+                            st.markdown("#### Test Parameters and Execution")
+                            with st.expander("Parameter Definitions & Guide", expanded=False):
+                                st.markdown(
+                                    "**Preprocessing:**\n"
+                                    "* **Replace 0/NA:** Log-fold calculations fail on zeros. Replaces missing values with 20% of the minimum positive intensity.\n"
+                                    "* **Filter by presence:** Removes sparse glycopeptides.\n"
+                                    "* **Presence threshold:** Fraction of samples that must contain a valid (>0) intensity.\n"
+                                    "* **Presence rule:** Apply across Total samples, or within At least one group.\n\n"
+                                    "**Statistical Testing:**\n"
+                                    "* **Experimental design:** Pairwise vs ANOVA.\n"
+                                    "* **Statistical test:** Parametric vs Non-parametric equivalents."
+                                )
+
+                            nonempty = [(lbl, cols) for lbl, cols in zip(group_labels, group_samples) if cols]
+                            can_pairwise = len(nonempty) >= 2
+                            can_anova = (len(nonempty) == 3) and (n_groups == 3)
+
+                            with st.form("run_diff_form"):
+                                comparison_choices = []
+                                if can_pairwise:
+                                    comparison_choices.append("Pairwise")
+                                else:
+                                    comparison_choices.append("Pairwise — need ≥2 non-empty groups")
+                                    
+                                if can_anova:
+                                    comparison_choices.append("Three-group ANOVA")
+                                else:
+                                    comparison_choices.append("Three-group ANOVA — need exactly 3 non-empty groups")
+                                    
+                                comparison_type = st.radio("Select experimental design:", comparison_choices, index=0)
+
+                                selected_pair, pairs, specific_test = None, {}, "Student's t-test (Independent, Equal Variance)"
+                                if comparison_type.startswith("Pairwise"):
+                                    if not can_pairwise:
+                                        st.warning("Please define at least two non-empty groups.")
+                                    else:
+                                        labels = [lbl for lbl, _ in nonempty]
+                                        pairs = {
+                                            f"{labels[i]} vs {labels[j]}": (
+                                                nonempty[i][1], 
+                                                nonempty[j][1], 
+                                                labels[i], 
+                                                labels[j]
+                                            ) 
+                                            for i in range(len(labels)) 
+                                            for j in range(i + 1, len(labels))
+                                        }
+                                        col1, col2 = st.columns(2)
+                                        selected_pair = col1.selectbox("Select pairwise comparison:", list(pairs.keys()))
+                                        specific_test = col2.selectbox(
+                                            "Select statistical test:", 
+                                            [
+                                                "Student's t-test (Independent, Equal Variance)", 
+                                                "Welch's t-test (Independent, Unequal Variance)", 
+                                                "Paired t-test (Matched Samples)", 
+                                                "Mann-Whitney U (Non-parametric Independent)", 
+                                                "Wilcoxon Signed-Rank (Non-parametric Paired)"
+                                            ]
+                                        )
+                                else:
+                                    selected_pair = "Three-group ANOVA"
+                                
+                                st.divider()
+                                st.markdown("### Preprocessing (before statistics)")
+                                do_zero_impute = st.checkbox("Replace 0/NA intensities before differential", value=True)
+                                zero_frac = 0.2  
+                                do_presence_filter = st.checkbox("Filter by presence (drop sparse rows)", value=True)
+                                presence_min_frac = st.slider("Presence threshold (fraction)", 0.05, 1.00, 0.40, 0.05)
+                                
+                                rule_options = {
+                                    "Total samples only": "all_only", 
+                                    "At least one group only": "group_only", 
+                                    "OR: Total samples OR one group": "or", 
+                                    "AND: Total samples AND one group": "and"
+                                }
+                                rule_choice = st.radio(
+                                    "Presence rule", 
+                                    list(rule_options.keys()), 
+                                    index=2
+                                )
+                                presence_rule_key = rule_options[rule_choice]
+
+                                run_button = st.form_submit_button("Run Analysis", type="primary")
+
+                            if run_button:
+                                ss["filter_open"] = False
+                                try:
+                                    if comparison_type.startswith("Pairwise"):
+                                        if not can_pairwise or not selected_pair:
+                                            st.error("Define at least two non-empty groups and pick a comparison.")
+                                        else:
+                                            group1, group2, label1, label2 = pairs[selected_pair]
+                                            ctrl_label = group_labels[ctrl_idx] if ctrl_idx < len(group_labels) else label1
+                                            
+                                            if ctrl_label == label1:
+                                                control_cols, test_cols, control_lab, test_lab = group1, group2, label1, label2
+                                            elif ctrl_label == label2:
+                                                control_cols, test_cols, control_lab, test_lab = group2, group1, label2, label1
+                                            else:
+                                                control_cols, test_cols, control_lab, test_lab = group1, group2, label1, label2
+
+                                            diffexp_df = compute_diffexp(
+                                                df=merged_df, 
+                                                control_cols=control_cols, 
+                                                test_cols=test_cols, 
+                                                control_label=control_lab, 
+                                                test_label=test_lab, 
+                                                test_type=specific_test, 
+                                                do_zero_impute=do_zero_impute, 
+                                                zero_frac=zero_frac, 
+                                                do_presence_filter=do_presence_filter, 
+                                                presence_min_frac=presence_min_frac, 
+                                                presence_rule=presence_rule_key, 
+                                                group_samples_for_presence=[control_cols, test_cols]
+                                            )
+                                            ss.update({
+                                                "pairwise_control_label": control_lab, 
+                                                "pairwise_test_label": test_lab, 
+                                                "pairwise_control_cols": control_cols, 
+                                                "pairwise_test_cols": test_cols, 
+                                                "diffexp_df": diffexp_df, 
+                                                "diff_done": True
+                                            })
+                                            st.success(f"Differential analysis complete: {selected_pair}")
+                                    else:
+                                        if not can_anova:
+                                            st.error("Provide exactly three non-empty groups for ANOVA.")
+                                        else:
+                                            diffexp_df = compute_diffexp_anova(
+                                                df=merged_df, 
+                                                group1_cols=group_samples[0], 
+                                                group2_cols=group_samples[1], 
+                                                group3_cols=group_samples[2], 
+                                                group1_label=group_labels[0], 
+                                                group2_label=group_labels[1], 
+                                                group3_label=group_labels[2], 
+                                                run_tukey=False, 
+                                                do_zero_impute=do_zero_impute, 
+                                                zero_frac=zero_frac, 
+                                                do_presence_filter=do_presence_filter, 
+                                                presence_min_frac=presence_min_frac, 
+                                                presence_rule=presence_rule_key
+                                            )
+                                            ss.update({
+                                                "diffexp_df": diffexp_df, 
+                                                "diff_done": True
+                                            })
+                                            st.success(f"Differential analysis complete: {selected_pair}")
+                                except Exception as e:
+                                    st.error(f"Differential analysis failed: {e}")
+
+                    if ss.get("diff_done") and df_is_nonempty(ss.get("diffexp_df")):
+                        show_grid(ss["diffexp_df"], page_size=20, height=500)
+                        
+                        st.divider()
+                        st.markdown("#### Filter & Download Results")
+                        with st.expander("Save Full Dataset (Unfiltered)", expanded=False):
+                            dl_col1, dl_col2, spacer = st.columns([1.5, 1.5, 7])
+                            diff_csv_bytes = ss["diffexp_df"].to_csv(index=False).encode("utf-8")
+                            if dl_col1.button(
+                                "Save CSV",
+                                key="save_diffexp_lf_csv",
+                                width='stretch',
+                                help="Save the full unfiltered differential results as CSV."
+                            ):
+                                try:
+                                    outpath = _save_bytes_to_downloads(
+                                        diff_csv_bytes,
+                                        "diffexp_results_glycoexplorer_LF.csv"
+                                    )
+                                    st.success(f"Saved CSV to: {outpath}")
+                                except Exception as e:
+                                    st.error(f"Could not save CSV: {e}")
+
+                            buffer_diff = BytesIO()
+                            with pd.ExcelWriter(buffer_diff, engine="openpyxl") as writer:
+                                ss["diffexp_df"].to_excel(writer, index=False, sheet_name="Differential_Results")
+                            diff_excel_bytes = buffer_diff.getvalue()
+
+                            if dl_col2.button(
+                                "Save Excel to Downloads",
+                                key="save_diffexp_lf_excel",
+                                width='stretch',
+                                help="Save the full unfiltered differential results as Excel."
+                            ):
+                                try:
+                                    outpath = _save_bytes_to_downloads(
+                                        diff_excel_bytes,
+                                        "diffexp_results_glycoexplorer_LF.xlsx"
+                                    )
+                                    st.success(f"Saved Excel to: {outpath}")
+                                except Exception as e:
+                                    st.error(f"Could not save Excel: {e}")
+
+                        with st.container(border=True):
+                            st.markdown("**Filter Significant Features**")
+                            diff_df = ss["diffexp_df"]
+                            is_anova = "log2FC" not in ss["diffexp_df"].columns
+                            
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                sig_metric = st.selectbox(
+                                    "Significance Metric", 
+                                    ["q-value", "p-value"] if "q-value" in diff_df.columns else ["p-value"], 
+                                    key="filter_metric"
+                                )
+                                alpha_thr = st.number_input(
+                                    f"{sig_metric} cutoff (<)", 
+                                    0.05, 
+                                    step=0.01, 
+                                    format="%.4f", 
+                                    key="filter_alpha"
+                                )
+                            with col2:
+                                if not is_anova:
+                                    fc_thr = st.number_input("|log2FC| cutoff (>)", 1.0, step=0.5, format="%.2f", key="filter_fc")
+                                else:
+                                    fc_thr = 0.0
+                                    st.info("Fold-change filtering is not applicable for ANOVA.")
+
+                            if st.button("Apply Filters & View Subset", type="primary", key="btn_apply_filter"):
+                                mask = diff_df[sig_metric] < alpha_thr
+                                if not is_anova:
+                                    mask = mask & (diff_df["log2FC"].abs() > fc_thr)
+                                ss.update({"filtered_df": diff_df[mask].copy(), "filtered_ready": True})
+                                
+                            if ss.get("filtered_ready") and ss.get("filtered_df") is not None:
+                                f_df = ss["filtered_df"]
+                                st.success(f"Retained **{len(f_df)}** significant features matching the criteria.")
+                                if not f_df.empty:
+                                    show_grid(f_df, page_size=10, height=300)
+                                    f_col1, f_col2, _ = st.columns([1.5, 1.5, 7])
+                                    
+                                    buf_f_csv, buf_f_xlsx = BytesIO(), BytesIO()
+                                    f_df.to_csv(buf_f_csv, index=False)
+                                    with pd.ExcelWriter(buf_f_xlsx, engine='openpyxl') as writer:
+                                        f_df.to_excel(writer, index=False, sheet_name='Filtered_Results')
+                                        
+                                    if f_col1.button(
+                                        "Save Filtered CSV to Downloads",
+                                        key="save_filtered_lf_csv",
+                                        width='stretch',
+                                        help="Save the filtered differential results as CSV."
+                                    ):
+                                        try:
+                                            outpath = _save_bytes_to_downloads(
+                                                buf_f_csv.getvalue(),
+                                                "filtered_differential_results_LF.csv"
+                                            )
+                                            st.success(f"Saved filtered CSV to: {outpath}")
+                                        except Exception as e:
+                                            st.error(f"Could not save filtered CSV: {e}")
+
+                                    if f_col2.button(
+                                        "Save Filtered Excel to Downloads",
+                                        key="save_filtered_lf_excel",
+                                        width='stretch',
+                                        help="Save the filtered differential results as Excel."
+                                    ):
+                                        try:
+                                            outpath = _save_bytes_to_downloads(
+                                                buf_f_xlsx.getvalue(),
+                                                "filtered_differential_results_LF.xlsx"
+                                            )
+                                            st.success(f"Saved filtered Excel to: {outpath}")
+                                        except Exception as e:
+                                            st.error(f"Could not save filtered Excel: {e}")
+
+        # ------------------- TAB: Results Visualizations -------------------
+        with tabs[1]:
+            if df_is_empty(ss.get("diffexp_df")):
+                st.warning("Please complete the Differential Analysis first.")
+            else:
+                diffexp_df = ss.get("diffexp_df", pd.DataFrame())
+                is_anova = "log2FC" not in ss.get("diffexp_df", pd.DataFrame()).columns
+                
+                group_samples = ss.get("group_samples", [])
+                group_labels = ss.get("group_labels", [])
+                ctrl_idx = ss.get("control_group_idx", 0)
+                ctrl_idx = min(max(ctrl_idx, 0), len(group_samples) - 1) if group_samples else 0
+
+                control_group = group_samples[ctrl_idx] if len(group_samples) > ctrl_idx else []
+                control_label = group_labels[ctrl_idx] if len(group_labels) > ctrl_idx else "Reference"
+                
+                other_indices = [i for i in range(len(group_samples)) if i != ctrl_idx]
+                test_a_group = group_samples[other_indices[0]] if len(other_indices) > 0 else []
+                test_a_label = group_labels[other_indices[0]] if len(other_indices) > 0 else "Test"
+
+                if not is_anova and ss.get("pairwise_control_cols") and ss.get("pairwise_test_cols"):
+                    control_group, test_a_group = ss["pairwise_control_cols"], ss["pairwise_test_cols"]
+                    control_label = ss.get("pairwise_control_label", control_label)
+                    test_a_label = ss.get("pairwise_test_label", test_a_label)
+
+                left, right = st.columns([0.42, 0.58], gap="large")
+                for key in ["show_volcano", "show_box", "show_heatmap", "show_box_gene", "show_lollipop", "show_waterfall"]:
+                    ss.setdefault(key, False)
+
+                with left:
+                    with st.container(border=True):
+                        modes = (
+                            ["Box plot", "Heatmap", "Box plot (Gene)", "Lollipop plot"] 
+                            if is_anova 
+                            else ["Volcano", "Waterfall", "Box plot", "Heatmap", "Box plot (Gene)", "Lollipop plot"]
+                        )
+                        mode = st.radio(
+                            "Select Analysis Module", 
+                            modes, 
+                            index=None, 
+                            key="explore_mode", 
+                            horizontal=False,
+                            label_visibility="collapsed"
+                        )
+                        
+                        flags = {
+                            "Volcano": dict(
+                                show_volcano=True, show_waterfall=False, show_box=False, show_heatmap=False, 
+                                show_box_gene=False, show_lollipop=False
+                            ),
+                            "Waterfall": dict(
+                                show_volcano=False, show_waterfall=True, show_box=False, show_heatmap=False,
+                                show_box_gene=False, show_lollipop=False
+                            ), 
+                            "Box plot": dict(
+                                show_volcano=False, show_waterfall=False, show_box=True, show_heatmap=False, 
+                                show_box_gene=False, show_lollipop=False
+                            ), 
+                            "Heatmap": dict(
+                                show_volcano=False, show_waterfall=False, show_box=False, show_heatmap=True, 
+                                show_box_gene=False, show_lollipop=False
+                            ), 
+                            "Box plot (Gene)": dict(
+                                show_volcano=False, show_waterfall=False, show_box=False, show_heatmap=False, 
+                                show_box_gene=True, show_lollipop=False
+                            ), 
+                            "Lollipop plot": dict(
+                                show_volcano=False, show_waterfall=False, show_box=False, show_heatmap=False, 
+                                show_box_gene=False, show_lollipop=True
+                            )
+                        }
+                        
+                        for k in ["show_volcano","show_waterfall","show_box","show_heatmap","show_box_gene","show_lollipop"]:
+                            ss[k] = False
+                            
+                        if mode is not None:
+                            ss.update(flags[mode])
+
+                        if ss.get("show_volcano", False):
+                            st.markdown("**Volcano options**")
+                            sig_col = st.radio("Significance metric", ["p-value", "q-value"], key="volcano_sig_col", horizontal=True)
+                            sig_threshold = st.slider(f"{sig_col} threshold", 1e-5, 0.1, 0.05, key="volcano_sig_threshold", format="%.5f")
+                            log2fc_threshold = st.slider("log2FC threshold", 0.5, 3.0, 1.0, key="volcano_logfc")
+                            top_n = st.slider("Top N markers to annotate", 1, 50, 10, key="volcano_topn")
+                            top_mode = st.radio("Highlight Top Hits:", ["all", "up", "down", "up-down"], index=3, key="volcano_topmode", horizontal=True)
+
+                        elif ss.get("show_waterfall", False):
+                            st.markdown("**Waterfall options**")
+                            metric_opts = [c for c in ["q-value", "p-value"] if c in diffexp_df.columns]
+                            if not metric_opts:
+                                metric_opts = ["p-value"]
+                            wfl_sig_col = st.radio("Significance metric", metric_opts, key="lfq_wfl_sig_col", horizontal=True)
+                            wfl_alpha_thr = st.slider(f"{wfl_sig_col} threshold", 1e-5, 0.1, 0.05, key="lfq_wfl_alpha", format="%.5f")
+                            wfl_fc_thr = st.slider("log2FC threshold", 0.5, 3.0, 1.0, key="lfq_wfl_fc")
+                            wfl_top_n = st.slider("Top N up/down features", 3, 20, 5, key="lfq_wfl_topn")
+                            
+                            st.caption(
+                                "Waterfall is rendered full-width below so the structural table has enough room."
+                            )
+
+                        elif ss.get("show_box", False):
+                            st.markdown("**Box plot options**")
+                            sig_col_box = st.radio("Significance metric", ["p-value", "q-value"], key="box_sig_col", horizontal=True)
+                            top_n_box = st.slider("Top N markers to display", 1, 50, 10, key="box_topn")
+                            
+                            st.markdown("**Customize Group Colors**")
+                            if is_anova:
+                                ss["box_anova_colors"] = {}
+                                default_palette = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
+                                cols = st.columns(len(group_labels))
+                                for i, label in enumerate(group_labels):
+                                    with cols[i]:
+                                        ss["box_anova_colors"][label] = st.color_picker(
+                                            label, 
+                                            value=default_palette[i % len(default_palette)], 
+                                            key=f"box_anova_color_{i}"
+                                        )
+                            else:
+                                c1, c2 = st.columns(2)
+                                with c1:
+                                    st.color_picker(f"Color for {control_label}", value="#1f77b4", key="box_color_ctrl")
+                                with c2:
+                                    st.color_picker(f"Color for {test_a_label}", value="#d62728", key="box_color_test")
+
+                        elif ss.get("show_heatmap", False):
+                            st.markdown("**Heatmap options**")
+                            sig_col_heatmap = st.radio("Significance metric", ["p-value", "q-value"], key="heatmap_sig_col", horizontal=True)
+                            top_n_heatmap = st.slider("Top N markers to display", 1, max(10, len(diffexp_df)), 25, key="heatmap_topn")
+                            normalize_heatmap = st.radio("Normalize data", ["Z-score", "Raw Abundance"], key="heatmap_norm", horizontal=True)
+                            cluster_option = st.selectbox("Clustering", ["Hierarchical", "K-Means", "None"], key="heatmap_cluster")
+                            
+                            st.markdown("Customize Group Colors")
+                            if is_anova:
+                                default_palette = ["#87CEEB", "#FA8072", "#90EE90", "#DDA0DD", "#F0E68C"]
+                                ss["heatmap_anova_colors"] = {}
+                                cols = st.columns(len(group_labels))
+                                for i, label in enumerate(group_labels):
+                                    with cols[i]:
+                                        ss["heatmap_anova_colors"][label] = st.color_picker(
+                                            label, 
+                                            value=default_palette[i % len(default_palette)], 
+                                            key=f"hm_anova_color_{i}"
+                                        )
+                            else:
+                                c1, c2 = st.columns(2)
+                                with c1:
+                                    st.color_picker(control_label, value="#87CEEB", key="hm_color_ctrl")
+                                with c2:
+                                    st.color_picker(test_a_label, value="#FA8072", key="hm_color_test")
+                            
+                        elif ss.get("show_box_gene", False):
+                            st.markdown("**Box plots for selected Gene IDs**")
+                            user_input_genes = st.text_area(
+                                "Enter Gene IDs to plot (one per line or comma-separated)", 
+                                key="box_gene_ids", 
+                                placeholder="e.g.\nACTB\nGAPDH, MUC1\nTP53"
+                            )
+                            user_genes = [g.strip() for g in re.split(r"[,\n;\t ]+", user_input_genes) if g.strip()]
+                            
+                            ss.update({
+                                "box_gene_list": user_genes, 
+                                "box_gene_plot": ss.setdefault("box_gene_plot", False)
+                            })
+                            
+                            col_a, col_b = st.columns(2)
+                            with col_a:
+                                st.button(
+                                    "Plot selected genes", 
+                                    key="btn_plot_genes", 
+                                    type="primary", 
+                                    on_click=_plot_genes_cb, 
+                                    disabled=(len(user_genes) == 0)
+                                )
+                            with col_b:
+                                st.button("Clear selection", key="btn_clear_genes", on_click=_clear_genes_cb)
+
+                        elif ss.get("show_lollipop", False):
+                            st.markdown("**Lollipop plot options**")                            
+                            metric_opts = ["q-value", "p-value"] if "q-value" in diffexp_df.columns else ["p-value"]
+                            ss["lollipop_sig_col"] = st.radio("Significance metric", metric_opts, key="lollipop_sig_col_ui", horizontal=True)
+                            ss["lollipop_show_legend"] = st.checkbox("Distinguish glycans with shapes and legend", value=False, key="lollipop_legend_ui") 
+                            
+                            if "Genes" in diffexp_df.columns:
+                                all_genes_raw = diffexp_df["Genes"].dropna().astype(str).tolist()
+                                unique_genes = set()
+                                for g_str in all_genes_raw:
+                                    for g in re.split(r"[,\s;]+", g_str):
+                                        if g.strip():
+                                            unique_genes.add(g.strip())
+                                unique_genes = sorted(list(unique_genes))
+                            else:
+                                unique_genes = []
+
+                            selected_gene = st.selectbox(
+                                "Select a Gene ID", 
+                                options=["-- Select a gene --"] + unique_genes, 
+                                key="lollipop_gene_select"
+                            )
+
+                            can_plot = False
+                            if selected_gene != "-- Select a gene --":
+                                ss["lollipop_gene_list"] = [selected_gene]
+                                can_plot = True
+                            else:
+                                ss["lollipop_gene_list"] = []
+
+                            col_a, col_b = st.columns(2)
+                            with col_a:
+                                st.button(
+                                    "Plot gene", 
+                                    key="btn_plot_lollipop_gene", 
+                                    type="primary",
+                                    on_click=_plot_lollipop_cb, 
+                                    disabled=not can_plot,
+                                    help="Generate a lollipop plot summarizing structural significance for the chosen gene."
+                                )
+                            with col_b:
+                                st.button(
+                                    "Clear", 
+                                    key="btn_clear_lollipop_gene", 
+                                    on_click=_clear_lollipop_cb,
+                                    help="Clear the current selection and hide the lollipop plot."
+                                )
+
+                with right:
+                    if ss.get("show_volcano", False):
+                        if is_anova:
+                            st.info("Volcano plot is only available for pairwise (t-test) results.")
+                        else:
+                            create_volcano_plot(
+                                df=diffexp_df, 
+                                top_n=ss["volcano_topn"], 
+                                sig_threshold=ss["volcano_sig_threshold"], 
+                                log2fc_threshold=ss["volcano_logfc"], 
+                                label_col="Peptide", 
+                                sig_col=ss["volcano_sig_col"], 
+                                log2fc_col="log2FC", 
+                                control_label=control_label, 
+                                test_label=test_a_label, 
+                                glycan_image_dir=glycan_image_dir, 
+                                top_mode=ss["volcano_topmode"]
+                            )
+
+                    elif ss.get("show_waterfall", False):
+                        st.info("Waterfall output is shown full-width below this section.")
+                            
+                    elif ss.get("show_box", False):
+                        pval_col = "p-value" if ss["box_sig_col"] == "p-value" else "q-value"
+                        if is_anova:
+                            create_box_plots_anova(
+                                df=diffexp_df, 
+                                pval_col=pval_col, 
+                                top_n=ss["box_topn"], 
+                                group_samples=group_samples, 
+                                group_labels=group_labels, 
+                                glycan_image_dir=glycan_image_dir,
+                                quant_mode="LFQ",
+                                group_colors=ss.get("box_anova_colors") 
+                            )
+                        else:
+                            create_box_plots(
+                                df=diffexp_df, 
+                                pval_col=pval_col, 
+                                top_n=ss["box_topn"], 
+                                control_cols=control_group, 
+                                test_cols=test_a_group, 
+                                control_label=control_label, 
+                                test_label=test_a_label, 
+                                glycan_image_dir=glycan_image_dir, 
+                                control_color=ss.get("box_color_ctrl", "#1f77b4"), 
+                                test_color=ss.get("box_color_test", "#d62728"),
+                                quant_mode="LFQ"
+                            )
+                            
+                    elif ss.get("show_heatmap", False):
+                        pval_col_heatmap = ss["heatmap_sig_col"]
+                        if is_anova:
+                            create_heatmap_anova(
+                                df=diffexp_df,
+                                pval_col=pval_col_heatmap,
+                                top_n=ss["heatmap_topn"],
+                                group_samples=group_samples,
+                                group_labels=group_labels,
+                                normalize=ss["heatmap_norm"],
+                                cluster_option=ss["heatmap_cluster"],
+                                group_colors=ss.get("heatmap_anova_colors"),
+                                quant_mode="LFQ"
+                            )
+                        else:
+                            create_heatmap(
+                                df=diffexp_df,
+                                pval_col=pval_col_heatmap,
+                                top_n=ss["heatmap_topn"],
+                                control_cols=control_group,
+                                test_cols=test_a_group,
+                                control_label=control_label,
+                                test_label=test_a_label,
+                                normalize=ss["heatmap_norm"],
+                                cluster_option=ss["heatmap_cluster"],
+                                control_color=ss.get("hm_color_ctrl", "#87CEEB"),
+                                test_color=ss.get("hm_color_test", "#FA8072"),
+                                quant_mode="LFQ"
+                            )
+                        
+                    elif ss.get("show_box_gene", False):
+                        if not ss.get("box_gene_plot", False):
+                            st.info("Enter Gene IDs on the left and click Plot selected genes.")
+                        else:
+                            if not ss.get("box_gene_list", []):
+                                st.info("Please enter at least one Gene ID.")
+                            elif "Genes" not in diffexp_df.columns:
+                                st.error("The dataset is missing a 'Genes' column.")
+                            else:
+                                sub_df = diffexp_df.loc[
+                                    diffexp_df["Genes"].astype(str).str.lower().isin(
+                                        {g.lower() for g in ss["box_gene_list"]}
+                                    )
+                                ].copy()
+                                
+                                if sub_df.empty:
+                                    st.warning("No matching Gene IDs in the current dataset.")
+                                else:
+                                    pval_col = "p-value" if "p-value" in sub_df.columns else ("q-value" if "q-value" in sub_df.columns else None)
+                                    if not pval_col:
+                                        st.error("Neither 'p-value' nor 'q-value' column found.")
+                                    else:
+                                        if is_anova:
+                                            grp3_cols_extracted = group_samples[2] if len(group_samples) > 2 else []
+                                            grp3_label_extracted = group_labels[2] if len(group_labels) > 2 else ""
+
+                                            create_box_plots_top_n_anova(
+                                                df=sub_df, 
+                                                pval_col=pval_col, 
+                                                top_n=len(sub_df), 
+                                                group1_cols=control_group, 
+                                                group2_cols=test_a_group, 
+                                                group3_cols=grp3_cols_extracted, 
+                                                group1_label=control_label, 
+                                                group2_label=test_a_label, 
+                                                group3_label=grp3_label_extracted, 
+                                                glycan_image_dir=glycan_image_dir,
+                                                quant_mode="LFQ"
+                                            )
+                                        else:
+                                            create_box_plots_top_n(
+                                                df=sub_df, 
+                                                pval_col=pval_col, 
+                                                top_n=len(sub_df), 
+                                                control_cols=control_group, 
+                                                test_cols=test_a_group, 
+                                                control_label=control_label, 
+                                                test_label=test_a_label, 
+                                                glycan_image_dir=glycan_image_dir,
+                                                quant_mode="LFQ"
+                                            )
+                                            
+                    elif ss.get("show_lollipop", False):
+                        genes = ss.get("lollipop_gene_list", [])
+
+                        if not ss.get("lollipop_gene_plot", False):
+                            st.info("Select a Gene ID from the dropdown on the left and click **Plot gene**.")
+                        elif len(genes) != 1 or genes[0] == "-- Select a gene --":
+                            st.error("Please select a valid Gene ID.")
+                        else:
+                            sig_metric = ss.get("lollipop_sig_col", "q-value")
+                            required = {"Genes", "Peptide", "ProSites", "Glycan", sig_metric}
+                            missing = [c for c in required if c not in diffexp_df.columns]
+                            
+                            if missing:
+                                st.error("Missing required columns for lollipop plot: " + ", ".join(missing))
+                            else:
+                                df_for_plot = diffexp_df.copy()
+                                gene = genes[0]
+                                
+                                show_legend = ss.get("lollipop_show_legend", False)
+                                
+                                if show_legend:
+                                    create_lollipop_legend(df_for_plot, gene, sig_col=sig_metric)
+                                else:
+                                    create_lollipop(df_for_plot, gene, sig_col=sig_metric)
+                        
+                if ss.get("show_waterfall", False):
+                    st.markdown("---")
+                    if is_anova:
+                        st.info("Waterfall plot is only available for pairwise results with log2FC.")
+                    else:
+                        wfl_sig_col = ss.get("lfq_wfl_sig_col", "q-value" if "q-value" in diffexp_df.columns else "p-value")
+                        wfl_alpha_thr = ss.get("lfq_wfl_alpha", 0.05)
+                        wfl_fc_thr = ss.get("lfq_wfl_fc", 1.0)
+                        wfl_top_n = ss.get("lfq_wfl_topn", 5)
+
+                        ss["report_waterfall_fig"] = _create_lf_waterfall_report_fig(
+                            diff_df=diffexp_df,
+                            sig_col=wfl_sig_col,
+                            alpha_thr=wfl_alpha_thr,
+                            fc_thr=wfl_fc_thr,
+                            top_n=wfl_top_n,
+                        )
+
+                        render_ge_lf_structural_waterfall(
+                            diff_df=diffexp_df,
+                            glycan_image_dir=glycan_image_dir,
+                            sig_col=wfl_sig_col,
+                            alpha_thr=wfl_alpha_thr,
+                            fc_thr=wfl_fc_thr,
+                            top_n=wfl_top_n,
+                        )
+
+    # ====================== RESULTS DOWNLOAD (REPORT) ======================
+    if ss.get("show_report", False):
+        with st.container(border=True):
+            col_info, col_action = st.columns([0.65, 0.35], gap="large")
+            with col_info:
+                st.markdown(
+                    "<p class='subtitle-text'>Generate a document summarizing your entire analysis workflow.</p>", 
+                    unsafe_allow_html=True
+                )
+                st.markdown(
+                    """
+                    - **Experimental Design:** Cohort definitions, sample mapping, reference group, and batch status.
+                    - **Data Integrity:** PCA, correlation matrices, overview heatmaps, and glycan summaries.
+                    - **Differential Analysis:** Top up/down glycopeptides, gene-level summaries, waterfall top features, and statistical tables.
+                    - **Export Bundle:** A ZIP archive containing the PDF, report images, and tabular outputs.
+                    """
+                )
+            with col_action:
+                st.write("")
+                st.write("")
+
+                def _build_report_zip():
+                    zip_buffer = BytesIO()
+                    with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+                        if ss.get("final_pdf_bytes"):
+                            zf.writestr("report/final_report.pdf", ss["final_pdf_bytes"])
+                        if df_is_nonempty(ss.get("merged_df")):
+                            zf.writestr("tables/merged_data.csv", ss["merged_df"].to_csv(index=False))
+                        if df_is_nonempty(ss.get("diffexp_df")):
+                            zf.writestr("tables/differential_results.csv", ss["diffexp_df"].to_csv(index=False))
+                        if df_is_nonempty(ss.get("filtered_df")):
+                            zf.writestr("tables/filtered_results.csv", ss["filtered_df"].to_csv(index=False))
+
+                        if ss.get("global_sample_cols") and ss.get("global_group_samples") and ss.get("global_group_labels"):
+                            rows = []
+                            batch_dict = ss.get("batch_dict", {})
+                            
+                            for col in ss["global_sample_cols"]:
+                                grp_name, grp_num = "Unassigned", None
+                                for i, cols in enumerate(ss["global_group_samples"]):
+                                    if col in (cols or []):
+                                        grp_name = ss["global_group_labels"][i] if i < len(ss["global_group_labels"]) else f"Group{i+1}"
+                                        grp_num = i + 1
+                                        break
+                                        
+                                batch_name = "N/A"
+                                for b_name, b_cols in batch_dict.items():
+                                    if col in b_cols:
+                                        batch_name = b_name if ss.get("batch_corrected") else "Unassigned"
+                                        break
+                                        
+                                clean_sample_name = re.sub(r"^\s*Abundance\s*:\s*", "", str(col))
+                                if ":" in clean_sample_name:
+                                    clean_sample_name = clean_sample_name.split(":", 1)[-1].strip()
+                                else:
+                                    clean_sample_name = clean_sample_name.strip()
+                                        
+                                rows.append({
+                                    "Column": col, 
+                                    "Sample": clean_sample_name, 
+                                    "Group": grp_name, 
+                                    "Group_Number": grp_num, 
+                                    "Batch": batch_name,
+                                    "Is_Reference": (grp_num is not None and (grp_num - 1) == ss.get("global_control_group_idx", 0))
+                                })
+                                
+                            if rows:
+                                zf.writestr("tables/sample_metadata_mapping.csv", pd.DataFrame(rows).to_csv(index=False))
+
+                        plot_keys = [
+                            "report_pca_fig", "report_corr_fig", "report_density_fig", 
+                            "report_overview_heatmap_fig", "report_qc_heatmap_fig", 
+                            "report_volcano_fig", "report_waterfall_fig", "report_ma_fig", "report_heatmap_fig", 
+                            "report_boxplot_fig", "report_lollipop_fig"
+                        ]
+                        
+                        for plot_key in plot_keys:
+                            if plot_key in ss and ss[plot_key]:
+                                buf = BytesIO()
+                                ss[plot_key].savefig(buf, format="png", dpi=300, bbox_inches="tight")
+                                clean_name = plot_key.replace('report_', '').replace('_fig', '')
+                                zf.writestr(f"plots/{clean_name}.png", buf.getvalue())
+                                try:
+                                    plt.close(ss[plot_key])
+                                except Exception:
+                                    pass
+
+                        readme_text = (
+                            f"GlycoExplorer Report Bundle (Label-Free)\n"
+                            f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                            f"Contents:\n"
+                            f"- report/final_report.pdf (if generated)\n"
+                            f"- tables/*.csv\n"
+                            f"- plots/*.png"
+                        )
+                        zf.writestr("README.txt", readme_text)
+                        
+                    return zip_buffer.getvalue()
+
+                if "final_pdf_bytes" not in ss:
+                    if st.button("Compile PDF Report", use_container_width=True, type="primary"):
+                        with st.spinner("Compiling plots and generating PDF..."):
+                            try:
+                                from ge.report_utility import generate_final_pdf
+                                _prepare_lfq_report_figures_for_export()
+                                ss["final_pdf_bytes"] = generate_final_pdf()
+                                ss["final_report_zip_bytes"] = _build_report_zip()
+                                ss["final_report_timestamp"] = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+                                st.rerun() 
+                            except Exception as e:
+                                st.error(f"Failed to generate report: {e}")
+                else:
+                    st.success("Report generated successfully.")
+
+                    if "final_report_timestamp" not in ss:
+                        ss["final_report_timestamp"] = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+
+                    timestamp = ss["final_report_timestamp"]
+                    pdf_filename = f"GlycoExplorer_LF_Report_{timestamp}.pdf"
+                    zip_filename = f"GlycoExplorer_LF_Report_Bundle_{timestamp}.zip"
+
+                    pdf_bytes = _coerce_to_bytes(ss.get("final_pdf_bytes"))
+
+                    if pdf_bytes is None:
+                        st.error("PDF report bytes are missing. Please regenerate the report.")
+                    else:
+                        st.caption(f"PDF size: {len(pdf_bytes) / 1024 / 1024:.2f} MB")
+
+                    if "final_report_zip_bytes" not in ss or ss.get("final_report_zip_bytes") is None:
+                        try:
+                            ss["final_report_zip_bytes"] = _build_report_zip()
+                        except Exception as e:
+                            ss["final_report_zip_bytes"] = None
+                            st.warning(f"PDF is ready, but ZIP bundle could not be prepared: {e}")
+
+                    zip_bytes = _coerce_to_bytes(ss.get("final_report_zip_bytes"))
+
+                    if zip_bytes is not None:
+                        st.caption(f"ZIP size: {len(zip_bytes) / 1024 / 1024:.2f} MB")
+
+                    dl_col1, dl_col2 = st.columns(2)
+
+                    with dl_col1:
+                        if pdf_bytes is not None:
+                            if st.button(
+                                "Download PDF",
+                                width='stretch',
+                                key="save_lf_pdf_to_downloads",
+                                type="primary",
+                                help="Directly save the LFQ PDF report to your local Downloads folder."
+                            ):
+                                try:
+                                    outpath = _save_bytes_to_downloads(pdf_bytes, pdf_filename)
+                                    st.success(f"Saved PDF to: {outpath}")
+                                except Exception as e:
+                                    st.error(f"Could not save PDF: {e}")
+                        else:
+                            st.error("PDF report bytes are missing. Please regenerate the report.")
+
+                    with dl_col2:
+                        if zip_bytes is not None:
+                            if st.button(
+                                "Download ZIP",
+                                width='stretch',
+                                key="save_lf_zip_to_downloads",
+                                help="Directly save the LFQ ZIP bundle to your local Downloads folder."
+                            ):
+                                try:
+                                    outpath = _save_bytes_to_downloads(zip_bytes, zip_filename)
+                                    st.success(f"Saved ZIP bundle to: {outpath}")
+                                except Exception as e:
+                                    st.error(f"Could not save ZIP bundle: {e}")
+                        else:
+                            st.warning("ZIP bundle is not available. Try regenerating the report.")
+
+                    if st.button("Regenerate Report", width='stretch', key="regenerate_lf_final_report") :
+                        ss.pop("final_pdf_bytes", None)
+                        ss.pop("final_report_zip_bytes", None)
+                        ss.pop("final_report_timestamp", None)
+                        st.rerun()
+
+    # ====================== DEFAULT STATE & FAQ ======================
+    any_tab_active = (
+        ss.get("show_global_select", False) or 
+        ss.get("show_overview", False) or 
+        ss.get("show_suite", False) or 
+        ss.get("show_report", False)
+    )
+
+    if not any_tab_active:
+        st.info("Choose a section above to begin.")
+        
+    try:
+        faq_section()
+    except Exception as e:
+        st.error(f"Failed to load FAQ section: {e}")
+
+# Run
+if __name__ == "__main__":
+    if "session_initialized" not in st.session_state:
+        _reset_all_data(clear_cache=True)
+        st.session_state["session_initialized"] = True
+    main()

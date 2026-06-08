@@ -1,0 +1,40 @@
+cat > .gitignore << 'EOF'
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# Streamlit
+.streamlit/secrets.toml
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/
+rsconnect-python/
+# Data / outputs
+*.csv
+*.xlsx
+*.xls
+*.tsv
+*.txt
+*.zip
+*.pdf
+*.png
+*.svg
+*.html
+assets/glycan_images/Thumbs.db
+# Build/dist
+build/
+dist/
+*.spec
+*.app/
+*.exe
+EOF

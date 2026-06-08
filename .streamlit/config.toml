@@ -1,0 +1,19 @@
+
+[server]
+maxUploadSize = 1024
+enableStaticServing = true
+
+
+[theme]
+# A professional, clinical Navy Blue
+primaryColor = "#004b87" 
+# Crisp white background
+backgroundColor = "#ffffff"
+# Soft grayish-blue for sidebars and secondary backgrounds
+secondaryBackgroundColor = "#f0f4f8"
+# Dark slate gray for highly readable text
+textColor = "#1e293b"
+# Clean, modern font
+font = "sans serif"
+
+
