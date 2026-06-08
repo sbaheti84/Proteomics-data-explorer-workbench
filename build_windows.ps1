@@ -1,16 +1,39 @@
 $ErrorActionPreference = "Stop"
 
 $APP_NAME = "ProteomicsWorkbench"
+$ROOT = (Get-Location).Path
 
+Write-Host "Repository root: $ROOT"
 Write-Host "Cleaning old builds..."
 Remove-Item -Recurse -Force build, dist -ErrorAction SilentlyContinue
 Remove-Item -Force "$APP_NAME.spec" -ErrorAction SilentlyContinue
 
-# Ensure the 'assets' directory exists before PyInstaller runs
-if (!(Test-Path -Path "assets")) {
-    Write-Host "Creating missing 'assets' directory for PyInstaller..."
-    New-Item -ItemType Directory -Force -Path "assets" | Out-Null
+# Ensure folders expected by PyInstaller exist in GitHub runner
+$requiredDirs = @(".streamlit", "assets", "faq", "ge", "tp")
+foreach ($d in $requiredDirs) {
+    $p = Join-Path $ROOT $d
+    if (!(Test-Path -Path $p)) {
+        Write-Host "Creating missing directory: $d"
+        New-Item -ItemType Directory -Force -Path $p | Out-Null
+    }
 }
+
+# PyInstaller can fail on an empty data directory. Add harmless placeholders.
+$placeholder = Join-Path $ROOT "assets\.keep"
+if (!(Test-Path $placeholder)) {
+    "placeholder so PyInstaller can bundle assets directory" | Out-File -FilePath $placeholder -Encoding utf8
+}
+
+# Optional logo/example folders are bundled only if they exist, but this keeps assets stable.
+Write-Host "Checking expected paths..."
+foreach ($d in $requiredDirs) {
+    $p = Join-Path $ROOT $d
+    if (!(Test-Path $p)) { throw "Required path missing after setup: $p" }
+    Write-Host "Found: $p"
+}
+
+Write-Host "Top-level files/folders before build:"
+Get-ChildItem -Force $ROOT | Select-Object Name, Mode, Length | Format-Table -AutoSize
 
 Write-Host "Building Windows app..."
 
@@ -27,10 +50,10 @@ streamlit-desktop-app build app.py `
     "--theme.font=sans serif" `
   --pyinstaller-options `
     --onefile `
-    --paths "." `
-    --paths "ge" `
-    --paths "tp" `
-    --paths "faq" `
+    --paths "$ROOT" `
+    --paths "$(Join-Path $ROOT 'ge')" `
+    --paths "$(Join-Path $ROOT 'tp')" `
+    --paths "$(Join-Path $ROOT 'faq')" `
     --hidden-import app_launcher_GE `
     --hidden-import app_launcher_GE_LF `
     --hidden-import app_launcher_TP `
@@ -65,11 +88,11 @@ streamlit-desktop-app build app.py `
     --hidden-import matplotlib.backends.backend_svg `
     --hidden-import matplotlib.backends.backend_pdf `
     --hidden-import matplotlib.backends.backend_agg `
-    --add-data ".streamlit;.streamlit" `
-    --add-data "assets;assets" `
-    --add-data "faq;faq" `
-    --add-data "ge;ge" `
-    --add-data "tp;tp" `
+    --add-data "$(Join-Path $ROOT '.streamlit');.streamlit" `
+    --add-data "$(Join-Path $ROOT 'assets');assets" `
+    --add-data "$(Join-Path $ROOT 'faq');faq" `
+    --add-data "$(Join-Path $ROOT 'ge');ge" `
+    --add-data "$(Join-Path $ROOT 'tp');tp" `
     --collect-all streamlit `
     --collect-all plotly `
     --collect-all openpyxl `

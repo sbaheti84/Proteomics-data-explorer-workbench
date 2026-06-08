@@ -16,6 +16,16 @@ jobs:
         with:
           python-version: "3.12.8"
 
+      - name: Show repository contents
+        shell: powershell
+        run: |
+          Write-Host "Current directory:"
+          Get-Location
+          Write-Host "Top-level repository files:"
+          Get-ChildItem -Force | Select-Object Name, Mode, Length | Format-Table -AutoSize
+          Write-Host "Assets folder:"
+          if (Test-Path "assets") { Get-ChildItem -Recurse assets | Select-Object FullName, Length | Format-Table -AutoSize } else { Write-Host "assets folder is missing" }
+
       - name: Install dependencies
         shell: powershell
         run: |
