@@ -23,7 +23,6 @@ rsconnect-python/
 *.xlsx
 *.xls
 *.tsv
-*.txt
 *.zip
 *.pdf
 *.png
