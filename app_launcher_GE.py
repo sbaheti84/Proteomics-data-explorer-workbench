@@ -1024,7 +1024,7 @@ def main():
         ("▸ " if not ss["show_overview"] else "▾ ") + "Data Integrity Check & Sanity Profiling",
         width='stretch',
         key="btn_overview",
-        help="Perform quality control via PCA, Correlation Heatmaps, and Glycan distribution analysis."
+        help="Perform quality control using PCA, correlation matrix, sample clustering, and glycan distribution analysis."
     ):
         ss["show_overview"] = not ss["show_overview"]
         if ss["show_overview"]:
@@ -1570,7 +1570,7 @@ def main():
                         [
                             "Principal Component Analysis (PCA)",
                             "Correlation Matrix",
-                            "Heatmap",
+                            "Sample Clustering",
                             "Glycan Classification Summary"
                         ],
                         index=None,
@@ -1613,7 +1613,33 @@ def main():
                             value=True,
                             key="pca_ellipses_ui"
                         )
-                        
+
+                        pca_opt1, pca_opt2 = st.columns(2)
+                        with pca_opt1:
+                            ss["pca_hide_outliers"] = st.checkbox(
+                                "Hide outliers",
+                                value=False,
+                                key="pca_hide_outliers_ui",
+                                help="Remove IQR-based outliers from the displayed PCA plot."
+                            )
+                        with pca_opt2:
+                            ss["pca_label_outliers"] = st.checkbox(
+                                "Label outliers",
+                                value=True,
+                                key="pca_label_outliers_ui",
+                                help="Add sample names next to detected outliers."
+                            )
+
+                        ss["pca_zoom_q"] = st.slider(
+                            "Zoom view",
+                            min_value=0.80,
+                            max_value=1.00,
+                            value=1.00,
+                            step=0.01,
+                            key="pca_zoom_q_ui",
+                            help="1.00 shows the full PCA. Lower values zoom into the central samples."
+                        )
+
                         st.markdown("**Customize Group Colors**")
                         default_palette = ["#b3e2cd", "#fdcdac", "#cbd5e8", "#decbe4", "#ccebc5", "#fed9a6"]
                         ss["pca_palette"] = {}
@@ -1627,11 +1653,11 @@ def main():
                                     key=f"pca_color_{i}_ui"
                                 )
 
-                    if mode == "Heatmap":
-                        st.markdown("**Overview Heatmap options**")
+                    if mode == "Sample Clustering":
+                        st.markdown("**Sample clustering options**")
                         ss["overview_hm_topn"] = st.slider(
-                            "Top N most variable features",
-                            10, 200, 50,
+                            "Top N most variable features used for clustering",
+                            10, 300, 50,
                             key="overview_hm_topn_ui"
                         )
                         ss["overview_hm_norm"] = st.radio(
@@ -1640,6 +1666,20 @@ def main():
                             key="overview_hm_norm_ui",
                             horizontal=True
                         )
+                        st.caption("Samples are clustered without using group labels. Group colors are used only to color sample labels.")
+
+                        st.markdown("**Customize Group Colors**")
+                        default_cluster_palette = ["#b3e2cd", "#fdcdac", "#cbd5e8", "#decbe4", "#ccebc5", "#fed9a6"]
+                        ss["cluster_palette"] = {}
+                        if group_labels:
+                            cluster_cols = st.columns(len(group_labels))
+                            for i, label in enumerate(group_labels):
+                                with cluster_cols[i % len(cluster_cols)]:
+                                    ss["cluster_palette"][label] = st.color_picker(
+                                        label,
+                                        value=default_cluster_palette[i % len(default_cluster_palette)],
+                                        key=f"cluster_color_{i}_ui"
+                                    )
 
                     flags = {
                         "Principal Component Analysis (PCA)": dict(
@@ -1650,7 +1690,7 @@ def main():
                             run_pca=False, run_corr=True, run_overview_heatmap=False,
                             run_peptide_freq=False, run_abundance=False, run_glycan_class=False
                         ),
-                        "Heatmap": dict(
+                        "Sample Clustering": dict(
                             run_pca=False, run_corr=False, run_overview_heatmap=True,
                             run_peptide_freq=False, run_abundance=False, run_glycan_class=False
                         ),
@@ -1715,9 +1755,13 @@ def main():
                                     df=ss["merged_df_before_batch"],
                                     group_samples=group_samples,
                                     group_labels=group_labels,
+                                    title="PCA Before Batch Correction",
                                     pc_x=ss.get("pca_x", "PC1"),
                                     pc_y=ss.get("pca_y", "PC2"),
                                     draw_ellipses=ss.get("pca_draw_ellipses", False),
+                                    hide_outliers=ss.get("pca_hide_outliers", False),
+                                    label_outliers=ss.get("pca_label_outliers", True),
+                                    zoom_q=ss.get("pca_zoom_q", 1.0),
                                     palette=ss.get("pca_palette", None),
                                     quant_mode="TMT",
                                     key_suffix="before_batch"
@@ -1729,9 +1773,13 @@ def main():
                                     df=ss["merged_df"],
                                     group_samples=group_samples,
                                     group_labels=group_labels,
+                                    title="PCA After Batch Correction",
                                     pc_x=ss.get("pca_x", "PC1"),
                                     pc_y=ss.get("pca_y", "PC2"),
                                     draw_ellipses=ss.get("pca_draw_ellipses", False),
+                                    hide_outliers=ss.get("pca_hide_outliers", False),
+                                    label_outliers=ss.get("pca_label_outliers", True),
+                                    zoom_q=ss.get("pca_zoom_q", 1.0),
                                     palette=ss.get("pca_palette", None),
                                     quant_mode="TMT",
                                     key_suffix="after_batch"
@@ -1743,9 +1791,13 @@ def main():
                                 df=df,
                                 group_samples=group_samples,
                                 group_labels=group_labels,
+                                title="PCA",
                                 pc_x=ss.get("pca_x", "PC1"),
                                 pc_y=ss.get("pca_y", "PC2"),
                                 draw_ellipses=ss.get("pca_draw_ellipses", False),
+                                    hide_outliers=ss.get("pca_hide_outliers", False),
+                                    label_outliers=ss.get("pca_label_outliers", True),
+                                    zoom_q=ss.get("pca_zoom_q", 1.0),
                                 palette=ss.get("pca_palette", None),
                                 quant_mode="TMT",
                                 key_suffix="single_pca"
@@ -1761,17 +1813,39 @@ def main():
                         st.warning("Need at least two sample columns for correlation heatmap.")
 
                 elif ss.get("run_overview_heatmap", False):
-                    if len(all_groups) >= 2:
-                        fig_obj = create_overview_heatmap(
+                    grouped_samples_for_cluster = [
+                        [c for c in (cols or []) if c in all_groups]
+                        for cols in (group_samples or [])
+                    ]
+                    grouped_labels_for_cluster = list(group_labels or [])
+
+                    if len(all_groups) >= 2 and grouped_samples_for_cluster and any(grouped_samples_for_cluster):
+                        fig_obj = create_sample_clustering(
                             df=df,
-                            sample_cols=all_groups,
-                            top_n=ss.get("overview_hm_topn", 20),
+                            group_samples=grouped_samples_for_cluster,
+                            group_labels=grouped_labels_for_cluster,
+                            title="Sample clustering",
+                            top_n=ss.get("overview_hm_topn", 50),
                             norm_type=ss.get("overview_hm_norm", "Z-score"),
-                            quant_mode="TMT"
+                            quant_mode="TMT",
+                            palette=ss.get("cluster_palette", None),
+                            key_suffix="overview_cluster"
                         )
-                        
+                    elif len(all_groups) >= 2:
+                        # Fallback if samples were selected but not explicitly grouped.
+                        fig_obj = create_sample_clustering(
+                            df=df,
+                            group_samples=[all_groups],
+                            group_labels=["All selected samples"],
+                            title="Sample clustering",
+                            top_n=ss.get("overview_hm_topn", 50),
+                            norm_type=ss.get("overview_hm_norm", "Z-score"),
+                            quant_mode="TMT",
+                            palette={"All selected samples": "#b3e2cd"},
+                            key_suffix="overview_cluster"
+                        )
                     else:
-                        st.warning("Need at least two sample columns to generate a heatmap.")
+                        st.warning("Need at least two sample columns for sample clustering.")
 
                 elif ss.get("run_abundance", False):
                     if len(all_groups) >= 1:
@@ -2207,6 +2281,14 @@ def main():
 
                         if ss.get("show_volcano", False):
                             st.markdown("**Volcano plot options**")
+                            volcano_plot_type = st.radio(
+                                "Volcano plot type",
+                                ["Static", "Interactive"],
+                                index=0,
+                                key="volcano_plot_type",
+                                horizontal=True
+                            )
+                            
                             sig_col = st.radio(
                                 "Significance metric",
                                 ["p-value", "q-value"],
@@ -2275,6 +2357,15 @@ def main():
                             )
                             top_n_box = st.slider("Top N markers to display", 1, 50, 10, key="box_topn")
                             
+                            if not is_anova:
+                                top_mode_box = st.radio(
+                                    "Top Hits Direction:",
+                                    options=["all", "up", "down", "up-down"],
+                                    index=3,
+                                    key="box_topmode",
+                                    horizontal=True
+                                )
+                                
                             st.markdown("**Customize Group Colors**")
                             if is_anova:
                                 ss["box_anova_colors"] = {}
@@ -2433,19 +2524,30 @@ def main():
                         if is_anova:
                             st.info("Volcano plot is only available for pairwise (t-test) results.")
                         else:
-                            create_volcano_plot(
-                                df=plot_df,
-                                top_n=ss["volcano_topn"],
-                                sig_threshold=ss["volcano_sig_threshold"],
-                                log2fc_threshold=ss["volcano_logfc"],
-                                label_col="Peptide",
-                                sig_col=ss["volcano_sig_col"],
-                                log2fc_col="log2FC",
-                                control_label=control_label,
-                                test_label=test_a_label,
-                                glycan_image_dir=glycan_image_dir,
-                                top_mode=ss["volcano_topmode"],
-                            )
+                            if ss.get("volcano_plot_type", "Static") == "Interactive":
+                                create_interactive_volcano_plot(
+                                    df=plot_df,
+                                    sig_threshold=ss["volcano_sig_threshold"],
+                                    log2fc_threshold=ss["volcano_logfc"],
+                                    sig_col=ss["volcano_sig_col"],
+                                    log2fc_col="log2FC",
+                                    control_label=control_label,
+                                    test_label=test_a_label,
+                                )
+                            else:
+                                create_volcano_plot(
+                                    df=plot_df,
+                                    top_n=ss["volcano_topn"],
+                                    sig_threshold=ss["volcano_sig_threshold"],
+                                    log2fc_threshold=ss["volcano_logfc"],
+                                    label_col="Genes",
+                                    sig_col=ss["volcano_sig_col"],
+                                    log2fc_col="log2FC",
+                                    control_label=control_label,
+                                    test_label=test_a_label,
+                                    glycan_image_dir=glycan_image_dir,
+                                    top_mode=ss.get("volcano_topmode", "up-down"),
+                                )
 
                     elif ss.get("show_waterfall", False):
                         st.info("Waterfall output is shown full-width below this section.")
@@ -2475,7 +2577,9 @@ def main():
                                 glycan_image_dir=glycan_image_dir,
                                 control_color=ss.get("box_color_ctrl", "#1f77b4"),
                                 test_color=ss.get("box_color_test", "#d62728"),
-                                quant_mode="TMT"
+                                quant_mode="TMT",
+                                top_mode=ss.get("box_topmode", "up-down"),
+                                log2fc_col="log2FC"
                             )
 
                     elif ss.get("show_heatmap", False):
@@ -2607,7 +2711,7 @@ def main():
                 st.markdown(
                     """
                     - **Experimental Design:** Cohort definitions, sample mapping, reference group, and batch status.
-                    - **Data Integrity:** PCA, correlation matrices, overview heatmaps, and glycan summaries.
+                    - **Data Integrity:** PCA, correlation matrices, sample clustering, and glycan summaries.
                     - **Differential Analysis:** Top up/down glycopeptides, gene-level summaries, waterfall top features, and statistical tables.
                     - **Export Bundle:** A ZIP archive containing the PDF, report images, and tabular outputs.
                     """
@@ -2724,7 +2828,7 @@ def main():
 
                         plot_keys = [
                             "report_pca_fig", "report_corr_fig", "report_density_fig",
-                            "report_overview_heatmap_fig", "report_qc_heatmap_fig",
+                            "report_sample_clustering_fig", "report_overview_heatmap_fig", "report_qc_heatmap_fig",
                             "report_glycan_class_fig",
                             "report_volcano_fig", "report_waterfall_fig", "report_ma_fig",
                             "report_heatmap_fig", "report_boxplot_fig", "report_lollipop_fig"

@@ -86,7 +86,6 @@ def _normalize_heatmap_data(df_data: pd.DataFrame, normalize: str):
     out = out.dropna(how="all", axis=0)
     out = out.dropna(how="all", axis=1)
     
-    # FIX: Fill remaining NaNs with 0 to prevent "condensed distance matrix" failures
     out = out.fillna(0) 
     
     return out, cbar_label, cmap, center
@@ -255,7 +254,7 @@ def create_heatmap(
         col_cluster = True
 
     elif cluster_option == "Hierarchical":
-        row_cluster = False
+        row_cluster = True
         col_cluster = True
     else:
         row_cluster = False
@@ -267,13 +266,14 @@ def create_heatmap(
     g = sns.clustermap(
         df_data,
         figsize=(14, fig_height),
-        dendrogram_ratio=(0.15, 0.05),
+        dendrogram_ratio=(0.20, 0.05),
         colors_ratio=(0.02, 0.02),
         cmap=cmap,
         center=center,
         col_cluster=col_cluster,
         row_cluster=row_cluster,
-        col_colors=col_colors
+        col_colors=col_colors,
+        tree_kws={"linewidth": 1.5, "color": "#333333"}
     )
 
     legend_handles = [Patch(color=group_palette[grp], label=grp) for grp in group_palette]
@@ -281,10 +281,10 @@ def create_heatmap(
     _finalize_clustermap(
         g=g,
         cbar_label=cbar_label,
-        title="Differential Expression Heatmap",
+        title="",
         legend_handles=legend_handles,
-        cax_position=[0.78, 0.5, 0.02, 0.15],
-        adjust_kwargs=dict(left=0.25, right=0.75, top=0.90, bottom=0.15),
+        cax_position=[0.02, 0.85, 0.02, 0.10],
+        adjust_kwargs=dict(left=0.10, right=0.65, top=0.90, bottom=0.15),
     )
 
     add_plot_download_buttons(g.fig, base_filename="heatmap_plot", key_suffix="static_heatmap_plot")
@@ -372,7 +372,7 @@ def create_heatmap_anova(
         col_cluster = True
 
     elif cluster_option == "Hierarchical":
-        row_cluster = False
+        row_cluster = True
         col_cluster = True
     else:
         row_cluster = False
@@ -384,13 +384,14 @@ def create_heatmap_anova(
     g = sns.clustermap(
         df_data,
         figsize=(14, fig_height),
-        dendrogram_ratio=(0.15, 0.05),
+        dendrogram_ratio=(0.20, 0.05),
         colors_ratio=(0.02, 0.02),
         cmap=cmap,
         center=center,
         col_cluster=col_cluster,
         row_cluster=row_cluster,
-        col_colors=col_colors
+        col_colors=col_colors,
+        tree_kws={"linewidth": 1.5, "color": "#333333"}
     )
 
     legend_handles = [Patch(color=group_palette[grp], label=grp) for grp in group_palette]
@@ -400,8 +401,8 @@ def create_heatmap_anova(
         cbar_label=cbar_label,
         title="ANOVA Differential Expression Heatmap",
         legend_handles=legend_handles,
-        cax_position=[0.04, 0.80, 0.02, 0.15],
-        adjust_kwargs=dict(left=0.2, right=0.75, top=0.90, bottom=0.15),
+        cax_position=[0.02, 0.85, 0.02, 0.10],
+        adjust_kwargs=dict(left=0.10, right=0.65, top=0.90, bottom=0.15),
     )
 
     add_plot_download_buttons(g.fig, base_filename="heatmap_plot_anova", key_suffix="static_heatmap_plot")
@@ -475,7 +476,6 @@ def create_overview_heatmap(
     hm_plot = hm_plot.replace([np.inf, -np.inf], np.nan)
     hm_plot = hm_plot.dropna(how="all", axis=0).dropna(how="all", axis=1)
     
-    # FIX: Fill remaining NaNs with 0 to prevent "condensed distance matrix" failures
     hm_plot = hm_plot.fillna(0)
 
     if hm_plot.empty:
@@ -493,7 +493,8 @@ def create_overview_heatmap(
             figsize=(12, fig_height),
             linewidths=0.0,
             col_cluster=True,
-            row_cluster=True
+            row_cluster=True,
+            tree_kws={"linewidth": 1.5, "color": "#333333"}
         )
 
         fig.ax_heatmap.set_yticklabels(
@@ -546,5 +547,3 @@ def create_overview_heatmap(
     except Exception as e:
         st.error(f"Clustermap plotting failed: {e}")
         return None
-
-

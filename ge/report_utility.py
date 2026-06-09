@@ -8,12 +8,14 @@ GlycoExplorer report utilities.
 import datetime
 import os
 import tempfile
+import re
 from typing import List, Dict, Any, Optional
 
 from fpdf import FPDF
 import numpy as np
 import pandas as pd
 import streamlit as st
+import matplotlib.pyplot as plt
 
 
 # =============================================================================
@@ -75,10 +77,20 @@ class AnalysisReport(FPDF):
 
 def _clean_sample_label(name: str) -> str:
     s = str(name)
-    s = s.replace("Abundance:", "").strip()
+    patterns = [
+        r'^(?:Abundance)\s*:\s*(.+)$',
+        r'^(?:Abundance)\s*\([^)]*\)\s*:\s*(.+)$',
+        r'^(?:Abundances?)\s*\([^)]*\)\s*:\s*(.+)$',
+        r'^(?:Abundance)\s+(.+)$',
+    ]
+    for pat in patterns:
+        m = re.match(pat, s, flags=re.IGNORECASE)
+        if m:
+            return m.group(1).strip()
+            
     if ":" in s:
         s = s.split(":", 1)[-1].strip()
-    return s
+    return s.strip()
 
 
 def _as_bool_yes_no(x) -> str:
@@ -258,7 +270,7 @@ def _add_dataframe_table(pdf, df, title, max_rows=25, note: Optional[str] = None
 
     # Keep table readable: limit to common informative columns first, then any remaining.
     preferred = [
-        "Point_ID", "Gene", "Genes", "Peptide", "Glycan", "Glycan(H,N,A,F)",
+        "Point_ID", "Gene", "Genes", "Peptide", "Glycan", "Glycan(H,N,A,F)", "GlycanClass",
         "ProSites", "Proteins", "log2FC", "Mean_log2FC", "p-value", "q-value",
         "adj.p-value", "Best_q_value", "Regulation", "Status", "Rank",
         "Significant_Peptides", "Significant_Features", "Upregulated_Hits", "Downregulated_Hits",
@@ -288,6 +300,7 @@ def _add_dataframe_table(pdf, df, title, max_rows=25, note: Optional[str] = None
         "Peptide": 34,
         "Glycan": 20,
         "Glycan(H,N,A,F)": 22,
+        "GlycanClass": 20,
         "ProSites": 16,
         "Proteins": 28,
         "log2FC": 17,
@@ -426,24 +439,25 @@ def _add_figure_page(pdf: AnalysisReport, fig, title: str, subtitle: str = None)
 
 
 def _collect_report_figures(ss) -> List[Dict[str, Any]]:
+    # Added 'report_sample_clustering_fig' and 'report_waterfall_fig' to the list
     figure_specs = [
         ("report_pca_fig", "3. Principal Component Analysis (PCA)"),
         ("report_corr_fig", "4. Sample Correlation Heatmap"),
         ("report_density_fig", "5. Abundance Density Plot"),
-        ("report_overview_heatmap_fig", "6. Overview Heatmap"),
-        ("report_qc_heatmap_fig", "7. QC Heatmap"),
-        ("report_glycan_class_fig", "8. Glycan Classification Summary"),
-        ("report_volcano_fig", "9. Differential Volcano Plot"),
+        ("report_sample_clustering_fig", "6. Sample Clustering"),
+        ("report_glycan_class_fig", "7. Glycan Classification Summary"),
+        ("report_volcano_fig", "8. Differential Volcano Plot"),
+        ("report_waterfall_fig", "9. Waterfall Plot of Differential Glycopeptides"),
         ("report_ma_fig", "10. MA Plot"),
         ("report_heatmap_fig", "11. Clustered Heatmap of Top Hits"),
-        ("report_waterfall_fig", "12. Waterfall Plot of Differential Glycopeptides"),
-        ("report_boxplot_fig", "13. Differential Box Plot"),
-        ("report_lollipop_fig", "14. Glycosite Lollipop Plot"),
+        ("report_boxplot_fig", "12. Differential Box Plot"),
+        ("report_lollipop_fig", "13. Glycosite Lollipop Plot"),
     ]
 
     found = []
     for key, title in figure_specs:
         try:
+            # Check for the key and ensure it's not None
             if key in ss and ss[key] is not None:
                 found.append({"key": key, "title": title})
         except Exception:
@@ -517,7 +531,7 @@ def _build_diff_summary(diff_df: pd.DataFrame) -> dict:
 
         pairwise_cols = [
             c for c in [
-                "Peptide", "Glycan", "Glycan(H,N,A,F)", "Genes", "ProSites",
+                "Peptide", "Glycan", "Glycan(H,N,A,F)", "GlycanClass", "Genes", "ProSites",
                 "log2FC", "p-value", "q-value", "adj.p-value", "Regulation"
             ] if c in df.columns
         ]
@@ -585,7 +599,7 @@ def _build_diff_summary(diff_df: pd.DataFrame) -> dict:
     else:
         anova_cols = [
             c for c in [
-                "Peptide", "Glycan", "Glycan(H,N,A,F)", "Genes", "ProSites",
+                "Peptide", "Glycan", "Glycan(H,N,A,F)", "GlycanClass", "Genes", "ProSites",
                 "p-value", "q-value", "adj.p-value", "Regulation"
             ] if c in df.columns
         ]
@@ -662,7 +676,7 @@ def _build_waterfall_top_table(diff_df: pd.DataFrame, ss) -> pd.DataFrame:
     out["Point_ID"] = range(1, len(out) + 1)
     keep = [
         c for c in [
-            "Point_ID", "Genes", "Peptide", "Glycan", "Glycan(H,N,A,F)", "ProSites",
+            "Point_ID", "Genes", "Peptide", "Glycan", "Glycan(H,N,A,F)", "GlycanClass", "ProSites",
             "log2FC", sig_col, "Status", "Rank"
         ] if c in out.columns
     ]
@@ -743,6 +757,8 @@ def generate_final_pdf():
 
     pdf.subsection_title("Visualization Thresholds & Settings")
     thresholds = []
+    
+    # Volcano
     v_metric = ss.get("volcano_sig_col", ss.get("lfq_volcano_sig_col", "p-value"))
     v_sig = ss.get("volcano_sig_threshold", ss.get("lfq_volcano_sig_threshold", 0.05))
     v_fc = ss.get("volcano_logfc", ss.get("lfq_volcano_logfc", 1.0))
@@ -750,20 +766,39 @@ def generate_final_pdf():
     v_mode = ss.get("volcano_topmode", ss.get("lfq_volcano_topmode", "up-down"))
     thresholds.append(f"Volcano Plot: {v_metric} < {v_sig}, |log2FC| > {v_fc}; top labels = {v_topn} ({v_mode})")
 
+    # Heatmap
     h_norm = ss.get("heatmap_norm", ss.get("overview_hm_norm", "Z-score"))
     h_clust = ss.get("heatmap_cluster", "Hierarchical")
     h_topn = ss.get("heatmap_topn", ss.get("overview_hm_topn", 25))
     thresholds.append(f"Heatmap: Normalization = {h_norm}, Clustering = {h_clust}, Top N = {h_topn}")
 
+    # Box Plot
     b_topn = ss.get("box_topn", 10)
     b_metric = ss.get("box_sig_col", "p-value")
-    thresholds.append(f"Box Plot: Top {b_topn} features by {b_metric}")
+    b_mode = ss.get("box_topmode", "up-down")
+    if is_anova:
+        thresholds.append(f"Box Plot: Top {b_topn} features by {b_metric}")
+    else:
+        thresholds.append(f"Box Plot: Top {b_topn} features by {b_metric} ({b_mode})")
 
+    # Waterfall
     wf_sig = ss.get("lfq_wfl_sig_col", ss.get("waterfall_sig_col", "q-value"))
     wf_alpha = ss.get("lfq_wfl_alpha", ss.get("waterfall_alpha", 0.05))
     wf_fc = ss.get("lfq_wfl_fc", ss.get("waterfall_logfc", 1.0))
     wf_topn = ss.get("lfq_wfl_topn", ss.get("waterfall_topn", 5))
     thresholds.append(f"Waterfall: {wf_sig} < {wf_alpha}, |log2FC| > {wf_fc}; top N per direction = {wf_topn}")
+
+    # Lollipop
+    l_genes = ss.get("lollipop_gene_list", [])
+    if l_genes:
+        l_sig = ss.get("lollipop_sig_col", "q-value")
+        l_leg = "Yes" if ss.get("lollipop_show_legend") else "No"
+        thresholds.append(f"Lollipop Plot: Metric = {l_sig}, Gene(s) = {', '.join(l_genes)}, Shapes = {l_leg}")
+        
+    # Box Plot Gene
+    box_genes = ss.get("box_gene_list", [])
+    if box_genes:
+        thresholds.append(f"Box Plot (Gene): Gene(s) = {', '.join(box_genes)}")
 
     pdf.add_kv_lines([f"- {t}" for t in thresholds], font_size=9)
 
@@ -848,7 +883,7 @@ def generate_final_pdf():
 
         important_cols = [
             c for c in [
-                "Peptide", "Glycan", "Glycan(H,N,A,F)", "Genes", "ProSites",
+                "Peptide", "Glycan", "Glycan(H,N,A,F)", "GlycanClass", "Genes", "ProSites",
                 "log2FC", "p-value", "q-value", "adj.p-value", "Regulation"
             ] if c in diff_df.columns
         ]

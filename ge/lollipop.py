@@ -84,8 +84,14 @@ def create_lollipop_interactive(df, gene: str, glycan_col: str = "Glycan", sig_c
                   x0=actual_min_x - 1.0, y0=0, x1=actual_max_x + 1.0, y1=0,
                   line=dict(color="black", width=4), layer="above")
 
-    # Dynamic Map markers for Legend shapes
-    available_markers = ['circle', 'square', 'triangle-up', 'diamond', 'triangle-down', 'hexagram', 'star']
+    # Dynamic Map markers for Legend shapes - Expanded to 20 distinct, fillable shapes
+    available_markers = [
+        'circle', 'square', 'diamond', 'triangle-up', 'triangle-down',
+        'pentagon', 'hexagram', 'star', 'diamond-tall', 'diamond-wide',
+        'triangle-left', 'triangle-right', 'hourglass', 'bowtie',
+        'circle-cross', 'circle-x', 'square-cross', 'square-x',
+        'diamond-cross', 'diamond-x'
+    ]
     
     # Process compositions and assign fallbacks where structure is missing
     processed_glycans = []
@@ -198,7 +204,7 @@ def create_lollipop_interactive(df, gene: str, glycan_col: str = "Glycan", sig_c
 
     raw_ticks = np.arange(0, fc_max + step, step)
     pos_ticks = [t * SCALE + GAP for t in raw_ticks]
-    neg_ticks = [-t * SCALE - GAP for t in raw_ticks if t != 0]
+    neg_ticks = [-t * SCALE - GAP for t in raw_ticks]
     all_ticks = sorted(neg_ticks + pos_ticks)
     
     tick_labels = []
@@ -206,6 +212,9 @@ def create_lollipop_interactive(df, gene: str, glycan_col: str = "Glycan", sig_c
         val = (tick - GAP) / SCALE if tick > 0 else (tick + GAP) / SCALE
         if abs(val) < 0.001: val = 0.0
         tick_labels.append(f"{val:g}")
+
+    # Calculate absolute max extent to force Y-axis symmetry
+    y_limit = max(abs(min(all_ticks)), abs(max(all_ticks))) + 0.5
 
     # Layout styling updates
     fig.update_layout(
@@ -217,15 +226,31 @@ def create_lollipop_interactive(df, gene: str, glycan_col: str = "Glycan", sig_c
             ticktext=unique_sites,
             tickangle=-90,
             showgrid=False,
-            zeroline=False
+            zeroline=False,
+            showline=True,            
+            linecolor='black',        
+            linewidth=1.5,            
+            ticks='outside',          
+            tickcolor='black',        
+            tickwidth=1.5,            
+            ticklen=6,                
+            range=[actual_min_x - 1.5, actual_max_x + 1.5]  
         ),
         yaxis=dict(
-            title=dict(text="<b>log<sub>2</sub>(Fold Change)</b>", font=dict(size=13)),
+            title=dict(text="<b>log<sub>2</sub>(fold-change)</b>", font=dict(size=13)),
             tickmode='array',
             tickvals=all_ticks,
             ticktext=tick_labels,
             showgrid=False,
-            zeroline=False
+            zeroline=False,
+            showline=True,            
+            linecolor='black',        
+            linewidth=1.5,            
+            ticks='outside',          
+            tickcolor='black',        
+            tickwidth=1.5,            
+            ticklen=6,
+            range=[-y_limit, y_limit]  
         ),
         template="plotly_white",
         height=620,

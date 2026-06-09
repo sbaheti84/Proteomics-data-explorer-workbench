@@ -145,11 +145,14 @@ def _style_axis(
     else:
         ax.set_ylabel("")
 
+    ax.grid(False)
     for spine in ["top", "right"]:
         ax.spines[spine].set_visible(False)
     ax.spines["left"].set_visible(True)
     ax.spines["bottom"].set_linewidth(1.0)
-    ax.tick_params(axis="both", labelsize=12)
+    
+    # Ensured ticks are visible on axes
+    ax.tick_params(axis="both", labelsize=12, left=True, bottom=True)
 
 
 def _finalize_pdf_download(pdf_buf: BytesIO, label: str, file_name: str):
@@ -186,8 +189,28 @@ def create_box_plots(
     quant_mode: str = "TMT",
     lfq_zero_as_na: bool = True,
     lfq_pseudocount: float = 1.0,
+    top_mode: str = "up-down",
+    log2fc_col: str = "log2FC",
 ) -> None:
-    top_hits = df.nsmallest(top_n, pval_col).copy()
+    
+    df_valid = df.dropna(subset=[pval_col]).copy()
+    
+    if top_mode == "up" and log2fc_col in df_valid.columns:
+        top_hits = df_valid[df_valid[log2fc_col] > 0].nsmallest(top_n, pval_col).copy()
+    elif top_mode == "down" and log2fc_col in df_valid.columns:
+        top_hits = df_valid[df_valid[log2fc_col] < 0].nsmallest(top_n, pval_col).copy()
+    elif top_mode == "up-down" and log2fc_col in df_valid.columns:
+        half_n, extra = top_n // 2, top_n % 2
+        top_up = df_valid[df_valid[log2fc_col] > 0].nsmallest(half_n + extra, pval_col).copy()
+        top_down = df_valid[df_valid[log2fc_col] < 0].nsmallest(half_n, pval_col).copy()
+        top_hits = pd.concat([top_up, top_down], ignore_index=True)
+    else:
+        top_hits = df_valid.nsmallest(top_n, pval_col).copy()
+
+    if top_hits.empty:
+        st.warning("No significant hits available to generate box plots.")
+        return
+
     top_hits["Glycopeptide"] = (
         top_hits["Genes"].astype(str) + "--" +
         top_hits["ProSites"].astype(str) + "--" +
@@ -276,47 +299,36 @@ def create_box_plots(
                 rotation=0,
             )
 
+            text_y = 1.06
             ax.text(
-                0.5, 1.05, label_gene,
-                transform=ax.transAxes,
-                ha="center",
-                fontsize=12,
-                fontweight="bold"
+                0.5, text_y, f"{label_gene}-",
+                transform=ax.transAxes, ha="right",
+                fontsize=12, fontweight="bold", color="black"
             )
 
             ax.text(
-                0.5, 1.14, fr"Asn$^{{{label_site}}}$",
-                transform=ax.transAxes,
-                ha="center",
-                fontsize=12,
-                color="red",
-                fontweight="bold"
+                0.5, text_y, fr"Asn$^{{{label_site}}}$",
+                transform=ax.transAxes, ha="left",
+                fontsize=12, fontweight="bold", color="red"
             )
 
             # Glycan composition text, e.g. 4 3 2 1
             ax.text(
-                0.5, 1.23, str(label_glycan),
-                transform=ax.transAxes,
-                ha="center",
-                fontsize=10,
-                color="black",
-                fontweight="bold"
+                0.5, 1.18, str(label_glycan),
+                transform=ax.transAxes, ha="center",
+                fontsize=10, fontweight="bold", color="black"
             )
 
             _add_glycan_image(
-                ax,
-                glycan_image_dir,
-                label_glycan,
-                xy=(0.5, 1.45),
-                zoom=0.15,
-                crop=False
+                ax, glycan_image_dir, label_glycan,
+                xy=(0.5, 1.50), zoom=0.15, crop=False
             )
 
         for k in range(len(current_peptides), n_rows * cols_per_row):
             fig.add_subplot(gs[k // cols_per_row, k % cols_per_row]).axis("off")
 
         fig.tight_layout()
-        fig.subplots_adjust(top=0.82, bottom=0.15, hspace=1.1)
+        fig.subplots_adjust(top=0.80, bottom=0.15, hspace=1.3)
 
         legend_text = "Significance Level:  ns (p > 0.05)   * (p ≤ 0.05)   ** (p ≤ 0.01)   *** (p ≤ 0.001)   **** (p ≤ 0.0001)"
         fig.text(0.5, 0.02, legend_text, ha="center", va="bottom", fontsize=12, fontweight="bold", color="black")
@@ -422,20 +434,6 @@ def create_box_plots_anova(
                 jitter=0.08, size=4, alpha=0.5, ax=ax, order=group_order
             )
 
-            try:
-                pval_anova = top_hits.loc[top_hits["Glycopeptide"] == glycopeptide, pval_col].values[0]
-                ax.text(0.5, 1.28, f"ANOVA p={pval_anova:.2g}", ha="center", transform=ax.transAxes, fontsize=10, fontweight="bold", color="black")
-            except Exception:
-                pass
-
-            if len(group_labels) >= 2:
-                try:
-                    annotator = Annotator(ax, pairs, data=subset, x="Group", y=y_col, order=group_order)
-                    annotator.configure(test="t-test_ind", text_format="star", loc="inside", verbose=0)
-                    annotator.apply_and_annotate()
-                except Exception:
-                    pass
-
             ax.set_xticks(range(len(group_labels)))
             _style_axis(
                 ax,
@@ -447,47 +445,50 @@ def create_box_plots_anova(
                 rotation=30,
             )
 
+            if len(group_labels) >= 2:
+                try:
+                    annotator = Annotator(ax, pairs, data=subset, x="Group", y=y_col, order=group_order)
+                    annotator.configure(test="t-test_ind", text_format="star", loc="inside", verbose=0)
+                    annotator.apply_and_annotate()
+                except Exception:
+                    pass
+
+            text_y = 1.06
             ax.text(
-                0.5, 1.05, gene,
-                transform=ax.transAxes,
-                ha="center",
-                fontsize=12,
-                fontweight="bold"
+                0.5, text_y, f"{gene}-",
+                transform=ax.transAxes, ha="right",
+                fontsize=12, fontweight="bold", color="black"
             )
 
             ax.text(
-                0.5, 1.14, fr"$Asn^{{{site}}}$",
-                transform=ax.transAxes,
-                ha="center",
-                fontsize=12,
-                fontweight="bold",
-                color="red"
+                0.5, text_y, fr"Asn$^{{{site}}}$",
+                transform=ax.transAxes, ha="left",
+                fontsize=12, fontweight="bold", color="red"
             )
 
             # Glycan composition text, e.g. 4 3 2 1
             ax.text(
-                0.5, 1.23, str(glycan),
-                transform=ax.transAxes,
-                ha="center",
-                fontsize=10,
-                color="black",
-                fontweight="bold"
+                0.5, 1.18, str(glycan),
+                transform=ax.transAxes, ha="center",
+                fontsize=10, fontweight="bold", color="black"
             )
+            
+            try:
+                pval_anova = top_hits.loc[top_hits["Glycopeptide"] == glycopeptide, pval_col].values[0]
+                ax.text(0.5, 1.28, f"ANOVA p={pval_anova:.2g}", ha="center", transform=ax.transAxes, fontsize=10, fontweight="bold", color="black")
+            except Exception:
+                pass
 
             _add_glycan_image(
-                ax,
-                glycan_image_dir,
-                glycan,
-                xy=(0.5, 1.55),
-                zoom=0.15,
-                crop=True
+                ax, glycan_image_dir, glycan,
+                xy=(0.5, 1.55), zoom=0.15, crop=True
             )
 
         for k in range(len(current_peptides), n_rows * cols_per_row):
             fig.add_subplot(gs[k // cols_per_row, k % cols_per_row]).axis("off")
 
         fig.tight_layout()
-        fig.subplots_adjust(top=0.82, bottom=0.15, hspace=1.1)
+        fig.subplots_adjust(top=0.80, bottom=0.15, hspace=1.4)
 
         legend_text = "Significance Level:  ns (p > 0.05)   * (p ≤ 0.05)   ** (p ≤ 0.01)   *** (p ≤ 0.001)   **** (p ≤ 0.0001)"
         fig.text(0.5, 0.02, legend_text, ha="center", va="bottom", fontsize=12, fontweight="bold", color="black")
@@ -598,36 +599,6 @@ def create_box_plots_top_n(
                     except Exception:
                         pass
 
-                    _, site, glycan = _safe_gp_parts(glyco)
-
-                    ax.text(
-                        0.5, 1.05, fr"$Asn^{{{site}}}$",
-                        transform=ax.transAxes,
-                        ha="center",
-                        fontsize=12,
-                        fontweight="bold",
-                        color="red"
-                    )
-
-                    # Glycan composition text, e.g. 4 3 2 1
-                    ax.text(
-                        0.5, 1.16, str(glycan),
-                        transform=ax.transAxes,
-                        ha="center",
-                        fontsize=10,
-                        color="black",
-                        fontweight="bold"
-                    )
-
-                    _add_glycan_image(
-                        ax,
-                        glycan_image_dir,
-                        glycan,
-                        xy=(0.5, 1.42),
-                        zoom=0.15,
-                        crop=True
-                    )
-
                     ax.set_xticks([0, 1])
                     _style_axis(
                         ax,
@@ -639,13 +610,40 @@ def create_box_plots_top_n(
                         rotation=0,
                     )
 
+                    gene_name, site, glycan = _safe_gp_parts(glyco)
+
+                    text_y = 1.06
+                    ax.text(
+                        0.5, text_y, f"{gene_name}-",
+                        transform=ax.transAxes, ha="right",
+                        fontsize=12, fontweight="bold", color="black"
+                    )
+
+                    ax.text(
+                        0.5, text_y, fr"Asn$^{{{site}}}$",
+                        transform=ax.transAxes, ha="left",
+                        fontsize=12, fontweight="bold", color="red"
+                    )
+
+                    # Glycan composition text, e.g. 4 3 2 1
+                    ax.text(
+                        0.5, 1.18, str(glycan),
+                        transform=ax.transAxes, ha="center",
+                        fontsize=10, fontweight="bold", color="black"
+                    )
+
+                    _add_glycan_image(
+                        ax, glycan_image_dir, glycan,
+                        xy=(0.5, 1.50), zoom=0.15, crop=True
+                    )
+
                 for j in range(i + 1, nrows * ncols):
                     row = j // ncols
                     col = j % ncols
                     axs[row][col].axis("off")
 
                 fig.suptitle(f"Gene: {gene}", fontsize=18, fontweight="bold", y=0.98)
-                fig.tight_layout(rect=[0, 0.05, 1, 0.95], pad=3.5, h_pad=6.5, w_pad=2.5)
+                fig.tight_layout(rect=[0, 0.05, 1, 0.95], pad=3.5, h_pad=8.0, w_pad=2.5)
 
                 legend_text = "Significance Level:  ns (p > 0.05)   * (p ≤ 0.05)   ** (p ≤ 0.01)   *** (p ≤ 0.001)   **** (p ≤ 0.0001)"
                 fig.text(0.5, 0.02, legend_text, ha="center", va="bottom", fontsize=12, fontweight="bold", color="black")
@@ -756,36 +754,6 @@ def create_box_plots_top_n_anova(
                     except Exception:
                         pass
 
-                    _, site, glycan = _safe_gp_parts(glyco)
-
-                    ax.text(
-                        0.5, 1.05, fr"$Asn^{{{site}}}$",
-                        transform=ax.transAxes,
-                        ha="center",
-                        fontsize=12,
-                        fontweight="bold",
-                        color="red"
-                    )
-
-                    # Glycan composition text, e.g. 4 3 2 1
-                    ax.text(
-                        0.5, 1.16, str(glycan),
-                        transform=ax.transAxes,
-                        ha="center",
-                        fontsize=10,
-                        color="black",
-                        fontweight="bold"
-                    )
-
-                    _add_glycan_image(
-                        ax,
-                        glycan_image_dir,
-                        glycan,
-                        xy=(0.5, 1.42),
-                        zoom=0.15,
-                        crop=True
-                    )
-
                     ax.set_xticks(range(3))
                     _style_axis(
                         ax,
@@ -797,13 +765,40 @@ def create_box_plots_top_n_anova(
                         rotation=30,
                     )
 
+                    gene_name, site, glycan = _safe_gp_parts(glyco)
+
+                    text_y = 1.06
+                    ax.text(
+                        0.5, text_y, f"{gene_name}-",
+                        transform=ax.transAxes, ha="right",
+                        fontsize=12, fontweight="bold", color="black"
+                    )
+
+                    ax.text(
+                        0.5, text_y, fr"Asn$^{{{site}}}$",
+                        transform=ax.transAxes, ha="left",
+                        fontsize=12, fontweight="bold", color="red"
+                    )
+
+                    # Glycan composition text, e.g. 4 3 2 1
+                    ax.text(
+                        0.5, 1.18, str(glycan),
+                        transform=ax.transAxes, ha="center",
+                        fontsize=10, fontweight="bold", color="black"
+                    )
+
+                    _add_glycan_image(
+                        ax, glycan_image_dir, glycan,
+                        xy=(0.5, 1.50), zoom=0.15, crop=True
+                    )
+
                 for j in range(i + 1, nrows * ncols):
                     row = j // ncols
                     col = j % ncols
                     axs[row][col].axis("off")
 
                 fig.suptitle(f"Gene: {gene}", fontsize=18, fontweight="bold", y=0.98)
-                fig.tight_layout(rect=[0, 0.05, 1, 0.95], pad=3.5, h_pad=6.5, w_pad=2.5)
+                fig.tight_layout(rect=[0, 0.05, 1, 0.95], pad=3.5, h_pad=8.0, w_pad=2.5)
 
                 legend_text = "Significance Level:  ns (p > 0.05)   * (p ≤ 0.05)   ** (p ≤ 0.01)   *** (p ≤ 0.001)   **** (p ≤ 0.0001)"
                 fig.text(0.5, 0.02, legend_text, ha="center", va="bottom", fontsize=12, fontweight="bold", color="black")

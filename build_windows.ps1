@@ -54,6 +54,7 @@ streamlit-desktop-app build app.py `
     --paths "$(Join-Path $ROOT 'ge')" `
     --paths "$(Join-Path $ROOT 'tp')" `
     --paths "$(Join-Path $ROOT 'faq')" `
+    --add-data "$ROOT\app_launcher_*.py;." `
     --hidden-import app_launcher_GE `
     --hidden-import app_launcher_GE_LF `
     --hidden-import app_launcher_TP `

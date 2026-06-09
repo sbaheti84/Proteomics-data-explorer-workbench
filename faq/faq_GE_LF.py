@@ -56,7 +56,7 @@ def faq_section():
                 Check:
 
                 - PCA and correlation plots
-                - Overview heatmap
+                - Sample clustering heatmap
                 - Glycan class summary
                 - Differential results
                 - Volcano / waterfall
@@ -93,8 +93,7 @@ def faq_section():
 
                 - X-axis = log2 fold-change
                 - Y-axis = statistical significance
-                - Farther left/right = larger abundance change
-                - Higher points = stronger significance
+                - Toggle between Static and Interactive modes for exploration.
                 """
             )
 
@@ -116,9 +115,9 @@ def faq_section():
                 #### Box / Lollipop Plots
                 Use these to validate individual findings.
 
-                - Box plot: sample-level abundance pattern
-                - Box plot (Gene): selected gene-level review
-                - Lollipop: glycosylation site-level changes across a protein
+                - Box plot: sample-level abundance pattern (can filter by up/down hits).
+                - Box plot (Gene): selected gene-level review.
+                - Lollipop: glycosylation site-level changes across a protein.
                 """
             )
 
@@ -325,7 +324,7 @@ def faq_section():
                     "The **Data Integrity Check & Sanity Profiling** section includes:\n\n"
                     "- Principal Component Analysis (PCA)\n"
                     "- Correlation Matrix\n"
-                    "- Heatmap\n"
+                    "- Sample Clustering\n"
                     "- Glycan Classification Summary"
                 ),
             },
@@ -334,7 +333,7 @@ def faq_section():
                 "Question": "What preprocessing options should I check before QC?",
                 "Answer": (
                     "The app includes LFQ preprocessing options such as treating zeros as missing values and log2 transformation. "
-                    "These steps help avoid artificial zeros, stabilize variance, and make PCA, heatmaps, and statistical tests more interpretable."
+                    "These steps help avoid artificial zeros, stabilize variance, and make PCA, clustering, and statistical tests more interpretable."
                 ),
             },
             {
@@ -425,7 +424,8 @@ def faq_section():
                 "Question": "How do I interpret the volcano plot?",
                 "Answer": (
                     "The volcano plot shows log2 fold-change on the x-axis and statistical significance on the y-axis. "
-                    "Points farther left or right have larger abundance changes; points higher up have stronger significance."
+                    "Points farther left or right have larger abundance changes; points higher up have stronger significance. "
+                    "You can toggle between a Static image and an Interactive plot to hover over individual points."
                 ),
             },
             {
@@ -461,7 +461,7 @@ def faq_section():
                 "Question": "How should I interpret box plots?",
                 "Answer": (
                     "Box plots show abundance distributions across groups. They help confirm whether a differential result is consistent "
-                    "across samples or driven by one outlier."
+                    "across samples or driven by one outlier. For pairwise tests, you can highlight specifically up, down, or all top hits."
                 ),
             },
             {

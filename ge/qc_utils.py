@@ -44,9 +44,13 @@ def create_pca_plot(
     df: pd.DataFrame,
     group_samples: list[list],
     group_labels: list[str],
+    title: str = "PCA",
     pc_x: str = "PC1",
     pc_y: str = "PC2",
+    hide_outliers: bool = False,
+    label_outliers: bool = True,
     draw_ellipses: bool = False,
+    zoom_q: float = 1.0,
     palette: dict = None,
     quant_mode: str = "LFQ",
     lfq_zero_as_na: bool = True,
@@ -54,8 +58,15 @@ def create_pca_plot(
     key_suffix: str = ""
 ):
     """
-    Create PCA plot for sample groups, with optional confidence ellipses,
-    allowing users to select which Principal Components to plot.
+    Create PCA plot for sample groups.
+
+    Added features:
+      - robust outlier detection using IQR on the plotted PCs
+      - optional outlier hiding
+      - optional sample-name labels for outliers
+      - optional quantile zoom
+      - optional group confidence ellipses
+      - selectable PCs such as PC1 vs PC2, PC1 vs PC3, etc.
 
     LFQ:
         uses log2-transformed intensity values
@@ -63,20 +74,38 @@ def create_pca_plot(
         uses values as provided
     """
 
-    all_samples = [s for group in group_samples for s in group]
-    if not all_samples:
-        st.error("No sample columns were provided for PCA.")
-        return
+    if df is None or df.empty:
+        st.warning("Expression data is empty.")
+        return None
 
+    # ---------------------------------------------------------
+    # Flatten sample list while preserving group/sample order
+    # ---------------------------------------------------------
+    all_samples = []
+    sample_to_group = {}
+
+    for label, samples in zip(group_labels, group_samples):
+        for sample in samples:
+            if sample not in sample_to_group:
+                sample_to_group[sample] = label
+                all_samples.append(sample)
+
+    # Keep only sample columns present in the dataframe
+    all_samples = [s for s in all_samples if s in df.columns]
+
+    if len(all_samples) < 2:
+        st.warning("Need at least 2 valid sample columns for PCA.")
+        return None
+
+    # ---------------------------------------------------------
+    # Data preprocessing
+    # ---------------------------------------------------------
     data = df[all_samples].copy()
     for col in all_samples:
         data[col] = pd.to_numeric(data[col], errors="coerce")
 
     quant_mode = str(quant_mode).strip().upper()
 
-    # -----------------------------
-    # Quant-mode aware preprocessing
-    # -----------------------------
     if quant_mode == "LFQ":
         if lfq_zero_as_na:
             data = data.replace(0, np.nan)
@@ -84,81 +113,55 @@ def create_pca_plot(
         else:
             data = np.log2(data + float(lfq_pseudocount))
 
-    # Remove rows with all missing values
+    # Remove features with all missing values
     data = data.dropna(how="all")
+    if data.empty:
+        st.warning("Not enough data to perform PCA after removing empty rows.")
+        return None
 
-    # For PCA, transpose so samples are rows and features are columns
+    # Fill remaining missing values by feature/row median before transpose
+    row_median = data.median(axis=1)
+    data = data.apply(lambda col: col.fillna(row_median))
+
+    # samples x features
     data_t = data.T
 
-    # Fill remaining missing values feature-wise after transpose
-    # Each column in data_t is a feature/glycopeptide
-    data_t = data_t.apply(lambda col: col.fillna(col.median()), axis=0)
-
-    # Remove columns still all-NA or zero-variance
+    # Remove features still missing or with no variance
     data_t = data_t.dropna(axis=1, how="all")
-    if data_t.empty:
-        st.error("Not enough data to perform PCA after preprocessing.")
-        return
-
     non_constant_cols = data_t.columns[data_t.nunique(dropna=True) > 1]
     data_t = data_t[non_constant_cols]
 
     if data_t.empty or data_t.shape[0] < 2 or data_t.shape[1] < 1:
-        st.error("Not enough informative data to perform PCA.")
-        return
+        st.warning("Not enough informative data to perform PCA.")
+        return None
 
-    # Standardize data
-    x_scaled = StandardScaler().fit_transform(data_t)
+    # ---------------------------------------------------------
+    # PCA
+    # ---------------------------------------------------------
+    x_scaled = StandardScaler(with_mean=True, with_std=True).fit_transform(data_t)
 
-    # Calculate PCA
     n_comps = min(10, x_scaled.shape[0], x_scaled.shape[1])
-    if n_comps < 1:
-        st.error("Could not compute PCA because the processed matrix is too small.")
-        return
+    if n_comps < 2:
+        st.warning("Not enough components to plot PCA. PCA requires at least 2 components.")
+        return None
 
-    pca_model = PCA(n_components=n_comps)
-    pca = pca_model.fit_transform(x_scaled)
+    pca_model = PCA(n_components=n_comps, random_state=0)
+    scores = pca_model.fit_transform(x_scaled)
 
-    # Store variance and create column names
-    pc_cols = [f"PC{i+1}" for i in range(n_comps)]
+    pc_cols = [f"PC{i + 1}" for i in range(n_comps)]
     pc_vars = {
-        f"PC{i+1}": pca_model.explained_variance_ratio_[i] * 100
+        f"PC{i + 1}": pca_model.explained_variance_ratio_[i] * 100
         for i in range(n_comps)
     }
 
-    # Build result DataFrame
-    pc_df = pd.DataFrame(pca, columns=pc_cols, index=data_t.index)
-
-    group_column = []
-    sample_order = []
-    for label, samples in zip(group_labels, group_samples):
-        group_column.extend([label] * len(samples))
-        sample_order.extend(samples)
-
-    # Align sample labels to actual PCA rows
-    sample_to_group = {}
-    for label, samples in zip(group_labels, group_samples):
-        for s in samples:
-            sample_to_group[s] = label
-
-    pc_df["Sample"] = pc_df.index
+    pc_df = pd.DataFrame(scores, columns=pc_cols)
+    pc_df["Sample"] = list(data_t.index)
     pc_df["Group"] = pc_df["Sample"].map(sample_to_group)
-
-    if pc_df["Group"].isna().any():
-        pc_df = pc_df.dropna(subset=["Group"]).copy()
+    pc_df = pc_df.dropna(subset=["Group"]).copy()
 
     if pc_df.empty:
-        st.error("No valid grouped samples remained for PCA plotting.")
-        return
-
-    # Apply Custom Palette
-    if palette is None:
-        default_palette = ["#b3e2cd", "#fdcdac", "#cbd5e8", "#decbe4", "#ccebc5", "#fed9a6"]
-        unique_groups = list(dict.fromkeys(group_labels))
-        palette = {
-            label: default_palette[i % len(default_palette)]
-            for i, label in enumerate(unique_groups)
-        }
+        st.warning("No valid grouped samples remained for PCA plotting.")
+        return None
 
     # Validate requested PCs
     if pc_x not in pc_cols:
@@ -166,35 +169,119 @@ def create_pca_plot(
     if pc_y not in pc_cols:
         pc_y = pc_cols[1] if len(pc_cols) > 1 else pc_cols[0]
 
+    # ---------------------------------------------------------
+    # Outlier detection using robust IQR on selected PCs
+    # ---------------------------------------------------------
+    def iqr_outlier(series, k=2.0):
+        q1, q3 = series.quantile(0.25), series.quantile(0.75)
+        iqr = q3 - q1
+        if pd.isna(iqr) or iqr == 0:
+            return pd.Series(False, index=series.index)
+        lo, hi = q1 - k * iqr, q3 + k * iqr
+        return (series < lo) | (series > hi)
+
+    pc_df["Outlier"] = (
+        iqr_outlier(pc_df[pc_x], k=2.0) |
+        iqr_outlier(pc_df[pc_y], k=2.0)
+    )
+
+    plot_df = pc_df[~pc_df["Outlier"]].copy() if hide_outliers else pc_df.copy()
+    if plot_df.empty:
+        st.warning("All samples were marked as outliers. Showing all samples instead.")
+        plot_df = pc_df.copy()
+
+    # ---------------------------------------------------------
+    # Palette
+    # ---------------------------------------------------------
+    if palette is None:
+        unique_groups = list(dict.fromkeys([g for g in group_labels if g in pc_df["Group"].unique()]))
+        if not unique_groups:
+            unique_groups = list(pc_df["Group"].dropna().unique())
+        default_colors = sns.color_palette("Set2", n_colors=max(1, len(unique_groups))).as_hex()
+        palette = {
+            group: default_colors[idx % len(default_colors)]
+            for idx, group in enumerate(unique_groups)
+        }
+
+    # Make sure every plotted group has a color
+    missing_groups = [g for g in plot_df["Group"].dropna().unique() if g not in palette]
+    if missing_groups:
+        extra_colors = sns.color_palette("husl", n_colors=len(missing_groups)).as_hex()
+        for g, c in zip(missing_groups, extra_colors):
+            palette[g] = c
+
+    # ---------------------------------------------------------
     # Plot
+    # ---------------------------------------------------------
     fig, ax = plt.subplots(figsize=(8.5, 6))
+
     sns.scatterplot(
-        data=pc_df,
+        data=plot_df,
         x=pc_x,
         y=pc_y,
         hue="Group",
         palette=palette,
         s=100,
         edgecolor="black",
-        linewidth=1.2,
-        ax=ax
+        linewidth=1.0,
+        ax=ax,
+        zorder=3
     )
 
-    # Draw ellipses
+    # Confidence ellipses
     if draw_ellipses:
         for group, color in palette.items():
-            group_data = pc_df[pc_df["Group"] == group]
-            if len(group_data) >= 2:
-                draw_confidence_ellipse(group_data[pc_x], group_data[pc_y], ax, color)
+            group_data = plot_df[plot_df["Group"] == group]
+            if len(group_data) >= 3:
+                x_vals = group_data[pc_x].astype(float).values
+                y_vals = group_data[pc_y].astype(float).values
+                try:
+                    draw_confidence_ellipse(x_vals, y_vals, ax, color, n_std=2.0, zorder=1)
+                except Exception:
+                    pass
 
         ax.relim()
         ax.autoscale_view()
 
+    # Label outliers with sample names
+    if label_outliers and not hide_outliers:
+        outlier_df = pc_df[pc_df["Outlier"]].copy()
+        for _, row in outlier_df.iterrows():
+            ax.text(
+                row[pc_x],
+                row[pc_y],
+                str(row["Sample"]),
+                fontsize=9,
+                ha="left",
+                va="bottom",
+                zorder=4
+            )
+
+    # Quantile zoom based on plotted points
+    zoom_q = float(zoom_q)
+    if len(plot_df) >= 3 and zoom_q < 1.0:
+        zoom_q = min(max(zoom_q, 0.50), 1.0)
+        qlo = 1.0 - zoom_q
+
+        xlo, xhi = plot_df[pc_x].quantile(qlo), plot_df[pc_x].quantile(zoom_q)
+        ylo, yhi = plot_df[pc_y].quantile(qlo), plot_df[pc_y].quantile(zoom_q)
+
+        xpad = (xhi - xlo) * 0.08 if xhi > xlo else 1.0
+        ypad = (yhi - ylo) * 0.08 if yhi > ylo else 1.0
+
+        ax.set_xlim(xlo - xpad, xhi + xpad)
+        ax.set_ylim(ylo - ypad, yhi + ypad)
+    elif draw_ellipses:
+        ax.relim()
+        ax.autoscale_view()
+
+    # Labels and styling
     title_suffix = "LFQ" if quant_mode == "LFQ" else "TMT"
-    ax.set_title(f"PCA ({title_suffix})", fontsize=14, fontweight="bold", pad=15)
+    final_title = title if title else f"PCA ({title_suffix})"
+
+    #ax.set_title(final_title, fontsize=14, fontweight="bold", pad=15)
     ax.set_xlabel(f"{pc_x} ({pc_vars.get(pc_x, 0):.1f}%)", fontsize=12, fontweight="bold")
     ax.set_ylabel(f"{pc_y} ({pc_vars.get(pc_y, 0):.1f}%)", fontsize=12, fontweight="bold")
-
     ax.grid(False)
     ax.tick_params(axis="both", labelsize=12)
 
@@ -207,13 +294,363 @@ def create_pca_plot(
     )
 
     plt.tight_layout(rect=[0, 0, 0.85, 1])
-
     st.pyplot(fig)
 
     if "add_plot_download_buttons" in globals():
-        add_plot_download_buttons(fig, base_filename=f"pca_plot_{quant_mode}", key_suffix=key_suffix)
+        add_plot_download_buttons(
+            fig,
+            base_filename=f"pca_plot_{quant_mode}",
+            key_suffix=key_suffix
+        )
+
+    # Outlier table
+    if pc_df["Outlier"].any():
+        outlier_table = (
+            pc_df.loc[pc_df["Outlier"], ["Sample", "Group", pc_x, pc_y]]
+            .sort_values(pc_x, ascending=False)
+            .reset_index(drop=True)
+        )
+        st.caption("Outliers detected. Check these samples for loading, normalization, missingness, or batch effects.")
+        st.dataframe(outlier_table, use_container_width=True, hide_index=True)
 
     st.session_state["report_pca_fig"] = fig
+    st.session_state["report_pca_scores"] = pc_df
+
+    return fig
+
+
+def create_sample_clustering(
+    df: pd.DataFrame,
+    group_samples: list[list],
+    group_labels: list[str],
+    title: str = "Sample clustering",
+    top_n: int = 50,
+    norm_type: str = "Z-score",
+    quant_mode: str = "TMT",
+    palette: dict = None,
+    lfq_zero_as_na: bool = True,
+    lfq_pseudocount: float = 1.0,
+    distance_metric: str = "correlation",
+    linkage_method: str = "average",
+    key_suffix: str = ""
+):
+    """
+    Create sample-only hierarchical clustering dendrogram.
+
+    This does NOT draw a feature heatmap. It only shows how samples cluster
+    based on abundance profiles. Group labels are used only for coloring sample
+    names and legend entries, not for clustering.
+    """
+
+    if df is None or df.empty:
+        st.warning("Expression data is empty.")
+        return None
+
+    # ---------------------------------------------------------
+    # Flatten samples while preserving user-defined group/sample order
+    # ---------------------------------------------------------
+    all_samples = []
+    sample_to_group = {}
+
+    for label, samples in zip(group_labels or [], group_samples or []):
+        for sample in samples or []:
+            if sample not in sample_to_group:
+                sample_to_group[sample] = label
+                all_samples.append(sample)
+
+    # Keep only columns present in the dataframe
+    all_samples = [s for s in all_samples if s in df.columns]
+
+    if len(all_samples) < 2:
+        st.warning("Need at least 2 valid sample columns for sample clustering.")
+        return None
+
+    # ---------------------------------------------------------
+    # Prepare abundance matrix
+    # ---------------------------------------------------------
+    data = df[all_samples].copy()
+
+    for col in all_samples:
+        data[col] = pd.to_numeric(data[col], errors="coerce")
+
+    quant_mode = str(quant_mode).strip().upper()
+
+    if quant_mode == "LFQ":
+        if lfq_zero_as_na:
+            data = data.replace(0, np.nan)
+            data = np.log2(data)
+        else:
+            data = np.log2(data + float(lfq_pseudocount))
+
+    # Remove features with no data
+    data = data.dropna(how="all")
+
+    if data.empty:
+        st.warning("Not enough data for sample clustering after removing empty rows.")
+        return None
+
+    # Impute feature-level missing values using row median
+    row_median = data.median(axis=1)
+    data = data.apply(lambda col: col.fillna(row_median))
+
+    # Transpose: samples x features
+    data_t = data.T
+
+    # Remove features still all missing
+    data_t = data_t.dropna(axis=1, how="all")
+
+    # Remove zero-variance features
+    non_constant_cols = data_t.columns[data_t.nunique(dropna=True) > 1]
+    data_t = data_t[non_constant_cols]
+
+    if data_t.empty or data_t.shape[0] < 2 or data_t.shape[1] < 1:
+        st.warning("Not enough informative data to cluster samples.")
+        return None
+
+    # ---------------------------------------------------------
+    # Keep top most-variable features
+    # ---------------------------------------------------------
+    try:
+        top_n = int(top_n)
+    except Exception:
+        top_n = 50
+
+    top_n = max(2, min(top_n, data_t.shape[1]))
+
+    variances = data_t.var(axis=0, skipna=True).sort_values(ascending=False)
+    data_t = data_t.loc[:, variances.head(top_n).index]
+
+    # ---------------------------------------------------------
+    # Normalize if requested
+    # ---------------------------------------------------------
+    norm_type_clean = str(norm_type or "Z-score").strip().lower()
+
+    if norm_type_clean.startswith("z"):
+        x = StandardScaler(with_mean=True, with_std=True).fit_transform(data_t.values)
+    else:
+        x = data_t.values.astype(float)
+
+    # ---------------------------------------------------------
+    # Hierarchical clustering
+    # ---------------------------------------------------------
+    try:
+        from scipy.cluster.hierarchy import linkage, dendrogram
+        from scipy.spatial.distance import pdist
+    except Exception:
+        st.error("Sample clustering requires scipy. Install it with: pip install scipy")
+        return None
+
+    try:
+        distances = pdist(x, metric=distance_metric)
+
+        if np.any(~np.isfinite(distances)):
+            distances = pdist(np.nan_to_num(x, nan=0.0), metric="euclidean")
+            distance_metric_used = "euclidean"
+        else:
+            distance_metric_used = distance_metric
+
+        z = linkage(distances, method=linkage_method)
+
+    except Exception:
+        # Correlation distance can fail if a sample has no variance
+        z = linkage(
+            pdist(np.nan_to_num(x, nan=0.0), metric="euclidean"),
+            method="average"
+        )
+        distance_metric_used = "euclidean"
+        linkage_method = "average"
+
+    # ---------------------------------------------------------
+    # Palette
+    # ---------------------------------------------------------
+    if palette is None:
+        unique_groups = list(dict.fromkeys([g for g in group_labels if g is not None]))
+
+        if not unique_groups:
+            unique_groups = ["Samples"]
+
+        default_colors = sns.color_palette(
+            "Set2",
+            n_colors=max(1, len(unique_groups))
+        ).as_hex()
+
+        palette = {
+            group: default_colors[idx % len(default_colors)]
+            for idx, group in enumerate(unique_groups)
+        }
+
+    observed_groups = list(
+        dict.fromkeys([sample_to_group.get(s, "Unassigned") for s in all_samples])
+    )
+
+    missing_groups = [g for g in observed_groups if g not in palette]
+
+    if missing_groups:
+        extra_colors = sns.color_palette("husl", n_colors=len(missing_groups)).as_hex()
+        for group, color in zip(missing_groups, extra_colors):
+            palette[group] = color
+
+    # ---------------------------------------------------------
+    # Plot dendrogram only
+    # ---------------------------------------------------------
+    fig_width = max(9.5, min(28, 0.48 * len(all_samples) + 5))
+    fig_height = 6.8
+
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+
+    display_labels = [
+        str(s).replace("Abundance: ", "").strip()
+        for s in all_samples
+    ]
+
+    dendro = dendrogram(
+        z,
+        labels=display_labels,
+        leaf_rotation=75,
+        leaf_font_size=max(7, min(11, 13 - len(all_samples) // 8)),
+        ax=ax,
+        color_threshold=None,
+        above_threshold_color="#555555",
+    )
+
+    # ---------------------------------------------------------
+    # Force ticks and labels to display
+    # ---------------------------------------------------------
+    ax.tick_params(
+        axis="x",
+        which="major",
+        bottom=True,
+        top=False,
+        labelbottom=True,
+        labeltop=False,
+        length=5,
+        width=1,
+        pad=6,
+    )
+
+    ax.tick_params(
+        axis="y",
+        which="major",
+        left=True,
+        right=False,
+        labelleft=True,
+        length=5,
+        width=1,
+        pad=4,
+    )
+
+    ax.set_xlabel("Samples", fontsize=12, fontweight="bold", labelpad=18)
+    ax.set_ylabel(
+        f"Distance ({distance_metric_used})",
+        fontsize=12,
+        fontweight="bold"
+    )
+
+    #ax.set_title(title, fontsize=14, fontweight="bold", pad=14)
+    # Keep only x-axis and y-axis; remove plot box
+    ax.grid(False)
+
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_visible(True)
+    ax.spines["bottom"].set_visible(True)
+
+    ax.spines["left"].set_linewidth(1.2)
+    ax.spines["bottom"].set_linewidth(1.2)
+
+    ax.tick_params(axis="x", bottom=True, top=False)
+    ax.tick_params(axis="y", left=True, right=False)
+
+    # ---------------------------------------------------------
+    # Color leaf labels by sample group
+    # ---------------------------------------------------------
+    label_to_original = {
+        str(s).replace("Abundance: ", "").strip(): s
+        for s in all_samples
+    }
+
+    for tick in ax.get_xticklabels():
+        shown_label = tick.get_text()
+        original_sample = label_to_original.get(shown_label, shown_label)
+        group = sample_to_group.get(original_sample, "Unassigned")
+
+        tick.set_color(palette.get(group, "#333333"))
+        tick.set_fontweight("bold")
+        tick.set_rotation(75)
+        tick.set_ha("right")
+        tick.set_va("top")
+
+    # ---------------------------------------------------------
+    # Group legend
+    # ---------------------------------------------------------
+    import matplotlib.patches as mpatches
+
+    handles = []
+    for group in observed_groups:
+        handles.append(
+            mpatches.Patch(
+                color=palette.get(group, "#333333"),
+                label=str(group)
+            )
+        )
+
+    if handles:
+        ax.legend(
+            handles=handles,
+            title="Group",
+            title_fontsize=11,
+            fontsize=10,
+            loc="center left",
+            bbox_to_anchor=(1.02, 0.5),
+            frameon=True,
+        )
+
+    # Do not rely only on tight_layout; rotated dendrogram labels get clipped.
+    fig.subplots_adjust(
+        left=0.08,
+        right=0.82,
+        bottom=0.38,
+        top=0.90,
+    )
+
+    st.pyplot(fig)
+
+    # ---------------------------------------------------------
+    # Download buttons
+    # ---------------------------------------------------------
+    if "add_plot_download_buttons" in globals():
+        add_plot_download_buttons(
+            fig,
+            base_filename="sample_clustering_dendrogram",
+            key_suffix=key_suffix or "sample_clustering"
+        )
+
+    # ---------------------------------------------------------
+    # Clustered sample order table
+    # ---------------------------------------------------------
+    clustered_labels = dendro.get("ivl", [])
+    clustered_samples = [
+        label_to_original.get(label, label)
+        for label in clustered_labels
+    ]
+
+    order_df = pd.DataFrame({
+        "Cluster_Order": list(range(1, len(clustered_samples) + 1)),
+        "Sample": clustered_samples,
+        "Display_Label": clustered_labels,
+        "Group": [
+            sample_to_group.get(sample, "Unassigned")
+            for sample in clustered_samples
+        ],
+    })
+
+    with st.expander("Clustered sample order", expanded=False):
+        st.dataframe(order_df, use_container_width=True, hide_index=True)
+
+    st.session_state["report_sample_clustering_fig"] = fig
+    st.session_state["report_sample_clustering_order"] = order_df
+
+    return fig
 
 def create_sample_corr_heatmap(df: pd.DataFrame, sample_cols: list[str]):
     """
@@ -245,12 +682,13 @@ def create_sample_corr_heatmap(df: pd.DataFrame, sample_cols: list[str]):
     )
     
     axis_label_size = max(6, 12 - int(num_samples / 3))
-    ax.tick_params(axis='both', labelsize=axis_label_size) 
-    ax.set_title("Sample-Sample Correlation Heatmap", fontsize=14, fontweight="bold", pad=15)
+    
+    # Force physical tick marks to show on both axes
+    ax.tick_params(axis='both', labelsize=axis_label_size, left=True, bottom=True, color='black', width=1) 
     
     # Format colorbar labels
     cbar = ax.collections[0].colorbar
-    cbar.ax.tick_params(labelsize=10)
+    cbar.ax.tick_params(labelsize=10, left=False, right=True) # Ensure colorbar ticks are visible too
     
     plt.tight_layout()
     st.pyplot(fig)
@@ -298,7 +736,15 @@ def create_abundance_density(df: pd.DataFrame, abundance_cols: list[str]):
     ax.set_title("Log2 Abundance Density per Sample", fontsize=14, fontweight='bold', pad=15)
     ax.set_xlabel("Log2 Abundance", fontsize=12, fontweight='bold')
     ax.set_ylabel("Density", fontsize=12, fontweight='bold')
-    ax.tick_params(axis='both', labelsize=12)
+    
+    # Force physical tick marks to show on both axes
+    ax.tick_params(axis='both', labelsize=12, left=True, bottom=True, color='black', width=1.2)
+    
+    # Ensure spines are clearly visible
+    ax.spines["left"].set_visible(True)
+    ax.spines["bottom"].set_visible(True)
+    ax.spines["left"].set_linewidth(1.2)
+    ax.spines["bottom"].set_linewidth(1.2)
     
     # Legend formatting - Move the EXISTING Seaborn legend instead of creating a new empty one
     sns.move_legend(
@@ -316,6 +762,7 @@ def create_abundance_density(df: pd.DataFrame, abundance_cols: list[str]):
     add_plot_download_buttons(fig, base_filename="abundance_density")
     st.session_state["report_abundance_density_fig"] = fig
 
+
 def create_glycan_class_summary(df: pd.DataFrame, glycan_col: str = "GlycanClass") -> pd.DataFrame:
     """
     Generate a summary table and bar chart for Glycan Classes.
@@ -323,53 +770,86 @@ def create_glycan_class_summary(df: pd.DataFrame, glycan_col: str = "GlycanClass
     class_counts = df[glycan_col].value_counts(dropna=False)
     class_percent = class_counts / class_counts.sum() * 100
 
-    # Safely construct DataFrame regardless of Pandas version
     summary_df = pd.DataFrame({
         "Glycan Class": class_counts.index.astype(str),
         "Count": class_counts.values,
         "Percent (%)": class_percent.values.round(2)
     })
 
-    # Display table (utilize full container width for a cleaner Streamlit layout)
     st.dataframe(summary_df, use_container_width=True, hide_index=True)
 
-    # ---------------------------------------------------------
-    # Plot bar chart
-    # ---------------------------------------------------------
-    # Force white background and ensure no seaborn grid styling carries over
     sns.set_style("white")
-    
     fig, ax = plt.subplots(figsize=(8, 5))
-    
-    # Plot using a consistent, professional blue color
-    sns.barplot(data=summary_df, x="Glycan Class", y="Count", color='#005a9c', ax=ax)
-    
-    # Explicitly remove background grid
+
+    sns.barplot(
+        data=summary_df,
+        x="Glycan Class",
+        y="Count",
+        color="#005a9c",
+        ax=ax
+    )
+
     ax.grid(False)
-    
-    # Despine to remove top and right borders
     sns.despine(ax=ax)
-    
-    # Add count labels directly on top of the bars
+
     for container in ax.containers:
-        ax.bar_label(container, padding=3, fontsize=10, color='#333333', fontweight='bold')
-    
-    # Typography and labels
-    ax.set_title("Distribution of Glycan Classes", fontsize=14, fontweight='bold', pad=15)
-    ax.set_xlabel("Glycan Class", fontsize=12, fontweight='bold')
-    ax.set_ylabel("Count", fontsize=12, fontweight='bold')
-    
-    # Rotate x-labels and align right to prevent text overlap
-    ax.tick_params(axis='x', rotation=45, labelsize=11)
+        ax.bar_label(
+            container,
+            padding=3,
+            fontsize=10,
+            color="#333333",
+            fontweight="bold"
+        )
+
+    ax.set_xlabel("Glycan Class", fontsize=12, fontweight="bold")
+    ax.set_ylabel("Count", fontsize=12, fontweight="bold")
+
+    # X-axis ticks
+    ax.tick_params(
+        axis="x",
+        which="major",
+        bottom=True,
+        top=False,
+        labelbottom=True,
+        length=5,
+        width=1.2,
+        labelsize=12,
+        rotation=45
+    )
+
     for tick in ax.get_xticklabels():
         tick.set_horizontalalignment("right")
-        
-    ax.tick_params(axis='y', labelsize=11)
-    
+
+    # Y-axis ticks
+    ax.tick_params(
+        axis="y",
+        which="major",
+        left=True,
+        right=False,
+        labelleft=True,
+        length=5,
+        width=1.2,
+        labelsize=12
+    )
+
+    # Keep only x and y axis lines
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_visible(True)
+    ax.spines["bottom"].set_visible(True)
+
+    ax.spines["left"].set_linewidth(1.2)
+    ax.spines["bottom"].set_linewidth(1.2)
+
     plt.tight_layout()
     st.pyplot(fig)
-    st.session_state["report_glycan_class_fig"] = fig
-    add_plot_download_buttons(fig, base_filename="glycan_class_distribution", key_suffix="static_glycan_class")
-    
-    return summary_df
 
+    st.session_state["report_glycan_class_fig"] = fig
+
+    add_plot_download_buttons(
+        fig,
+        base_filename="glycan_class_distribution",
+        key_suffix="static_glycan_class"
+    )
+
+    return summary_df

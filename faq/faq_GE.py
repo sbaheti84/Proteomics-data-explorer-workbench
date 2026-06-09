@@ -60,7 +60,7 @@ def faq_section():
 
                 - PCA
                 - Correlation matrix
-                - Overview heatmap
+                - Sample clustering heatmap
                 - Glycan classification summary
                 - Differential results
                 - Volcano, waterfall, heatmap, box, and lollipop plots
@@ -96,7 +96,7 @@ def faq_section():
 
                 - Left/right = fold-change direction
                 - Higher = more statistically significant
-                - Annotation slider labels the selected number of top markers
+                - Toggle between Static and Interactive modes for exploration.
                 """
             )
 
@@ -119,7 +119,7 @@ def faq_section():
                 #### Box / Lollipop Plots
                 Use these to validate individual findings.
 
-                - Box plot: sample-level abundance pattern
+                - Box plot: sample-level abundance pattern (can filter by up/down hits).
                 - Box plot (Gene): selected gene-level feature review
                 - Lollipop: site-level glycosylation changes across a protein
                 """
@@ -297,7 +297,7 @@ def faq_section():
                     "The **Data Integrity Check & Sanity Profiling** section currently includes:\n\n"
                     "- Principal Component Analysis (PCA)\n"
                     "- Correlation Matrix\n"
-                    "- Overview Heatmap\n"
+                    "- Sample Clustering\n"
                     "- Glycan Classification Summary"
                 ),
             },
@@ -311,9 +311,9 @@ def faq_section():
             },
             {
                 "Category": "QC",
-                "Question": "How should I use the overview heatmap?",
+                "Question": "How should I use the sample clustering heatmap?",
                 "Answer": (
-                    "The overview heatmap shows the top most-variable features across selected samples. "
+                    "The sample clustering heatmap shows the top most-variable features across selected samples. "
                     "Use Z-score scaling to compare relative patterns across samples, or raw abundance to inspect magnitude."
                 ),
             },
@@ -375,7 +375,8 @@ def faq_section():
                 "Question": "How should I interpret the volcano plot?",
                 "Answer": (
                     "The volcano plot shows log2 fold-change on the x-axis and significance on the y-axis. "
-                    "Points farther left or right have larger abundance changes. Points higher up are more significant."
+                    "Points farther left or right have larger abundance changes. Points higher up are more significant. "
+                    "You can view it as a Static plot or an Interactive plot for data exploration."
                 ),
             },
             {
@@ -419,7 +420,7 @@ def faq_section():
                 "Question": "How should I interpret box plots?",
                 "Answer": (
                     "Box plots show abundance distributions across groups for selected features. They help confirm whether "
-                    "a result is consistent across samples or driven by an outlier."
+                    "a result is consistent across samples or driven by an outlier. You can also filter the displayed top hits by direction (up/down)."
                 ),
             },
             {
