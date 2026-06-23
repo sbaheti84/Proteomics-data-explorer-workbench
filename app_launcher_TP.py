@@ -592,7 +592,7 @@ def create_static_volcano_plot_tp(
     control_label: str = "Control",
     test_label: str = "Test",
 ):
-    """Create a static, downloadable volcano plot for total proteomics with optional top-gene annotations."""
+    """Create a static, downloadable volcano plot for total proteomics with optional top-protein annotations."""
     plot_df = res.copy()
     plot_df[metric] = pd.to_numeric(plot_df[metric], errors="coerce")
     plot_df["log2FC"] = pd.to_numeric(plot_df["log2FC"], errors="coerce")
@@ -638,7 +638,7 @@ def create_static_volcano_plot_tp(
     #ax.axvline(fc_thresh, color="black", linestyle="--", linewidth=1)
     #ax.axvline(-fc_thresh, color="black", linestyle="--", linewidth=1)
 
-    # Annotate top significant genes/proteins in the downloadable static figure.
+    # Annotate top significant proteins in the downloadable static figure.
     if top_n_annot and top_n_annot > 0 and gene_col_name and gene_col_name in plot_df.columns:
         annot_df = plot_df.loc[mask_sig].copy()
 
@@ -999,7 +999,7 @@ def create_protein_profile_figure_tp(
     annotate_stats: bool = True,
     sig_metric: Optional[str] = None,
 ):
-    """Create one protein profile box/strip plot for a selected gene/protein."""
+    """Create one protein profile box/strip plot for a selected protein."""
     gene_rows = res.loc[res[gene_col_name].astype(str) == str(gene_name), "RowID"].dropna().tolist()
     if not gene_rows:
         return None
@@ -1062,7 +1062,7 @@ def create_protein_profile_figure_tp(
     )
 
     # Manual star annotation using the existing differential result.
-    # This keeps top-gene profiles consistent with the selected p/q-value filter
+    # This keeps top-protein profiles consistent with the selected p/q-value filter
     # and avoids missing/clipped statannotations in multi-panel grids and PDFs.
     if annotate_stats and len(unique_groups) >= 2:
         try:
@@ -1157,7 +1157,7 @@ def create_profile_grid_figure_tp(
     Combine individual protein profile figures into one matplotlib grid figure.
 
     This is for on-screen display so Streamlit zoom opens the whole grid,
-    not one individual gene at a time.
+    not one individual protein at a time.
     """
     from PIL import Image
     from io import BytesIO
@@ -1204,7 +1204,7 @@ def create_profile_grid_figure_tp(
         ax.imshow(img)
         ax.axis("off")
 
-        # Do not add a second title here; the individual plot already has the gene title.
+        # Do not add a second title here; the individual plot already has the protein title.
 
     grid_fig.tight_layout(pad=0.25)
     return grid_fig
@@ -1221,11 +1221,11 @@ def save_profile_pdf_to_downloads_tp(
     Save protein profile figures into a multi-page PDF grid.
 
     Layout:
-    - 5 genes per row
+    - 5 proteins per row
     - 2 rows per page
-    - 10 genes per page total
+    - 10 proteins per page total
 
-    Gene name is kept only from the original plot title.
+    Protein name is kept only from the original plot title.
     """
     from matplotlib.backends.backend_pdf import PdfPages
     from PIL import Image
@@ -1286,7 +1286,7 @@ def save_profile_pdf_to_downloads_tp(
                 ax.imshow(img)
                 ax.axis("off")
 
-                # Do not add gene name here; the individual plot already has it.
+                # Do not add protein name here; the individual plot already has it.
 
                 plt.close(gene_fig)
 
@@ -1308,7 +1308,7 @@ def create_total_protein_waterfall_plot_tp(
 ):
     """Create ranked total-protein waterfall plot with numbered significant labels.
 
-    The returned label_df preserves gene and accession columns so the numbered
+    The returned label_df preserves protein and accession columns so the numbered
     points can be mapped back to proteins in the table/download.
     """
     wfl = res.dropna(subset=["log2FC", metric]).copy()
@@ -2960,7 +2960,7 @@ def main():
                             )
                             max_annot = int(sig_tmp.sum())
                             ss["volcano_top_n_annot"] = st.slider(
-                                "Number of significant genes/proteins to annotate in downloaded static plot",
+                                "Number of significant proteins to annotate in downloaded static plot",
                                 min_value=0,
                                 max_value=max(0, min(max_annot, 100)),
                                 value=min(10, max_annot),
@@ -3014,7 +3014,7 @@ def main():
                             ss["ma_sig_col"] = st.radio("Significance metric", metric_opts, horizontal=True, key="ma_sig_metric_ui")
                             ss["ma_alpha_thr"] = st.slider(f"{ss['ma_sig_col']} cutoff", 0.0001, 0.2, 0.05, format="%.4f", key="ma_alpha_thr_ui")
                             ss["ma_fc_thresh"] = st.slider("|log2FC| threshold", 0.0, 4.0, 1.0, key="ma_fc_thresh_ui")
-                            ss["ma_top_n"] = st.slider("Number of top genes to annotate in static plot", 0, 50, 10, key="ma_top_n_ui")
+                            ss["ma_top_n"] = st.slider("Number of top proteins to annotate in static plot", 0, 50, 10, key="ma_top_n_ui")
 
                         elif ss.get("show_heatmap", False):
                             st.markdown("**Heatmap Options**")
@@ -3064,33 +3064,33 @@ def main():
                                 sig_mask = sig_mask & (res["log2FC"].abs() >= ss["prof_fc_thresh"])
                             
                             if not gene_col_name:
-                                st.warning("Cannot map to a specific Gene. GeneID column missing.")
-                                st.selectbox("Search for a Gene:", options=[], key="pick_gene")
+                                st.warning("Cannot map to a specific protein. Protein identifier column is missing.")
+                                st.selectbox("Search for a Protein:", options=[], key="pick_gene")
                             else:
                                 ss["prof_plot_mode"] = st.radio(
                                     "Protein profile mode",
-                                    ["Single selected gene", "Top significant genes"],
+                                    ["Single selected protein", "Top significant proteins"],
                                     horizontal=False,
                                     key="prof_plot_mode_ui",
-                                    help="Use the original single-gene picker or automatically plot the top significant genes."
+                                    help="Use the original single-protein picker or automatically plot the top significant proteins."
                                 )
                                 sig_gene_opts = res.loc[sig_mask, gene_col_name].dropna().unique().tolist()
                                 all_gene_opts = res[gene_col_name].dropna().unique().tolist()
                                 opts = sorted(sig_gene_opts) + ["---"] + sorted(list(set(all_gene_opts) - set(sig_gene_opts)))
 
-                                if ss["prof_plot_mode"] == "Single selected gene":
-                                    st.selectbox("Search for a Gene:", options=opts, key="pick_gene")
+                                if ss["prof_plot_mode"] == "Single selected protein":
+                                    st.selectbox("Search for a Protein:", options=opts, key="pick_gene")
                                 else:
                                     max_prof_genes = max(1, min(len(sig_gene_opts), 50))
                                     ss["prof_top_n_genes"] = st.slider(
-                                        "Number of significant genes to plot",
+                                        "Number of significant proteins to plot",
                                         min_value=1,
                                         max_value=max_prof_genes,
                                         value=min(6, max_prof_genes),
                                         step=1,
                                         key="prof_top_n_genes_ui"
                                     )
-                                    st.caption("Top genes are selected by the chosen significance metric and exported as a multi-page PDF.")
+                                    st.caption("Top proteins are selected by the chosen significance metric and exported as a multi-page PDF.")
 
                 # --- RIGHT PANEL ---
                 with right:
@@ -3112,7 +3112,7 @@ def main():
                             n_genes = len(sig_genes)
                             st.success(
                                 f"Significant features passing thresholds: **{n_features}** | "
-                                f"Unique genes/proteins: **{n_genes}**"
+                                f"Unique proteins: **{n_genes}**"
                             )
                         else:
                             sig_genes = []
@@ -3123,7 +3123,7 @@ def main():
                             with st.expander("Export Significant Results", expanded=False):
                                 st.caption(
                                     "The download includes all rows currently passing the selected p/q-value and |log2FC| thresholds. "
-                                    "The gene list is de-duplicated and can be pasted into pathway tools such as STRING, DAVID, or Enrichr."
+                                    "The protein list is de-duplicated and can be pasted into pathway tools such as STRING, DAVID, or Enrichr."
                                 )
 
                                 c1, c2 = st.columns(2)
@@ -3140,11 +3140,11 @@ def main():
                                     gene_txt = "\n".join(sig_genes)
                                     with c2:
                                         add_bytes_download_button_tp(
-                                            label=f"Download Gene List TXT ({n_genes})",
+                                            label=f"Download Protein List TXT ({n_genes})",
                                             data=gene_txt.encode("utf-8"),
-                                            filename="significant_total_protein_gene_list.txt",
+                                            filename="significant_total_protein_list.txt",
                                             key=f"save_sig_genes_{ss.get('explore_mode_tp', 'plot')}",
-                                            help_text="Save the de-duplicated significant gene/protein list as TXT."
+                                            help_text="Save the de-duplicated significant protein list as TXT."
                                         )
                                     st.code(gene_txt, language="text")
 
@@ -3477,15 +3477,15 @@ def main():
                         display_sig_stats(sig_mask)
 
                         if not gene_col_name:
-                            st.warning("Cannot draw protein profiles because the gene/protein column is missing.")
+                            st.warning("Cannot draw protein profiles because the protein identifier column is missing.")
                         else:
-                            profile_mode = ss.get("prof_plot_mode", "Single selected gene")
+                            profile_mode = ss.get("prof_plot_mode", "Single selected protein")
                             palette = ss.get("prof_palette", None)
 
-                            if profile_mode == "Top significant genes":
+                            if profile_mode == "Top significant proteins":
                                 sig_profile_df = res.loc[sig_mask].copy()
                                 if sig_profile_df.empty:
-                                    st.warning("No significant genes/proteins pass the selected thresholds.")
+                                    st.warning("No significant proteins pass the selected thresholds.")
                                 else:
                                     top_n_genes = int(ss.get("prof_top_n_genes", 6))
                                     top_gene_names = (
@@ -3499,9 +3499,9 @@ def main():
                                     )
 
                                     if not top_gene_names:
-                                        st.warning("No gene/protein names are available for the selected significant rows.")
+                                        st.warning("No protein names are available for the selected significant rows.")
                                     else:
-                                        st.markdown(f"##### Protein profiles for top {len(top_gene_names)} significant genes/proteins")
+                                        st.markdown(f"##### Protein profiles for top {len(top_gene_names)} significant proteins")
                                         profile_figs = []
                                         profile_gene_names = []
 
@@ -3554,7 +3554,7 @@ def main():
                                                 except Exception as e:
                                                     st.error(f"Could not save PDF: {e}")
                                         else:
-                                            st.warning("No profile plots could be generated for the selected genes/proteins.")
+                                            st.warning("No profile plots could be generated for the selected proteins.")
 
                             else:
                                 pick_gene = ss.get("pick_gene")
@@ -3573,7 +3573,7 @@ def main():
                                     )
 
                                     if fig is None:
-                                        st.warning("No expression values found for the selected gene/protein.")
+                                        st.warning("No expression values found for the selected protein.")
                                     else:
                                         st.pyplot(fig, use_container_width=True)
                                         ss["report_boxplot_fig"] = fig

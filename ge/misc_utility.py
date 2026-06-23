@@ -1,10 +1,12 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+import os
 import re
 import uuid
 from io import BytesIO
 from pathlib import Path
+from typing import Union
 
 import streamlit as st
 import matplotlib as mpl
@@ -27,34 +29,171 @@ mpl.rcParams.update({
 })
 
 
+# -------------------------------------------------------------------------
+# Save / Download Mode Helpers
+# -------------------------------------------------------------------------
+_TRUE_VALUES = {"1", "true", "yes", "y", "on", "hosted", "connect"}
+_FALSE_VALUES = {"0", "false", "no", "n", "off", "local", "standalone"}
+
+
+def _env_to_bool(value):
+    """
+    Convert environment variable text to True/False/None.
+    """
+    if value is None:
+        return None
+
+    value = str(value).strip().lower()
+
+    if value in _TRUE_VALUES:
+        return True
+
+    if value in _FALSE_VALUES:
+        return False
+
+    return None
+
+
+def _is_hosted_mode() -> bool:
+    """
+    Return True when running on RStudio/Posit Connect or another hosted server.
+
+    Recommended:
+        Set this on RConnect:
+            GLYCOEXPLORER_HOSTED=1
+
+    Why:
+        In hosted mode, direct file writing saves to the server/container,
+        not to the user's laptop. Browser download is the correct method.
+    """
+
+    explicit = _env_to_bool(os.environ.get("GLYCOEXPLORER_HOSTED"))
+    if explicit is not None:
+        return explicit
+
+    # Conservative auto-detection for common hosted environments.
+    # You should still set GLYCOEXPLORER_HOSTED=1 on RConnect for reliability.
+    hosted_env_vars = [
+        "RSCONNECT_CONTENT_GUID",
+        "RSCONNECT_APP_NAME",
+        "CONNECT_SERVER",
+        "POSIT_CONNECT",
+        "RSTUDIO_CONNECT",
+    ]
+
+    return any(os.environ.get(v) for v in hosted_env_vars)
+
+
+def _get_save_mode() -> str:
+    """
+    Return one of:
+        browser  -> browser download buttons only
+        local    -> direct save-to-Downloads buttons only
+        hybrid   -> both browser download and direct save buttons
+
+    Defaults:
+        Hosted/RConnect: browser
+        Local standalone: hybrid
+
+    Optional override:
+        GLYCOEXPLORER_SAVE_MODE=browser
+        GLYCOEXPLORER_SAVE_MODE=local
+        GLYCOEXPLORER_SAVE_MODE=hybrid
+    """
+
+    mode = os.environ.get("GLYCOEXPLORER_SAVE_MODE", "").strip().lower()
+
+    if mode in {"browser", "local", "hybrid"}:
+        return mode
+
+    if _is_hosted_mode():
+        return "browser"
+
+    return "hybrid"
+
+
+# -------------------------------------------------------------------------
+# File Path / Filename Helpers
+# -------------------------------------------------------------------------
 def _get_downloads_dir() -> Path:
     """
     Return user's Downloads folder if available.
-    Falls back to home directory.
+
+    Local standalone only:
+        You can optionally override this using:
+            GLYCOEXPLORER_DOWNLOAD_DIR=/path/to/folder
+
+    Do not use this for hosted/RConnect mode.
     """
+
+    custom_dir = os.environ.get("GLYCOEXPLORER_DOWNLOAD_DIR", "").strip()
+
+    if custom_dir:
+        custom_path = Path(custom_dir).expanduser()
+        custom_path.mkdir(parents=True, exist_ok=True)
+        return custom_path
+
     downloads = Path.home() / "Downloads"
+
     if downloads.exists():
         return downloads
+
     return Path.home()
 
 
 def _safe_filename(filename: str) -> str:
     """
-    Remove characters that can cause problems in filenames.
+    Remove characters that can cause problems in filenames across Windows,
+    macOS, Linux, browser downloads, and server environments.
     """
-    filename = str(filename)
+
+    filename = str(filename).strip()
+
+    # Replace path separators and invalid Windows/macOS characters.
+    filename = re.sub(r'[<>:"/\\|?*\x00-\x1F]+', "_", filename)
+
+    # Replace whitespace and other unusual characters.
     filename = re.sub(r"[^\w\-.]+", "_", filename)
-    filename = filename.strip("_")
+
+    # Avoid empty or hidden-only names.
+    filename = filename.strip("._")
+
     return filename or "plot"
 
 
-def _save_bytes_to_downloads(data: bytes, filename: str) -> Path:
+def _coerce_to_bytes(data: Union[bytes, bytearray, BytesIO, str]) -> bytes:
     """
-    Save bytes directly to local Downloads folder.
-    This is more reliable in packaged Streamlit desktop apps.
+    Convert common file-like objects to bytes.
     """
+
+    if isinstance(data, BytesIO):
+        return data.getvalue()
+
+    if isinstance(data, bytes):
+        return data
+
+    if isinstance(data, bytearray):
+        return bytes(data)
+
+    if isinstance(data, str):
+        return data.encode("utf-8")
+
+    raise TypeError(f"Unsupported data type for saving/downloading: {type(data)}")
+
+
+def _save_bytes_to_downloads(data: Union[bytes, bytearray, BytesIO, str], filename: str) -> Path:
+    """
+    Save bytes directly to the local Downloads folder.
+
+    Use only for local standalone desktop mode.
+    On RConnect/hosted mode, this writes to the server/container, not the user laptop.
+    """
+
     outdir = _get_downloads_dir()
-    outpath = outdir / _safe_filename(filename)
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    safe_name = _safe_filename(filename)
+    outpath = outdir / safe_name
 
     counter = 1
     original_outpath = outpath
@@ -65,24 +204,140 @@ def _save_bytes_to_downloads(data: bytes, filename: str) -> Path:
         )
         counter += 1
 
-    outpath.write_bytes(data)
+    outpath.write_bytes(_coerce_to_bytes(data))
+
     return outpath
 
 
-def add_plot_download_buttons(fig, base_filename: str = "plot", key_suffix: str = ""):
+# -------------------------------------------------------------------------
+# General Download Button Helpers
+# -------------------------------------------------------------------------
+def add_browser_download_button(
+    label: str,
+    data: Union[bytes, bytearray, BytesIO, str],
+    file_name: str,
+    mime: str,
+    key: str,
+    use_container_width: bool = True,
+):
     """
-    Add PNG and SVG export buttons for a matplotlib figure.
+    Browser-based download.
 
-    In normal browser mode, Streamlit download buttons work.
-    In packaged desktop mode, the embedded webview may open PNG/SVG/PDF
-    inside the app instead of downloading. Therefore, this function also
-    provides direct Save-to-Downloads buttons.
+    Works on:
+        - RConnect/Posit Connect
+        - Streamlit in normal browser
+        - Standalone apps that open in the user's browser
+
+    The browser controls the final folder. The app controls the suggested filename.
+    """
+
+    st.download_button(
+        label=label,
+        data=_coerce_to_bytes(data),
+        file_name=_safe_filename(file_name),
+        mime=mime,
+        key=key,
+        use_container_width=use_container_width,
+    )
+
+
+def add_direct_save_button(
+    label: str,
+    data: Union[bytes, bytearray, BytesIO, str],
+    file_name: str,
+    key: str,
+    use_container_width: bool = True,
+):
+    """
+    Direct local save button.
+
+    Intended for standalone Mac/Windows packaged mode.
+    Hidden automatically in hosted mode unless GLYCOEXPLORER_SAVE_MODE=local/hybrid.
+    """
+
+    if st.button(
+        label,
+        key=key,
+        use_container_width=use_container_width,
+        help="Standalone mode only: save directly to the local Downloads folder.",
+    ):
+        try:
+            outpath = _save_bytes_to_downloads(data, file_name)
+            st.success(f"Saved to: {outpath}")
+        except Exception as e:
+            st.error(f"Could not save file: {e}")
+
+
+def add_file_download_buttons(
+    data: Union[bytes, bytearray, BytesIO, str],
+    file_name: str,
+    mime: str,
+    label: str = "Download file",
+    key_suffix: str = "",
+):
+    """
+    Universal helper for CSV, TSV, Excel, PDF, ZIP, PNG, SVG, etc.
+
+    Hosted/RConnect:
+        Browser download only.
+
+    Standalone:
+        Browser download plus direct Save-to-Downloads fallback.
     """
 
     if not key_suffix:
         key_suffix = str(uuid.uuid4())[:8]
 
+    file_name = _safe_filename(file_name)
+    mode = _get_save_mode()
+
+    if mode in {"browser", "hybrid"}:
+        add_browser_download_button(
+            label=label,
+            data=data,
+            file_name=file_name,
+            mime=mime,
+            key=f"browser_download_{file_name}_{key_suffix}",
+            use_container_width=True,
+        )
+
+    if mode in {"local", "hybrid"}:
+        direct_label = "Save to Downloads" if mode == "hybrid" else label
+
+        add_direct_save_button(
+            label=direct_label,
+            data=data,
+            file_name=file_name,
+            key=f"direct_save_{file_name}_{key_suffix}",
+            use_container_width=True,
+        )
+
+
+# -------------------------------------------------------------------------
+# Plot Download Buttons
+# -------------------------------------------------------------------------
+def add_plot_download_buttons(fig, base_filename: str = "plot", key_suffix: str = ""):
+    """
+    Add PNG and SVG export buttons for a matplotlib figure.
+
+    Hosted/RConnect behavior:
+        - Shows browser Download PNG/SVG buttons only.
+        - Does not write to /local/opt/rstudio-connect/... server paths.
+
+    Standalone Windows/Mac behavior:
+        - Shows browser Download PNG/SVG buttons.
+        - Also shows Save PNG/SVG to Downloads fallback buttons.
+    """
+
+    if fig is None:
+        st.warning("No figure available to download.")
+        return
+
+    if not key_suffix:
+        key_suffix = str(uuid.uuid4())[:8]
+
     base_filename = _safe_filename(base_filename)
+    mode = _get_save_mode()
 
     # ------------------------------------------------------------------
     # Generate PNG bytes
@@ -102,45 +357,80 @@ def add_plot_download_buttons(fig, base_filename: str = "plot", key_suffix: str 
     svg_filename = f"{base_filename}.svg"
 
     # ------------------------------------------------------------------
-    # Desktop-safe direct save buttons
+    # Browser download buttons
     # ------------------------------------------------------------------
-    save_col1, save_col2 = st.columns(2)
+    if mode in {"browser", "hybrid"}:
+        col1, col2 = st.columns(2)
 
-    with save_col1:
-        if st.button(
-            "Download PNG",
-            key=f"save_png_{base_filename}_{key_suffix}",
-            use_container_width=True,
-            help="Directly save PNG to your local Downloads folder."
-        ):
-            try:
-                outpath = _save_bytes_to_downloads(png_bytes, png_filename)
-                st.success(f"Saved PNG to: {outpath}")
-            except Exception as e:
-                st.error(f"Could not save PNG: {e}")
+        with col1:
+            add_browser_download_button(
+                label="Download PNG",
+                data=png_bytes,
+                file_name=png_filename,
+                mime="image/png",
+                key=f"browser_png_{base_filename}_{key_suffix}",
+                use_container_width=True,
+            )
 
-    with save_col2:
-        if st.button(
-            "Download SVG",
-            key=f"save_svg_{base_filename}_{key_suffix}",
-            use_container_width=True,
-            help="Directly save SVG to your local Downloads folder."
-        ):
-            try:
-                outpath = _save_bytes_to_downloads(svg_bytes, svg_filename)
-                st.success(f"Saved SVG to: {outpath}")
-            except Exception as e:
-                st.error(f"Could not save SVG: {e}")
+        with col2:
+            add_browser_download_button(
+                label="Download SVG",
+                data=svg_bytes,
+                file_name=svg_filename,
+                mime="image/svg+xml",
+                key=f"browser_svg_{base_filename}_{key_suffix}",
+                use_container_width=True,
+            )
+
+    # ------------------------------------------------------------------
+    # Local direct save buttons
+    # ------------------------------------------------------------------
+    if mode in {"local", "hybrid"}:
+        save_col1, save_col2 = st.columns(2)
+
+        png_label = "Save PNG to Downloads" if mode == "hybrid" else "Download PNG"
+        svg_label = "Save SVG to Downloads" if mode == "hybrid" else "Download SVG"
+
+        with save_col1:
+            add_direct_save_button(
+                label=png_label,
+                data=png_bytes,
+                file_name=png_filename,
+                key=f"direct_png_{base_filename}_{key_suffix}",
+                use_container_width=True,
+            )
+
+        with save_col2:
+            add_direct_save_button(
+                label=svg_label,
+                data=svg_bytes,
+                file_name=svg_filename,
+                key=f"direct_svg_{base_filename}_{key_suffix}",
+                use_container_width=True,
+            )
 
     plt.close(fig)
 
 
+# -------------------------------------------------------------------------
+# Glycan Classification
+# -------------------------------------------------------------------------
 def classify_glycan(glycan_str: str) -> str:
     """
     Classify glycans based on their structure.
-    Returns 'Complex/Hybrid', 'Paucimannose', 'High-mannose', or 'Unknown'.
+
+    Expected format:
+        H N A F
+
+    Returns:
+        High-mannose
+        Paucimannose
+        Complex/Hybrid
+        Unknown
     """
+
     match = re.match(r"(\d+)\s+(\d+)\s+(\d+)\s+(\d+)", str(glycan_str))
+
     if not match:
         return "Unknown"
 
@@ -148,7 +438,8 @@ def classify_glycan(glycan_str: str) -> str:
 
     if 4 <= H <= 12 and N == 2 and A == 0 and F in [0, 1]:
         return "High-mannose"
-    elif 0 <= H <= 3 and N in [1, 2] and A == 0 and F in [0, 1]:
+
+    if 0 <= H <= 3 and N in [1, 2] and A == 0 and F in [0, 1]:
         return "Paucimannose"
-    else:
-        return "Complex/Hybrid"
+
+    return "Complex/Hybrid"
