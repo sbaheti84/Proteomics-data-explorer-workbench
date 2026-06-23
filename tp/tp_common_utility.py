@@ -26,6 +26,44 @@ except Exception:
     HAS_ADJUST_TEXT = False
 
 
+
+# =============================================================================
+# Hosted-safe download mode helpers
+# =============================================================================
+def _tp_env_to_bool(value):
+    if value is None:
+        return None
+    value = str(value).strip().lower()
+    if value in {"1", "true", "yes", "y", "on", "hosted", "connect"}:
+        return True
+    if value in {"0", "false", "no", "n", "off", "local", "standalone"}:
+        return False
+    return None
+
+
+def is_hosted_mode() -> bool:
+    import os
+    explicit = _tp_env_to_bool(os.environ.get("GLYCOEXPLORER_HOSTED"))
+    if explicit is not None:
+        return explicit
+    if os.environ.get("POSIT_PRODUCT", "").upper() == "CONNECT":
+        return True
+    if os.environ.get("RSTUDIO_PRODUCT", "").upper() == "CONNECT":
+        return True
+    return any(os.environ.get(v) for v in [
+        "CONNECT_CONTENT_GUID", "RSCONNECT_CONTENT_GUID", "RSCONNECT_APP_NAME",
+        "CONNECT_SERVER", "POSIT_CONNECT", "RSTUDIO_CONNECT",
+    ])
+
+
+def get_save_mode() -> str:
+    import os
+    mode = os.environ.get("GLYCOEXPLORER_SAVE_MODE", "").strip().lower()
+    if mode in {"browser", "local", "hybrid"}:
+        return mode
+    return "browser" if is_hosted_mode() else "hybrid"
+
+
 # -----------------------------------------------------------------------------
 # General helpers
 # -----------------------------------------------------------------------------
@@ -47,9 +85,13 @@ def get_downloads_dir() -> Path:
 
 
 def save_bytes_to_downloads(data, filename: str) -> Path:
-    """Save bytes directly to the user's local Downloads folder without overwriting."""
-    outdir = get_downloads_dir()
-    outpath = outdir / safe_filename(filename)
+    """
+    Save bytes directly to local Downloads in standalone mode.
+
+    In hosted/RConnect mode, this renders a browser download button instead
+    of writing to the Connect server/container.
+    """
+    filename = safe_filename(filename)
 
     if isinstance(data, BytesIO):
         data = data.getvalue()
@@ -57,6 +99,21 @@ def save_bytes_to_downloads(data, filename: str) -> Path:
         data = data.encode("utf-8")
     if not isinstance(data, (bytes, bytearray)):
         data = bytes(data)
+
+    if is_hosted_mode():
+        st.download_button(
+            label=f"Download {filename}",
+            data=data,
+            file_name=filename,
+            mime="application/octet-stream",
+            key=f"hosted_download_{filename}_{uuid.uuid4().hex[:8]}",
+            use_container_width=True,
+        )
+        st.info("Hosted mode detected: use the browser download button above. Direct server-side saving is disabled.")
+        return Path(f"browser_download_ready/{filename}")
+
+    outdir = get_downloads_dir()
+    outpath = outdir / filename
 
     original_outpath = outpath
     counter = 1
@@ -112,7 +169,8 @@ def add_figure_download_buttons_common(
     cols = st.columns(3 if include_pdf else 2)
 
     def _button(label, data, filename, mime, key, help_text):
-        if save_to_downloads:
+        # Hosted/RConnect must always use browser download; direct save would write to server.
+        if save_to_downloads and not is_hosted_mode():
             clicked = st.button(label, key=key, use_container_width=True, help=help_text)
             if clicked:
                 try:
@@ -189,7 +247,7 @@ def add_plotly_html_download_button_common(
     filename = f"{base_filename}.html"
     key = f"save_html_{base_filename}_{key_suffix}"
 
-    if save_to_downloads:
+    if save_to_downloads and not is_hosted_mode():
         if st.button(
             "Download Interactive HTML",
             key=key,

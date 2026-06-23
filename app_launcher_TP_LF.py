@@ -1731,6 +1731,207 @@ def add_plotly_html_download_button_tp_lf(fig, base_filename: str, key_suffix: s
 # -----------------------------------------------------------------------------
 # MAIN APP
 # -----------------------------------------------------------------------------
+
+# =============================================================================
+# Hosted-safe download override
+# =============================================================================
+# IMPORTANT:
+# On Posit/RStudio Connect, Python runs on the Connect server/container.
+# Directly writing to Path.home()/Downloads will save on the server, not on the
+# user's laptop. These wrappers keep direct Save-to-Downloads behavior for local
+# standalone Windows/Mac, but switch to browser download buttons when hosted.
+
+def _env_to_bool_for_downloads(value):
+    if value is None:
+        return None
+    value = str(value).strip().lower()
+    if value in {"1", "true", "yes", "y", "on", "hosted", "connect"}:
+        return True
+    if value in {"0", "false", "no", "n", "off", "local", "standalone"}:
+        return False
+    return None
+
+
+def _is_hosted_mode() -> bool:
+    import os
+
+    explicit = _env_to_bool_for_downloads(os.environ.get("GLYCOEXPLORER_HOSTED"))
+    if explicit is not None:
+        return explicit
+
+    if os.environ.get("POSIT_PRODUCT", "").upper() == "CONNECT":
+        return True
+    if os.environ.get("RSTUDIO_PRODUCT", "").upper() == "CONNECT":
+        return True
+
+    hosted_env_vars = [
+        "CONNECT_CONTENT_GUID",
+        "RSCONNECT_CONTENT_GUID",
+        "RSCONNECT_APP_NAME",
+        "CONNECT_SERVER",
+        "POSIT_CONNECT",
+        "RSTUDIO_CONNECT",
+    ]
+    return any(os.environ.get(v) for v in hosted_env_vars)
+
+
+def _get_downloads_dir():
+    import os
+    from pathlib import Path
+
+    custom_dir = os.environ.get("GLYCOEXPLORER_DOWNLOAD_DIR", "").strip()
+    if custom_dir:
+        custom_path = Path(custom_dir).expanduser()
+        custom_path.mkdir(parents=True, exist_ok=True)
+        return custom_path
+
+    downloads = Path.home() / "Downloads"
+    return downloads if downloads.exists() else Path.home()
+
+
+def _safe_download_filename(filename):
+    import re
+
+    filename = str(filename).strip()
+    filename = re.sub(r'[<>:"/\\|?*\x00-\x1F]+', "_", filename)
+    filename = re.sub(r"[^A-Za-z0-9._-]+", "_", filename)
+    filename = filename.strip("._")
+    return filename or "downloaded_file"
+
+
+def _guess_mime_from_filename(filename):
+    import mimetypes
+
+    mime, _ = mimetypes.guess_type(str(filename))
+    if mime:
+        return mime
+
+    lower = str(filename).lower()
+    if lower.endswith(".csv"):
+        return "text/csv"
+    if lower.endswith(".tsv") or lower.endswith(".txt"):
+        return "text/plain"
+    if lower.endswith(".xlsx"):
+        return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    if lower.endswith(".pdf"):
+        return "application/pdf"
+    if lower.endswith(".zip"):
+        return "application/zip"
+    if lower.endswith(".png"):
+        return "image/png"
+    if lower.endswith(".svg"):
+        return "image/svg+xml"
+    if lower.endswith(".html"):
+        return "text/html"
+    return "application/octet-stream"
+
+
+def _coerce_to_bytes_for_downloads(data):
+    from io import BytesIO
+    from pathlib import Path
+
+    if data is None:
+        raise ValueError("No file data was available.")
+    if isinstance(data, BytesIO):
+        return data.getvalue()
+    if isinstance(data, memoryview):
+        return data.tobytes()
+    if isinstance(data, bytearray):
+        return bytes(data)
+    if isinstance(data, bytes):
+        return data
+    if isinstance(data, Path):
+        return data.read_bytes()
+    if isinstance(data, str):
+        possible_path = Path(data).expanduser()
+        if possible_path.exists() and possible_path.is_file():
+            return possible_path.read_bytes()
+        return data.encode("utf-8")
+    return bytes(data)
+
+
+def _hosted_download_button(data, filename, label=None, key_prefix="hosted_download"):
+    import uuid
+    import streamlit as st
+
+    safe_name = _safe_download_filename(filename)
+    file_bytes = _coerce_to_bytes_for_downloads(data)
+    st.download_button(
+        label=label or f"Download {safe_name}",
+        data=file_bytes,
+        file_name=safe_name,
+        mime=_guess_mime_from_filename(safe_name),
+        key=f"{key_prefix}_{safe_name}_{uuid.uuid4().hex[:8]}",
+        use_container_width=True,
+    )
+    st.info("Hosted mode detected: use the browser download button above. Direct server-side saving is disabled.")
+    return f"{safe_name} ready for browser download"
+
+
+def _save_bytes_to_downloads(data, filename):
+    """
+    Local standalone: save directly to Downloads.
+    Hosted/RConnect: render a browser download button instead of writing to the server.
+    """
+    from pathlib import Path
+
+    file_bytes = _coerce_to_bytes_for_downloads(data)
+    safe_name = _safe_download_filename(filename)
+
+    if _is_hosted_mode():
+        return _hosted_download_button(file_bytes, safe_name)
+
+    outdir = _get_downloads_dir()
+    outdir.mkdir(parents=True, exist_ok=True)
+    outpath = outdir / safe_name
+
+    base_outpath = outpath
+    counter = 1
+    while outpath.exists():
+        outpath = base_outpath.with_name(f"{base_outpath.stem}_{counter}{base_outpath.suffix}")
+        counter += 1
+
+    outpath.write_bytes(file_bytes)
+    return outpath
+
+
+def _save_file_to_downloads(source_path, filename=None):
+    from pathlib import Path
+
+    source_path = Path(source_path)
+    return _save_bytes_to_downloads(source_path.read_bytes(), filename or source_path.name)
+
+
+def add_hosted_safe_file_download_button(label, data, file_name, key, use_container_width=True):
+    """
+    One-call helper for new export buttons.
+    Hosted/RConnect: st.download_button.
+    Local standalone: direct Save-to-Downloads st.button.
+    """
+    import streamlit as st
+
+    safe_name = _safe_download_filename(file_name)
+    file_bytes = _coerce_to_bytes_for_downloads(data)
+
+    if _is_hosted_mode():
+        return st.download_button(
+            label=label,
+            data=file_bytes,
+            file_name=safe_name,
+            mime=_guess_mime_from_filename(safe_name),
+            key=key,
+            use_container_width=use_container_width,
+        )
+
+    if st.button(label, key=key, use_container_width=use_container_width):
+        try:
+            outpath = _save_bytes_to_downloads(file_bytes, safe_name)
+            st.success(f"Saved to: {outpath}")
+            return True
+        except Exception as e:
+            st.error(f"Could not save {safe_name}: {e}")
+    return False
+
 def main():
     init_session_state_defaults()
 

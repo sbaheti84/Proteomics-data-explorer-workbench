@@ -10,7 +10,7 @@ import plotly.express as px
 import streamlit as st
 
 from PIL import Image, ImageDraw, ImageFont
-from ge.misc_utility import _save_bytes_to_downloads
+from ge.misc_utility import *
 
 # -----------------------------------------------------------------------------
 # Structural waterfall helpers for Results Visualizations

@@ -19,7 +19,7 @@ from matplotlib.offsetbox import OffsetImage, AnnotationBbox
 from matplotlib.backends.backend_pdf import PdfPages
 
 # Import the centralized helper
-from ge.misc_utility import add_plot_download_buttons, _save_bytes_to_downloads
+from ge.misc_utility import *
 # -------------------------------------------------------------------------
 # Shared helpers
 # -------------------------------------------------------------------------
