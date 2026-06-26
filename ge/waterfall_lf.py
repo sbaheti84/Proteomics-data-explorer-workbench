@@ -10,8 +10,10 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import plotly.express as px
 import streamlit as st
+from download_utility import add_download_button, add_matplotlib_download_buttons, add_plotly_download_buttons
 from PIL import Image, ImageDraw, ImageFont
 from ge.misc_utility import *
+from download_utility import add_download_button
 
 # =============================================================================
 # STRUCTURAL WATERFALL HELPERS FOR LFQ GLYCOPEPTIDES
@@ -513,24 +515,9 @@ def render_ge_lf_structural_waterfall(
 
         d1, d2, d3 = st.columns(3)
         with d1:
-            if st.button("Save PNG", key="lfq_wfl_png", use_container_width=True, help="Directly save PNG to your local Downloads folder."):
-                try:
-                    outpath = _save_bytes_to_downloads(combined_png, "lfq_glycopeptide_waterfall_table.png")
-                    st.success(f"Saved PNG to: {outpath}")
-                except Exception as e:
-                    st.error(f"Could not save PNG: {e}")
+            add_download_button(combined_png, "lfq_glycopeptide_waterfall_table.png", label="Download PNG", key="lfq_wfl_png", mime="image/png")
         with d2:
-            if st.button("Save SVG", key="lfq_wfl_svg", use_container_width=True, help="Directly save SVG to your local Downloads folder."):
-                try:
-                    outpath = _save_bytes_to_downloads(combined_svg, "lfq_glycopeptide_waterfall_table.svg")
-                    st.success(f"Saved SVG to: {outpath}")
-                except Exception as e:
-                    st.error(f"Could not save SVG: {e}")
+            add_download_button(combined_svg, "lfq_glycopeptide_waterfall_table.svg", label="Download SVG", key="lfq_wfl_svg", mime="image/svg+xml")
         with d3:
-            if st.button("Save Table CSV", key="lfq_wfl_csv", use_container_width=True, help="Directly save CSV to your local Downloads folder."):
-                try:
-                    csv_bytes = disp_df.to_csv(index=False).encode("utf-8")
-                    outpath = _save_bytes_to_downloads(csv_bytes, "lfq_waterfall_top_features.csv")
-                    st.success(f"Saved CSV to: {outpath}")
-                except Exception as e:
-                    st.error(f"Could not save CSV: {e}")
+            csv_bytes = disp_df.to_csv(index=False).encode("utf-8")
+            add_download_button(csv_bytes, "lfq_waterfall_top_features.csv", label="Download Table CSV", key="lfq_wfl_csv", mime="text/csv")

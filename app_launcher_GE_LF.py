@@ -15,6 +15,7 @@ from io import BytesIO
 from pathlib import Path
 
 import streamlit as st
+from download_utility import add_download_button, add_matplotlib_download_buttons, add_plotly_download_buttons
 import pandas as pd
 import numpy as np
 
@@ -207,11 +208,7 @@ def _save_plotly_figure_to_downloads(fig, filename, fmt="html"):
 
 
 def _add_desktop_plot_save_buttons(fig, base_filename, key_prefix, include_svg=True, include_pdf=True):
-    """
-    Add desktop-safe plot save buttons. This mirrors the working GE TMT behavior
-    by saving files directly into the user's Downloads folder instead of relying
-    only on browser download behavior.
-    """
+    """Backward-compatible wrapper now using browser/RConnect-safe downloads."""
     if fig is None:
         try:
             current_fig = plt.gcf()
@@ -219,58 +216,16 @@ def _add_desktop_plot_save_buttons(fig, base_filename, key_prefix, include_svg=T
                 fig = current_fig
         except Exception:
             fig = None
-
     if fig is None:
         return
-
-    safe_base = _safe_download_filename(base_filename).rsplit('.', 1)[0]
-
     try:
         is_plotly = hasattr(fig, "to_html") and hasattr(fig, "to_image")
     except Exception:
         is_plotly = False
-
     if is_plotly:
-        cols = st.columns(3)
-        if cols[0].button("Save HTML", key=f"{key_prefix}_save_html", width="stretch"):
-            try:
-                outpath = _save_plotly_figure_to_downloads(fig, f"{safe_base}.html", fmt="html")
-                st.success(f"Saved HTML to: {outpath}")
-            except Exception as e:
-                st.error(f"Could not save HTML: {e}")
-        if cols[1].button("Save PNG", key=f"{key_prefix}_save_png", width="stretch"):
-            try:
-                outpath = _save_plotly_figure_to_downloads(fig, f"{safe_base}.png", fmt="png")
-                st.success(f"Saved PNG to: {outpath}")
-            except Exception as e:
-                st.error(f"Could not save PNG. Plotly static export may require kaleido: {e}")
-        if cols[2].button("Save SVG", key=f"{key_prefix}_save_svg", width="stretch"):
-            try:
-                outpath = _save_plotly_figure_to_downloads(fig, f"{safe_base}.svg", fmt="svg")
-                st.success(f"Saved SVG to: {outpath}")
-            except Exception as e:
-                st.error(f"Could not save SVG. Plotly static export may require kaleido: {e}")
+        add_plotly_download_buttons(fig, base_filename=base_filename, key_prefix=key_prefix, include_html=True, include_png=False, include_svg=False)
     else:
-        ncols = 3 if include_pdf else 2
-        cols = st.columns(ncols)
-        if cols[0].button("Save PNG", key=f"{key_prefix}_save_png", width="stretch"):
-            try:
-                outpath = _save_matplotlib_figure_to_downloads(fig, f"{safe_base}.png", fmt="png")
-                st.success(f"Saved PNG to: {outpath}")
-            except Exception as e:
-                st.error(f"Could not save PNG: {e}")
-        if include_svg and cols[1].button("Save SVG", key=f"{key_prefix}_save_svg", width="stretch"):
-            try:
-                outpath = _save_matplotlib_figure_to_downloads(fig, f"{safe_base}.svg", fmt="svg")
-                st.success(f"Saved SVG to: {outpath}")
-            except Exception as e:
-                st.error(f"Could not save SVG: {e}")
-        if include_pdf and cols[-1].button("Save PDF", key=f"{key_prefix}_save_pdf", width="stretch"):
-            try:
-                outpath = _save_matplotlib_figure_to_downloads(fig, f"{safe_base}.pdf", fmt="pdf")
-                st.success(f"Saved PDF to: {outpath}")
-            except Exception as e:
-                st.error(f"Could not save PDF: {e}")
+        add_matplotlib_download_buttons(fig, base_filename=base_filename, key_prefix=key_prefix, include_png=True, include_svg=include_svg, include_pdf=include_pdf)
 
 
 # -----------------------------------------------------------------------------
@@ -1611,17 +1566,7 @@ def main():
 
         st.markdown("**pGlyco (LFQ)**")
         if example_pglyco_lfq.exists():
-            if st.button(
-                "Save pGlycoDB.csv to Downloads",
-                key="save_ex_pglyco_lfq",
-                width='stretch',
-                help="Save a sample pGlyco LFQ dataset to your Downloads folder."
-            ):
-                try:
-                    outpath = _save_file_to_downloads(example_pglyco_lfq, "pGlycoDB_LFQ_example.csv")
-                    st.success(f"Saved example file to: {outpath}")
-                except Exception as e:
-                    st.error(f"Could not save example file: {e}")
+            add_download_button(example_pglyco_lfq.read_bytes(), "pGlycoDB_LFQ_example.csv", label="Download pGlycoDB.csv", key="save_ex_pglyco_lfq", mime="text/csv")
 
         st.markdown("<div style='padding-top: 10px;'></div>", unsafe_allow_html=True)
 
@@ -1629,30 +1574,12 @@ def main():
         col1, col2 = st.columns(2)
 
         if example_msf1.exists():
-            if col1.button(
-                "Save Sample 1",
-                key="save_ex_msf1",
-                width='stretch',
-                help="Save MSFragger LFQ sample 1 to your Downloads folder."
-            ):
-                try:
-                    outpath = _save_file_to_downloads(example_msf1, "MSFragger_sample1.tsv")
-                    st.success(f"Saved example file to: {outpath}")
-                except Exception as e:
-                    st.error(f"Could not save example file: {e}")
+            with col1:
+                add_download_button(example_msf1.read_bytes(), "MSFragger_sample1.tsv", label="Download Sample 1", key="save_ex_msf1", mime="text/tab-separated-values")
 
         if example_msf2.exists():
-            if col2.button(
-                "Save Sample 2",
-                key="save_ex_msf2",
-                width='stretch',
-                help="Save MSFragger LFQ sample 2 to your Downloads folder."
-            ):
-                try:
-                    outpath = _save_file_to_downloads(example_msf2, "MSFragger_sample2.tsv")
-                    st.success(f"Saved example file to: {outpath}")
-                except Exception as e:
-                    st.error(f"Could not save example file: {e}")
+            with col2:
+                add_download_button(example_msf2.read_bytes(), "MSFragger_sample2.tsv", label="Download Sample 2", key="save_ex_msf2", mime="text/tab-separated-values")
 
     if st.sidebar.button(
         "Reset session data", 
@@ -1790,35 +1717,15 @@ def main():
             dl_col1, dl_col2, spacer = st.columns([1.5, 1.5, 7])
 
             csv_bytes = merged_display_df.to_csv(index=False).encode("utf-8")
-
-            if dl_col1.button(
-                "Save CSV",
-                key="save_lfq_master_csv",
-                width="stretch",
-                help="Save the LFQ master matrix as a CSV file."
-            ):
-                try:
-                    outpath = _save_bytes_to_downloads(csv_bytes, "LFQ_master_matrix.csv")
-                    st.success(f"Saved CSV to: {outpath}")
-                except Exception as e:
-                    st.error(f"Could not save CSV: {e}")
+            with dl_col1:
+                add_download_button(csv_bytes, "LFQ_master_matrix.csv", label="Download CSV", key="save_lfq_master_csv", mime="text/csv")
 
             buffer_excel = BytesIO()
             with pd.ExcelWriter(buffer_excel, engine="openpyxl") as writer:
                 merged_display_df.to_excel(writer, index=False, sheet_name="LFQ_Data")
             excel_bytes = buffer_excel.getvalue()
-
-            if dl_col2.button(
-                "Save Excel",
-                key="save_lfq_master_excel",
-                width="stretch",
-                help="Save the LFQ master matrix as an Excel spreadsheet."
-            ):
-                try:
-                    outpath = _save_bytes_to_downloads(excel_bytes, "LFQ_master_matrix.xlsx")
-                    st.success(f"Saved Excel to: {outpath}")
-                except Exception as e:
-                    st.error(f"Could not save Excel: {e}")
+            with dl_col2:
+                add_download_button(excel_bytes, "LFQ_master_matrix.xlsx", label="Download Excel", key="save_lfq_master_excel", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
             st.markdown("<br>", unsafe_allow_html=True)
             show_grid(merged_display_df, page_size=15, height=450)
@@ -2182,20 +2089,13 @@ def main():
 
                 meta_df = pd.DataFrame(rows)
                 st.dataframe(meta_df, use_container_width=True, hide_index=True)
-                if st.button(
-                    "Save sample metadata CSV to Downloads",
+                add_download_button(
+                    meta_df.to_csv(index=False).encode("utf-8"),
+                    "sample_metadata_mapping.csv",
+                    label="Download sample metadata CSV",
                     key="save_sample_metadata_csv",
-                    use_container_width=True,
-                    help="Save the sample metadata mapping table to your Downloads folder."
-                ):
-                    try:
-                        outpath = _save_bytes_to_downloads(
-                            meta_df.to_csv(index=False).encode("utf-8"),
-                            "sample_metadata_mapping.csv"
-                        )
-                        st.success(f"Saved sample metadata to: {outpath}")
-                    except Exception as e:
-                        st.error(f"Could not save sample metadata: {e}")
+                    mime="text/csv",
+                )
 
                 if not meta_df.empty and (meta_df["Group"] == "Unassigned").sum() > 0:
                     unassigned_count = (meta_df['Group'] == 'Unassigned').sum()
@@ -2761,43 +2661,18 @@ def main():
                         
                         st.divider()
                         st.markdown("#### Filter & Download Results")
-                        with st.expander("Save Full Dataset (Unfiltered)", expanded=False):
+                        with st.expander("Download Full Dataset (Unfiltered)", expanded=False):
                             dl_col1, dl_col2, spacer = st.columns([1.5, 1.5, 7])
                             diff_csv_bytes = ss["diffexp_df"].to_csv(index=False).encode("utf-8")
-                            if dl_col1.button(
-                                "Save CSV",
-                                key="save_diffexp_lf_csv",
-                                width='stretch',
-                                help="Save the full unfiltered differential results as CSV."
-                            ):
-                                try:
-                                    outpath = _save_bytes_to_downloads(
-                                        diff_csv_bytes,
-                                        "diffexp_results_glycoexplorer_LF.csv"
-                                    )
-                                    st.success(f"Saved CSV to: {outpath}")
-                                except Exception as e:
-                                    st.error(f"Could not save CSV: {e}")
+                            with dl_col1:
+                                add_download_button(diff_csv_bytes, "diffexp_results_glycoexplorer_LF.csv", label="Download CSV", key="save_diffexp_lf_csv", mime="text/csv")
 
                             buffer_diff = BytesIO()
                             with pd.ExcelWriter(buffer_diff, engine="openpyxl") as writer:
                                 ss["diffexp_df"].to_excel(writer, index=False, sheet_name="Differential_Results")
                             diff_excel_bytes = buffer_diff.getvalue()
-
-                            if dl_col2.button(
-                                "Save Excel to Downloads",
-                                key="save_diffexp_lf_excel",
-                                width='stretch',
-                                help="Save the full unfiltered differential results as Excel."
-                            ):
-                                try:
-                                    outpath = _save_bytes_to_downloads(
-                                        diff_excel_bytes,
-                                        "diffexp_results_glycoexplorer_LF.xlsx"
-                                    )
-                                    st.success(f"Saved Excel to: {outpath}")
-                                except Exception as e:
-                                    st.error(f"Could not save Excel: {e}")
+                            with dl_col2:
+                                add_download_button(diff_excel_bytes, "diffexp_results_glycoexplorer_LF.xlsx", label="Download Excel", key="save_diffexp_lf_excel", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
                         with st.container(border=True):
                             st.markdown("**Filter Significant Features**")
@@ -2842,36 +2717,10 @@ def main():
                                     f_df.to_csv(buf_f_csv, index=False)
                                     with pd.ExcelWriter(buf_f_xlsx, engine='openpyxl') as writer:
                                         f_df.to_excel(writer, index=False, sheet_name='Filtered_Results')
-                                        
-                                    if f_col1.button(
-                                        "Save Filtered CSV to Downloads",
-                                        key="save_filtered_lf_csv",
-                                        width='stretch',
-                                        help="Save the filtered differential results as CSV."
-                                    ):
-                                        try:
-                                            outpath = _save_bytes_to_downloads(
-                                                buf_f_csv.getvalue(),
-                                                "filtered_differential_results_LF.csv"
-                                            )
-                                            st.success(f"Saved filtered CSV to: {outpath}")
-                                        except Exception as e:
-                                            st.error(f"Could not save filtered CSV: {e}")
-
-                                    if f_col2.button(
-                                        "Save Filtered Excel to Downloads",
-                                        key="save_filtered_lf_excel",
-                                        width='stretch',
-                                        help="Save the filtered differential results as Excel."
-                                    ):
-                                        try:
-                                            outpath = _save_bytes_to_downloads(
-                                                buf_f_xlsx.getvalue(),
-                                                "filtered_differential_results_LF.xlsx"
-                                            )
-                                            st.success(f"Saved filtered Excel to: {outpath}")
-                                        except Exception as e:
-                                            st.error(f"Could not save filtered Excel: {e}")
+                                    with f_col1:
+                                        add_download_button(buf_f_csv.getvalue(), "filtered_differential_results_LF.csv", label="Download Filtered CSV", key="save_filtered_lf_csv", mime="text/csv")
+                                    with f_col2:
+                                        add_download_button(buf_f_xlsx.getvalue(), "filtered_differential_results_LF.xlsx", label="Download Filtered Excel", key="save_filtered_lf_excel", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         # ------------------- TAB: Results Visualizations -------------------
         with tabs[1]:
@@ -3458,34 +3307,13 @@ def main():
 
                     with dl_col1:
                         if pdf_bytes is not None:
-                            if st.button(
-                                "Download PDF",
-                                width='stretch',
-                                key="save_lf_pdf_to_downloads",
-                                type="primary",
-                                help="Directly save the LFQ PDF report to your local Downloads folder."
-                            ):
-                                try:
-                                    outpath = _save_bytes_to_downloads(pdf_bytes, pdf_filename)
-                                    st.success(f"Saved PDF to: {outpath}")
-                                except Exception as e:
-                                    st.error(f"Could not save PDF: {e}")
+                            add_download_button(pdf_bytes, pdf_filename, label="Download PDF", key="save_lf_pdf_to_downloads", mime="application/pdf", type="primary")
                         else:
                             st.error("PDF report bytes are missing. Please regenerate the report.")
 
                     with dl_col2:
                         if zip_bytes is not None:
-                            if st.button(
-                                "Download ZIP",
-                                width='stretch',
-                                key="save_lf_zip_to_downloads",
-                                help="Directly save the LFQ ZIP bundle to your local Downloads folder."
-                            ):
-                                try:
-                                    outpath = _save_bytes_to_downloads(zip_bytes, zip_filename)
-                                    st.success(f"Saved ZIP bundle to: {outpath}")
-                                except Exception as e:
-                                    st.error(f"Could not save ZIP bundle: {e}")
+                            add_download_button(zip_bytes, zip_filename, label="Download ZIP", key="save_lf_zip_to_downloads", mime="application/zip")
                         else:
                             st.warning("ZIP bundle is not available. Try regenerating the report.")
 
@@ -3512,6 +3340,38 @@ def main():
         st.error(f"Failed to load FAQ section: {e}")
 
 # Run
+
+# =============================================================================
+# Centralized browser-safe downloads
+# =============================================================================
+# RConnect cannot save directly to a user's laptop. These overrides keep all
+# downloads browser-based so the browser can ask where to save when configured.
+try:
+    from download_utility import (
+        add_download_button,
+        add_file_download_buttons,
+        add_hosted_safe_file_download_button,
+        add_bytes_download_button,
+        add_bytes_download_button_tp,
+        add_dataframe_download_buttons,
+        add_matplotlib_download_buttons,
+        add_plot_download_buttons,
+        add_plotly_download_buttons,
+        add_figure_download_buttons_tp,
+        add_figure_download_buttons_tp_lf,
+        add_plotly_html_download_button_tp,
+        add_plotly_html_download_button_tp_lf,
+        add_figure_download_buttons_common,
+        add_plotly_html_download_button_common,
+        save_profile_pdf_to_downloads_tp,
+        save_profile_pdf_to_downloads_tp_lf,
+        explain_download_location,
+        _save_bytes_to_downloads,
+        _save_file_to_downloads,
+    )
+except Exception:
+    pass
+
 if __name__ == "__main__":
     if "session_initialized" not in st.session_state:
         _reset_all_data(clear_cache=True)

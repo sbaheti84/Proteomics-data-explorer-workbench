@@ -3477,6 +3477,38 @@ def main():
     if not any_tab_active:
         st.info("Choose a section above to begin.")
     faq_section()
+
+# =============================================================================
+# Centralized browser-safe downloads
+# =============================================================================
+# RConnect cannot save directly to a user's laptop. These overrides keep all
+# downloads browser-based so the browser can ask where to save when configured.
+try:
+    from download_utility import (
+        add_download_button,
+        add_file_download_buttons,
+        add_hosted_safe_file_download_button,
+        add_bytes_download_button,
+        add_bytes_download_button_tp,
+        add_dataframe_download_buttons,
+        add_matplotlib_download_buttons,
+        add_plot_download_buttons,
+        add_plotly_download_buttons,
+        add_figure_download_buttons_tp,
+        add_figure_download_buttons_tp_lf,
+        add_plotly_html_download_button_tp,
+        add_plotly_html_download_button_tp_lf,
+        add_figure_download_buttons_common,
+        add_plotly_html_download_button_common,
+        save_profile_pdf_to_downloads_tp,
+        save_profile_pdf_to_downloads_tp_lf,
+        explain_download_location,
+        _save_bytes_to_downloads,
+        _save_file_to_downloads,
+    )
+except Exception:
+    pass
+
 if __name__ == "__main__":
     if "session_initialized_tp_lf" not in st.session_state:
         _reset_all_data(clear_cache=True)

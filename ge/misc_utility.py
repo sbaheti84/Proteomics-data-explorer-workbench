@@ -109,7 +109,7 @@ def _get_save_mode() -> str:
     if _is_hosted_mode():
         return "browser"
 
-    return "hybrid"
+    return "browser"
 
 
 # -------------------------------------------------------------------------
@@ -443,3 +443,38 @@ def classify_glycan(glycan_str: str) -> str:
         return "Paucimannose"
 
     return "Complex/Hybrid"
+
+# =============================================================================
+# Centralized browser-safe download overrides
+# =============================================================================
+try:
+    from download_utility import (
+        safe_filename,
+        _safe_download_filename,
+        coerce_to_bytes,
+        _coerce_to_bytes,
+        add_download_button,
+        add_browser_download_button,
+        add_direct_save_button,
+        add_file_download_buttons,
+        add_hosted_safe_file_download_button,
+        add_bytes_download_button,
+        add_bytes_download_button_tp,
+        add_dataframe_download_buttons,
+        add_matplotlib_download_buttons,
+        add_plot_download_buttons,
+        add_plotly_download_buttons,
+        add_figure_download_buttons_tp,
+        add_figure_download_buttons_tp_lf,
+        add_plotly_html_download_button_tp,
+        add_plotly_html_download_button_tp_lf,
+        add_figure_download_buttons_common,
+        add_plotly_html_download_button_common,
+        save_profile_pdf_to_downloads_tp,
+        save_profile_pdf_to_downloads_tp_lf,
+        explain_download_location,
+        _save_bytes_to_downloads,
+        _save_file_to_downloads,
+    )
+except Exception:
+    pass

@@ -8,9 +8,11 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import plotly.express as px
 import streamlit as st
+from download_utility import add_download_button, add_matplotlib_download_buttons, add_plotly_download_buttons
 
 from PIL import Image, ImageDraw, ImageFont
 from ge.misc_utility import *
+from download_utility import add_download_button
 
 # -----------------------------------------------------------------------------
 # Structural waterfall helpers for Results Visualizations
@@ -444,24 +446,9 @@ def render_ge_structural_waterfall(
             )
             d1, d2, d3 = st.columns(3)
             with d1:
-                if st.button("Download PNG", key="ge_wfl_png", use_container_width=True, help="Directly save PNG to your local Downloads folder."):
-                    try:
-                        outpath = _save_bytes_to_downloads(png_bytes, "glycoexplorer_waterfall_table.png")
-                        st.success(f"Saved PNG to: {outpath}")
-                    except Exception as e:
-                        st.error(f"Could not save PNG: {e}")
+                add_download_button(png_bytes, "glycoexplorer_waterfall_table.png", label="Download PNG", key="ge_wfl_png", mime="image/png")
             with d2:
-                if st.button("Download SVG", key="ge_wfl_svg", use_container_width=True, help="Directly save SVG to your local Downloads folder."):
-                    try:
-                        outpath = _save_bytes_to_downloads(svg_bytes, "glycoexplorer_waterfall_table.svg")
-                        st.success(f"Saved SVG to: {outpath}")
-                    except Exception as e:
-                        st.error(f"Could not save SVG: {e}")
+                add_download_button(svg_bytes, "glycoexplorer_waterfall_table.svg", label="Download SVG", key="ge_wfl_svg", mime="image/svg+xml")
             with d3:
-                if st.button("Download CSV", key="ge_wfl_csv", use_container_width=True, help="Directly save CSV to your local Downloads folder."):
-                    try:
-                        outpath = _save_bytes_to_downloads(csv_bytes, "glycoexplorer_waterfall_top_features.csv")
-                        st.success(f"Saved CSV to: {outpath}")
-                    except Exception as e:
-                        st.error(f"Could not save CSV: {e}")
+                add_download_button(csv_bytes, "glycoexplorer_waterfall_top_features.csv", label="Download CSV", key="ge_wfl_csv", mime="text/csv")
 

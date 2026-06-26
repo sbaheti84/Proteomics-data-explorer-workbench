@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import streamlit as st
+from download_utility import add_download_button, add_matplotlib_download_buttons, add_plotly_download_buttons
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 
@@ -158,17 +159,13 @@ def _style_axis(
 def _finalize_pdf_download(pdf_buf: BytesIO, label: str, file_name: str):
     pdf_buf.seek(0)
     pdf_bytes = pdf_buf.getvalue()
-    
-    # Create a stable unique key using the file name
-    safe_key = f"save_pdf_{file_name.replace('.pdf', '')}"
-    
-    # Replace the web download button with a desktop-safe file writer button
-    if st.button(label, key=safe_key, use_container_width=True, help="Directly save PDF to your local Downloads folder."):
-        try:
-            outpath = _save_bytes_to_downloads(pdf_bytes, file_name)
-            st.success(f"Saved PDF to: {outpath}")
-        except Exception as e:
-            st.error(f"Could not save PDF: {e}")
+    add_download_button(
+        data=pdf_bytes,
+        file_name=file_name,
+        label=label,
+        key=f"download_pdf_{str(file_name).replace('.pdf', '')}",
+        mime="application/pdf",
+    )
 
 
 # -------------------------------------------------------------------------

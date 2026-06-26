@@ -14,6 +14,7 @@ import uuid
 import numpy as np
 import pandas as pd
 import streamlit as st
+from download_utility import add_download_button, add_matplotlib_download_buttons, add_plotly_download_buttons
 import zipfile       
 import datetime      
 import matplotlib as mpl
@@ -1617,17 +1618,7 @@ def render_sidebar_controls():
         example_path = script_dir / "assets" / "example" / "TP" / "Protein_abundance.csv"
 
         if example_path.exists():
-            if st.button(
-                "Save Protein_abundance.csv",
-                key="save_ex_tp",
-                use_container_width=True,
-                help="Save the example dataset directly to your local Downloads folder."
-            ):
-                try:
-                    outpath = _save_file_to_downloads(example_path, "Protein_abundance_example.csv")
-                    st.sidebar.success(f"Saved to: {outpath}")
-                except Exception as e:
-                    st.sidebar.error(f"Could not save example dataset: {e}")
+            add_download_button(example_path.read_bytes(), "Protein_abundance_example.csv", label="Download Protein_abundance.csv", key="save_ex_tp", mime="text/csv")
         else:
             st.info("Example dataset not found in assets directory.")
 
@@ -1734,34 +1725,16 @@ def render_uploaded_matrix_panel(df: pd.DataFrame, numeric_cols: list, downstrea
         dl_col1, dl_col2, _ = st.columns([1.5, 1.5, 7])
 
         csv_bytes = df.to_csv(index=False).encode("utf-8")
-        if dl_col1.button(
-            "Download CSV",
-            key="save_uploaded_csv",
-            width="stretch",
-            help="Download the original uploaded matrix in CSV format."
-        ):
-            try:
-                outpath = _save_bytes_to_downloads(csv_bytes, "uploaded_proteomics_data.csv")
-                st.success(f"Saved CSV to: {outpath}")
-            except Exception as e:
-                st.error(f"Could not Dowload CSV: {e}")
+        with dl_col1:
+            add_download_button(csv_bytes, "uploaded_proteomics_data.csv", label="Download CSV", key="save_uploaded_csv", mime="text/csv")
 
         buffer_excel = BytesIO()
         with pd.ExcelWriter(buffer_excel, engine="openpyxl") as writer:
             df.to_excel(writer, index=False, sheet_name="Merged_Data")
         excel_bytes = buffer_excel.getvalue()
 
-        if dl_col2.button(
-            "Dowload Excel",
-            key="save_uploaded_excel",
-            width="stretch",
-            help="Save the successfully merged dataset as an Excel spreadsheet."
-        ):
-            try:
-                outpath = _save_bytes_to_downloads(excel_bytes, "uploaded_proteomics_data.xlsx")
-                st.success(f"Saved Excel to: {outpath}")
-            except Exception as e:
-                st.error(f"Could not Dowload Excel: {e}")
+        with dl_col2:
+            add_download_button(excel_bytes, "uploaded_proteomics_data.xlsx", label="Download Excel", key="save_uploaded_excel", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.dataframe(df, use_container_width=True, height=450)
@@ -3964,6 +3937,38 @@ def main():
 
     st.markdown("<br>", unsafe_allow_html=True)
     faq_section()
+
+
+# =============================================================================
+# Centralized browser-safe downloads
+# =============================================================================
+# RConnect cannot save directly to a user's laptop. These overrides keep all
+# downloads browser-based so the browser can ask where to save when configured.
+try:
+    from download_utility import (
+        add_download_button,
+        add_file_download_buttons,
+        add_hosted_safe_file_download_button,
+        add_bytes_download_button,
+        add_bytes_download_button_tp,
+        add_dataframe_download_buttons,
+        add_matplotlib_download_buttons,
+        add_plot_download_buttons,
+        add_plotly_download_buttons,
+        add_figure_download_buttons_tp,
+        add_figure_download_buttons_tp_lf,
+        add_plotly_html_download_button_tp,
+        add_plotly_html_download_button_tp_lf,
+        add_figure_download_buttons_common,
+        add_plotly_html_download_button_common,
+        save_profile_pdf_to_downloads_tp,
+        save_profile_pdf_to_downloads_tp_lf,
+        explain_download_location,
+        _save_bytes_to_downloads,
+        _save_file_to_downloads,
+    )
+except Exception:
+    pass
 
 if __name__ == "__main__":
     if "session_initialized_tp" not in st.session_state:

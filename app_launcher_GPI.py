@@ -333,35 +333,104 @@ def _dataframe_to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Sheet1") -> b
     return buffer.getvalue()
 
 
+
+def _stable_download_key(prefix: str, filename: str, suffix: str = "") -> str:
+    """Create stable Streamlit keys for download buttons."""
+    safe = _safe_download_filename(filename)
+    suffix = _safe_download_filename(suffix) if suffix else "default"
+    return f"{prefix}_{safe}_{suffix}"
+
+
+def _browser_download_button(label: str, data, file_name: str, key: str, use_container_width: bool = True):
+    """Browser-safe download button. This is the correct behavior for RConnect/Posit Connect."""
+    file_bytes = _coerce_to_bytes(data)
+    safe_name = _safe_download_filename(file_name)
+    mime = _guess_mime_from_filename(safe_name) if "_guess_mime_from_filename" in globals() else None
+    return st.download_button(
+        label=label,
+        data=file_bytes,
+        file_name=safe_name,
+        mime=mime,
+        key=key,
+        use_container_width=use_container_width,
+    )
+
+
+def _show_plot_export_buttons() -> bool:
+    """Return True only when optional per-plot exports are enabled.
+
+    Default is False to keep the UI aligned with GlycoExplorer: data tables
+    get CSV/Excel downloads, while every plot does not add extra export
+    buttons below it. Set GPI_SHOW_PLOT_EXPORTS=1 to enable plot HTML/PNG/SVG/PDF
+    buttons for debugging or figure export.
+    """
+    import os
+    env_value = str(os.environ.get("GPI_SHOW_PLOT_EXPORTS", "")).strip().lower()
+    if env_value in {"1", "true", "yes", "y", "on"}:
+        return True
+    return bool(st.session_state.get("show_plot_export_buttons", False))
+
+
 def add_dataframe_download_buttons(df: pd.DataFrame, base_filename: str, key_suffix: str = ""):
-    """Desktop-safe CSV/Excel save buttons for dataframes."""
+    """GE-style CSV/Excel downloads for dataframes.
+
+    RConnect/Posit Connect should use browser downloads only. The previous
+    version also exposed local desktop save expanders in hybrid mode, which
+    cluttered the UI and created the duplicate download sections seen under
+    each plot. This version intentionally shows only the two data exports,
+    matching the GlycoExplorer matrix/results pattern.
+    """
     if df is None or df.empty:
         return
-    uid = key_suffix or str(uuid.uuid4())[:8]
+
     base_filename = _safe_download_filename(base_filename).rsplit(".", 1)[0]
+    suffix = key_suffix or base_filename
     csv_bytes = df.to_csv(index=False).encode("utf-8")
     excel_bytes = _dataframe_to_excel_bytes(df, sheet_name=base_filename[:31])
 
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("Save CSV to Downloads", key=f"save_csv_{base_filename}_{uid}", use_container_width=True):
-            try:
-                outpath = _save_bytes_to_downloads(csv_bytes, f"{base_filename}.csv")
-                st.success(f"Saved CSV to: {outpath}")
-            except Exception as e:
-                st.error(f"Could not save CSV: {e}")
+        _browser_download_button(
+            "Download CSV",
+            csv_bytes,
+            f"{base_filename}.csv",
+            key=_stable_download_key("download_csv", base_filename, suffix),
+        )
     with c2:
-        if st.button("Save Excel to Downloads", key=f"save_xlsx_{base_filename}_{uid}", use_container_width=True):
-            try:
-                outpath = _save_bytes_to_downloads(excel_bytes, f"{base_filename}.xlsx")
-                st.success(f"Saved Excel to: {outpath}")
-            except Exception as e:
-                st.error(f"Could not save Excel: {e}")
+        _browser_download_button(
+            "Download Excel",
+            excel_bytes,
+            f"{base_filename}.xlsx",
+            key=_stable_download_key("download_xlsx", base_filename, suffix),
+        )
 
+def add_bytes_download_button(label: str, data, file_name: str, key_suffix: str = "", use_container_width: bool = True):
+    """Single browser download helper for generated files.
+
+    This avoids local/server save buttons. In hosted mode this is the only
+    correct behavior; in local browser mode it also keeps the UI consistent
+    with GlycoExplorer.
+    """
+    safe_name = _safe_download_filename(file_name)
+    suffix = key_suffix or safe_name
+    return _browser_download_button(
+        label,
+        data,
+        safe_name,
+        key=_stable_download_key("download_file", safe_name, suffix),
+        use_container_width=use_container_width,
+    )
 
 def add_plot_download_buttons(fig, base_filename: str = "plot"):
-    """Desktop-safe PNG/SVG/PDF export buttons for Matplotlib figures."""
-    uid = str(uuid.uuid4())[:8]
+    """Optional PNG/SVG/PDF downloads for Matplotlib figures.
+
+    Disabled by default to avoid stacking plot-export buttons under every
+    visualization. Enable with GPI_SHOW_PLOT_EXPORTS=1 if figure-file export
+    buttons are needed.
+    """
+    if not _show_plot_export_buttons():
+        return
+
     base_filename = _safe_download_filename(base_filename).rsplit(".", 1)[0]
 
     png_buf = io.BytesIO()
@@ -370,45 +439,31 @@ def add_plot_download_buttons(fig, base_filename: str = "plot"):
     fig.savefig(png_buf, format="png", dpi=300, bbox_inches="tight", facecolor="white")
     fig.savefig(svg_buf, format="svg", bbox_inches="tight", facecolor="white")
     fig.savefig(pdf_buf, format="pdf", bbox_inches="tight", facecolor="white")
-    png_bytes = png_buf.getvalue()
-    svg_bytes = svg_buf.getvalue()
-    pdf_bytes = pdf_buf.getvalue()
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        if st.button("Save PNG", key=f"save_png_{base_filename}_{uid}", use_container_width=True):
-            try:
-                outpath = _save_bytes_to_downloads(png_bytes, f"{base_filename}.png")
-                st.success(f"Saved PNG to: {outpath}")
-            except Exception as e:
-                st.error(f"Could not save PNG: {e}")
-    with c2:
-        if st.button("Save SVG", key=f"save_svg_{base_filename}_{uid}", use_container_width=True):
-            try:
-                outpath = _save_bytes_to_downloads(svg_bytes, f"{base_filename}.svg")
-                st.success(f"Saved SVG to: {outpath}")
-            except Exception as e:
-                st.error(f"Could not save SVG: {e}")
-    with c3:
-        if st.button("Save PDF", key=f"save_pdf_{base_filename}_{uid}", use_container_width=True):
-            try:
-                outpath = _save_bytes_to_downloads(pdf_bytes, f"{base_filename}.pdf")
-                st.success(f"Saved PDF to: {outpath}")
-            except Exception as e:
-                st.error(f"Could not save PDF: {e}")
-
+    with st.expander("Download plot files", expanded=False):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            add_bytes_download_button("Download PNG", png_buf.getvalue(), f"{base_filename}.png", key_suffix=f"{base_filename}_png")
+        with c2:
+            add_bytes_download_button("Download SVG", svg_buf.getvalue(), f"{base_filename}.svg", key_suffix=f"{base_filename}_svg")
+        with c3:
+            add_bytes_download_button("Download PDF", pdf_buf.getvalue(), f"{base_filename}.pdf", key_suffix=f"{base_filename}_pdf")
 
 def add_plotly_download_buttons(fig, base_filename: str = "interactive_plot"):
-    """Save an interactive Plotly figure as self-contained HTML for desktop apps."""
-    uid = str(uuid.uuid4())[:8]
+    """Optional self-contained Plotly HTML download.
+
+    Disabled by default because the underlying table CSV/Excel is usually the
+    useful export, and this keeps the app visually consistent with GlycoExplorer.
+    Enable with GPI_SHOW_PLOT_EXPORTS=1 when users need an offline interactive
+    HTML plot.
+    """
+    if not _show_plot_export_buttons():
+        return
+
     base_filename = _safe_download_filename(base_filename).rsplit(".", 1)[0]
     html_bytes = fig.to_html(include_plotlyjs="cdn", full_html=True).encode("utf-8")
-    if st.button("Save Interactive HTML", key=f"save_html_{base_filename}_{uid}", use_container_width=True):
-        try:
-            outpath = _save_bytes_to_downloads(html_bytes, f"{base_filename}.html")
-            st.success(f"Saved HTML to: {outpath}")
-        except Exception as e:
-            st.error(f"Could not save HTML: {e}")
+    with st.expander("Download plot file", expanded=False):
+        add_bytes_download_button("Download Interactive HTML", html_bytes, f"{base_filename}.html", key_suffix=f"{base_filename}_html")
 
 
 @st.cache_data(show_spinner=False)
@@ -617,14 +672,268 @@ def filter_glycopeptide_rows(df: pd.DataFrame) -> pd.DataFrame:
     return df.loc[mask].copy() if mask.any() else df.copy()
 
 
+
 def median_center_intensity_frame(df: pd.DataFrame) -> pd.DataFrame:
-    """Median-center sample/channel intensity columns on log2 scale, then return linear scale."""
+    """Median-center sample/channel intensity columns on log2 scale, then return linear scale.
+
+    Kept for backward compatibility. New ratio functions use scale-aware log2 matrices
+    directly through `to_log2_intensity_matrix`.
+    """
     x = df.apply(pd.to_numeric, errors="coerce").astype(float)
     x = x.where(x > 0)
     logx = np.log2(x)
     centered = logx.subtract(logx.median(axis=0, skipna=True), axis=1)
-    # Preserve positive scale for downstream ratio computation.
     return np.power(2.0, centered)
+
+
+def _numeric_values_from_columns(df: pd.DataFrame, cols: List[str]) -> pd.Series:
+    """Flatten numeric values from selected columns."""
+    if df is None or df.empty or not cols:
+        return pd.Series(dtype=float)
+    available = [c for c in cols if c in df.columns]
+    if not available:
+        return pd.Series(dtype=float)
+    raw = pd.Series(df[available].to_numpy().ravel())
+    vals = pd.to_numeric(raw, errors="coerce")
+    vals = vals.replace([np.inf, -np.inf], np.nan).dropna()
+    return vals.astype(float)
+
+
+def infer_intensity_scale(df: pd.DataFrame, int_cols: List[str]) -> str:
+    """Infer whether intensity columns are raw/linear or already log2-like.
+
+    Why this matters:
+    - Total-protein tables from many pipelines often export log2-normalized channel values.
+    - Glycopeptide tools often export raw/linear abundance.
+    - Direct log2(glyco / protein) is invalid when the two tables are on different scales.
+
+    Returns one of: "linear/raw", "log2-like", "ambiguous", "not detected".
+    """
+    vals = _numeric_values_from_columns(df, int_cols)
+    if vals.empty:
+        return "not detected"
+
+    vals_nonzero = vals[vals != 0]
+    if vals_nonzero.empty:
+        return "ambiguous"
+
+    q99 = float(vals_nonzero.quantile(0.99))
+    q95 = float(vals_nonzero.quantile(0.95))
+    med = float(vals_nonzero.median())
+    vmax = float(vals_nonzero.max())
+    vmin = float(vals_nonzero.min())
+    frac_zero = float((vals == 0).mean())
+
+    # Log2-normalized proteomics/TMT channels commonly sit in roughly 0-35.
+    if (vmax <= 60 and q99 <= 45 and -10 <= vmin <= 45 and 0 <= med <= 30):
+        return "log2-like"
+
+    # Raw/linear abundance usually has a wider upper tail and can include zeros.
+    if vmax > 100 or q99 > 60 or q95 > 50 or frac_zero > 0.005:
+        return "linear/raw"
+
+    return "ambiguous"
+
+
+def intensity_scale_qc_table(
+    glyco_df: pd.DataFrame,
+    prot_df: pd.DataFrame,
+    g_int_cols: List[str],
+    p_int_cols: List[str],
+) -> pd.DataFrame:
+    """Summarize intensity-column scale and distribution for QC display."""
+    rows = []
+    for label, df, cols in [
+        ("Glycoproteome", glyco_df, g_int_cols),
+        ("Total protein", prot_df, p_int_cols),
+    ]:
+        vals = _numeric_values_from_columns(df, cols)
+        if vals.empty:
+            rows.append({
+                "Dataset": label,
+                "Intensity columns": 0,
+                "Inferred scale": "not detected",
+                "Min": np.nan,
+                "Median": np.nan,
+                "Q99": np.nan,
+                "Max": np.nan,
+                "Zero values": 0,
+                "Missing values": np.nan,
+            })
+            continue
+        total_cells = len(cols) * len(df) if df is not None and not df.empty else len(vals)
+        rows.append({
+            "Dataset": label,
+            "Intensity columns": len(cols),
+            "Inferred scale": infer_intensity_scale(df, cols),
+            "Min": float(vals.min()),
+            "Median": float(vals.median()),
+            "Q99": float(vals.quantile(0.99)),
+            "Max": float(vals.max()),
+            "Zero values": int((vals == 0).sum()),
+            "Missing values": int(max(total_cells - vals.shape[0], 0)),
+        })
+    return pd.DataFrame(rows)
+
+
+def _resolve_intensity_scale(df: pd.DataFrame, int_cols: List[str], scale_hint: str = "auto") -> str:
+    hint = str(scale_hint or "auto").strip().lower()
+    if hint in {"linear", "raw", "linear/raw", "raw/linear"}:
+        return "linear/raw"
+    if hint in {"log2", "log2-like", "log2_like", "logged", "log"}:
+        return "log2-like"
+    inferred = infer_intensity_scale(df, int_cols)
+    if inferred == "ambiguous":
+        # Safer default for abundance-style columns. The QC panel will still warn the user.
+        return "linear/raw"
+    return inferred
+
+
+def to_log2_intensity_matrix(
+    df: pd.DataFrame,
+    int_cols: List[str],
+    scale_hint: str = "auto",
+    min_intensity: float = 0.0,
+    median_center: bool = False,
+) -> Tuple[pd.DataFrame, str]:
+    """Return a sample/channel log2-intensity matrix with cleaned sample names.
+
+    The returned values are always log2-like. If the input appears linear/raw,
+    values <= min_intensity are set to missing before log2 transformation. If the
+    input appears log2-like, the values are kept on their original log2 scale.
+
+    This prevents invalid ratios when glyco abundance is raw but total protein is
+    already log2-normalized.
+    """
+    if df is None or df.empty or not int_cols:
+        return pd.DataFrame(), "not detected"
+
+    available = [c for c in int_cols if c in df.columns]
+    if not available:
+        return pd.DataFrame(), "not detected"
+
+    native = df[available].apply(pd.to_numeric, errors="coerce").astype(float)
+    native = native.replace([np.inf, -np.inf], np.nan)
+    native.columns = [clean_tmt_sample(c) for c in native.columns]
+    # Collapse duplicate cleaned channels if labels normalize to the same value.
+    native = native.T.groupby(level=0).mean().T
+
+    scale = _resolve_intensity_scale(df, int_cols, scale_hint=scale_hint)
+    if scale == "log2-like":
+        logx = native.copy()
+        # For log2-like data, min_intensity is not applied as a raw abundance cutoff.
+        # Non-finite values are already missing.
+    elif scale == "linear/raw":
+        cutoff = float(min_intensity or 0.0)
+        logx = native.where(native > cutoff)
+        logx = np.log2(logx)
+    else:
+        return pd.DataFrame(index=df.index), scale
+
+    if median_center and not logx.empty:
+        logx = logx.subtract(logx.median(axis=0, skipna=True), axis=1)
+
+    return logx, scale
+
+
+def build_differential_qc_table(
+    glyco_df: pd.DataFrame,
+    prot_df: pd.DataFrame,
+    g_gene_col: str,
+    g_lfc_col: str,
+    g_metric_col: str,
+    p_gene_col: str,
+    p_lfc_col: str,
+    p_metric_col: str,
+    glyco_alpha: float,
+    prot_alpha: float,
+    glyco_lfc_thr: float,
+    prot_lfc_thr: float,
+) -> pd.DataFrame:
+    """Compact QC summary for differential-result inputs."""
+    def _one(label, df, gene_col, lfc_col, metric_col, alpha, lfc_thr):
+        lfc = safe_numeric(df[lfc_col]) if lfc_col in df.columns else pd.Series(dtype=float)
+        metric = safe_numeric(df[metric_col]) if metric_col in df.columns else pd.Series(dtype=float)
+        metric_sig = metric <= alpha
+        full_sig = metric_sig & (lfc.abs() >= lfc_thr)
+        return {
+            "Dataset": label,
+            "Rows": int(df.shape[0]),
+            "Unique proteins/genes": int(df[gene_col].dropna().astype(str).str.upper().nunique()) if gene_col in df.columns else 0,
+            "Metric column": metric_col,
+            "log2FC median": float(lfc.median()) if lfc.notna().any() else np.nan,
+            "log2FC Q05": float(lfc.quantile(0.05)) if lfc.notna().any() else np.nan,
+            "log2FC Q95": float(lfc.quantile(0.95)) if lfc.notna().any() else np.nan,
+            f"Metric <= alpha": int(metric_sig.sum()),
+            f"Metric <= alpha (%)": float(metric_sig.mean() * 100) if len(metric_sig) else np.nan,
+            f"Metric + |log2FC| cutoff": int(full_sig.sum()),
+            f"Metric + |log2FC| cutoff (%)": float(full_sig.mean() * 100) if len(full_sig) else np.nan,
+            "Significant up": int((full_sig & (lfc > 0)).sum()),
+            "Significant down": int((full_sig & (lfc < 0)).sum()),
+        }
+
+    return pd.DataFrame([
+        _one("Glycoproteome", glyco_df, g_gene_col, g_lfc_col, g_metric_col, glyco_alpha, glyco_lfc_thr),
+        _one("Total protein", prot_df, p_gene_col, p_lfc_col, p_metric_col, prot_alpha, prot_lfc_thr),
+    ])
+
+
+def add_evidence_ranking_columns(merged_gene: pd.DataFrame) -> pd.DataFrame:
+    """Add practical prioritization columns for review.
+
+    The score is not a statistical p-value. It is a triage score that prioritizes:
+    stronger glyco-protein delta, stronger glyco evidence, more supporting
+    glycopeptides, and better directional consistency.
+    """
+    df = merged_gene.copy()
+    if df.empty:
+        return df
+
+    g_metric = safe_numeric(df.get("metric_glyco_best", np.nan)).clip(lower=1e-300)
+    p_metric = safe_numeric(df.get("metric_prot_best", np.nan)).clip(lower=1e-300)
+    glyco_support = safe_numeric(df.get("glyco_significant_peptides", 0)).fillna(0)
+    glyco_cons = safe_numeric(df.get("glyco_consistency", 0)).fillna(0)
+    abs_delta = safe_numeric(df.get("Abs_Delta_log2FC", np.nan))
+    abs_glyco = safe_numeric(df.get("log2FC_glyco", np.nan)).abs()
+
+    neglog_glyco = (-np.log10(g_metric)).replace([np.inf, -np.inf], np.nan).fillna(0)
+    df["Evidence_Score"] = (
+        abs_delta.fillna(abs_glyco).fillna(0)
+        * neglog_glyco
+        * np.log1p(glyco_support)
+        * glyco_cons.clip(lower=0, upper=1)
+    )
+    df["Protein_Context_Strength"] = np.where(
+        safe_numeric(df.get("log2FC_prot", np.nan)).notna(),
+        -np.log10(p_metric),
+        np.nan,
+    )
+
+    df["Evidence_Tier"] = "Tier 4 - background / not prioritized"
+    high_glyco_bio = df.get("Integration_Priority", "").astype(str).str.contains(
+        "High glyco-biology priority", case=False, na=False
+    )
+    matched_protein = safe_numeric(df.get("log2FC_prot", np.nan)).notna()
+    enough_support = glyco_support >= 2
+    strong_delta = abs_delta >= 1.0
+    consistent = glyco_cons >= 0.67
+
+    df.loc[high_glyco_bio & matched_protein & enough_support & strong_delta & consistent, "Evidence_Tier"] = (
+        "Tier 1 - glyco-specific/discordant with protein context"
+    )
+    df.loc[high_glyco_bio & enough_support & consistent & (df["Evidence_Tier"] == "Tier 4 - background / not prioritized"), "Evidence_Tier"] = (
+        "Tier 2 - glyco-priority, needs targeted review"
+    )
+    df.loc[
+        df.get("Biological_Interpretation", "").astype(str).str.contains("Protein-abundance driven|Protein-dominant", case=False, na=False),
+        "Evidence_Tier"
+    ] = "Tier 3 - mostly protein-abundance explained"
+    df.loc[
+        df.get("Biological_Interpretation", "").astype(str).str.contains("Protein-only", case=False, na=False),
+        "Evidence_Tier"
+    ] = "Protein-only context"
+
+    return df
 
 def compute_significance_flags(df: pd.DataFrame, lfc_col: str, metric_col: str, alpha: float, lfc_thr: float) -> pd.Series:
     return (safe_numeric(df[lfc_col]).abs() >= lfc_thr) & (safe_numeric(df[metric_col]) <= alpha)
@@ -868,6 +1177,7 @@ def color_map_status() -> Dict[str, str]:
         "Non-significant": "#999999",
     }
 
+
 def build_long_ratio_df(
     glyco_sub: pd.DataFrame,
     prot_sub: pd.DataFrame,
@@ -876,7 +1186,16 @@ def build_long_ratio_df(
     min_intensity: float = 1.0,
     median_center: bool = False,
     glycopeptide_only: bool = True,
+    glyco_scale: str = "auto",
+    protein_scale: str = "auto",
 ) -> pd.DataFrame:
+    """Build a channel-wise scale-aware log2 glyco-minus-protein table.
+
+    Older versions calculated log2(mean glyco abundance / mean protein abundance)
+    directly. That is unsafe when one input is raw/linear and the other is already
+    log2-normalized. This function first puts both matrices on log2 scale, then
+    subtracts protein from glyco.
+    """
     if glyco_sub.empty or prot_sub.empty or not g_int_cols or not p_int_cols:
         return pd.DataFrame()
 
@@ -884,32 +1203,33 @@ def build_long_ratio_df(
     if g_use.empty:
         return pd.DataFrame()
 
-    gtmp = g_use[g_int_cols].copy()
-    ptmp = prot_sub[p_int_cols].copy()
-    gtmp.columns = [clean_tmt_sample(c) for c in gtmp.columns]
-    ptmp.columns = [clean_tmt_sample(c) for c in ptmp.columns]
+    g_log, g_scale_used = to_log2_intensity_matrix(
+        g_use, g_int_cols, scale_hint=glyco_scale, min_intensity=min_intensity, median_center=median_center
+    )
+    p_log, p_scale_used = to_log2_intensity_matrix(
+        prot_sub, p_int_cols, scale_hint=protein_scale, min_intensity=min_intensity, median_center=median_center
+    )
 
-    if median_center:
-        gtmp = median_center_intensity_frame(gtmp)
-        ptmp = median_center_intensity_frame(ptmp)
+    if g_log.empty or p_log.empty:
+        return pd.DataFrame()
 
-    mean_g = gtmp.apply(safe_numeric).mean(axis=0)
-    mean_p = ptmp.apply(safe_numeric).mean(axis=0)
+    mean_g = g_log.mean(axis=0, skipna=True)
+    mean_p = p_log.mean(axis=0, skipna=True)
 
     shared = [c for c in mean_g.index if c in mean_p.index]
     rows = []
     for ch in shared:
         gv, pv = mean_g[ch], mean_p[ch]
-        if pd.isna(gv) or pd.isna(pv) or gv <= 0 or pv <= 0:
-            continue
-        if gv < min_intensity or pv < min_intensity:
+        if pd.isna(gv) or pd.isna(pv):
             continue
         rows.append({
             "Sample": ch,
-            "GlycoIntensity": float(gv),
-            "ProteinIntensity": float(pv),
-            "Ratio": float(gv / pv),
-            "log2Ratio": float(np.log2(gv / pv)),
+            "Glyco_log2_signal": float(gv),
+            "Protein_log2_signal": float(pv),
+            "log2Ratio": float(gv - pv),
+            "Glyco_input_scale": g_scale_used,
+            "Protein_input_scale": p_scale_used,
+            "Median_centered": bool(median_center),
         })
     return pd.DataFrame(rows)
 
@@ -923,12 +1243,13 @@ def build_global_ratio_matrix(
     min_intensity: float = 1.0,
     median_center: bool = False,
     glycopeptide_only: bool = True,
+    glyco_scale: str = "auto",
+    protein_scale: str = "auto",
 ) -> pd.DataFrame:
-    """Fast gene x sample log2(Glyco/Protein) matrix.
+    """Fast gene x sample scale-aware log2(Glyco) - log2(Protein) matrix.
 
-    This avoids the slow previous implementation that scanned the full glyco
-    and protein tables once for every gene. It pre-aggregates intensities by
-    GeneKey and then computes ratios only for genes present in both omics.
+    This is not absolute glycan occupancy. It is a relative signal ratio after
+    both tables are converted to a comparable log2 scale.
     """
     if merged_gene.empty or glyco_df.empty or prot_df.empty or not g_int_cols or not p_int_cols:
         return pd.DataFrame()
@@ -938,18 +1259,20 @@ def build_global_ratio_matrix(
     if g_use.empty or p_use.empty or "GeneKey" not in g_use.columns or "GeneKey" not in p_use.columns:
         return pd.DataFrame()
 
-    def _gene_mean_matrix(df: pd.DataFrame, int_cols: List[str]) -> pd.DataFrame:
-        x = df[int_cols].apply(pd.to_numeric, errors="coerce")
-        x.columns = [clean_tmt_sample(c) for c in x.columns]
-        # Collapse duplicate cleaned channels such as Abundance: 126 and 126.
-        x = x.T.groupby(level=0).mean().T
-        if median_center:
-            x = median_center_intensity_frame(x)
-        x["GeneKey"] = df["GeneKey"].astype(str).values
-        return x.groupby("GeneKey", dropna=True, sort=False).mean(numeric_only=True)
+    def _gene_log_mean_matrix(df: pd.DataFrame, int_cols: List[str], scale_hint: str) -> pd.DataFrame:
+        logx, _scale_used = to_log2_intensity_matrix(
+            df, int_cols, scale_hint=scale_hint, min_intensity=min_intensity, median_center=median_center
+        )
+        if logx.empty:
+            return pd.DataFrame()
+        logx["GeneKey"] = df["GeneKey"].astype(str).values
+        return logx.groupby("GeneKey", dropna=True, sort=False).mean(numeric_only=True)
 
-    g_mean = _gene_mean_matrix(g_use, g_int_cols)
-    p_mean = _gene_mean_matrix(p_use, p_int_cols)
+    g_mean = _gene_log_mean_matrix(g_use, g_int_cols, glyco_scale)
+    p_mean = _gene_log_mean_matrix(p_use, p_int_cols, protein_scale)
+
+    if g_mean.empty or p_mean.empty:
+        return pd.DataFrame()
 
     candidate_genes = set(merged_gene["Gene"].dropna().astype(str))
     shared_genes = [g for g in g_mean.index.astype(str) if g in p_mean.index.astype(str) and g in candidate_genes]
@@ -959,9 +1282,7 @@ def build_global_ratio_matrix(
 
     g_sub = g_mean.loc[shared_genes, shared_cols].astype(float)
     p_sub = p_mean.loc[shared_genes, shared_cols].astype(float)
-    valid = (g_sub > 0) & (p_sub > 0) & (g_sub >= min_intensity) & (p_sub >= min_intensity)
-    ratio = np.log2(g_sub / p_sub).where(valid)
-    ratio = ratio.dropna(axis=0, how="all")
+    ratio = (g_sub - p_sub).dropna(axis=0, how="all")
     ratio.index.name = "Gene"
     return ratio
 
@@ -1004,6 +1325,23 @@ def parse_gene_set_file(uploaded_file) -> Dict[str, set]:
     return {k: v for k, v in gene_sets.items() if v}
 
 
+
+def benjamini_hochberg(p_values: pd.Series) -> pd.Series:
+    """Monotonic Benjamini-Hochberg FDR correction."""
+    p = pd.to_numeric(p_values, errors="coerce").astype(float)
+    out = pd.Series(np.nan, index=p.index, dtype=float)
+    valid = p.dropna()
+    if valid.empty:
+        return out
+    order = valid.sort_values().index
+    ranked = valid.loc[order].to_numpy()
+    m = float(len(ranked))
+    q = ranked * m / np.arange(1, len(ranked) + 1)
+    q = np.minimum.accumulate(q[::-1])[::-1]
+    out.loc[order] = np.clip(q, 0, 1)
+    return out
+
+
 def run_simple_fisher_enrichment(selected_genes: set, background_genes: set, gene_sets: Dict[str, set]) -> pd.DataFrame:
     selected_genes = {g.upper() for g in selected_genes if g}
     background_genes = {g.upper() for g in background_genes if g}
@@ -1021,10 +1359,18 @@ def run_simple_fisher_enrichment(selected_genes: set, background_genes: set, gen
         if a == 0:
             continue
         odds, pval = fisher_exact([[a, b], [c, d]], alternative="greater")
-        rows.append({"GeneSet": name, "Overlap": a, "SetSizeInBackground": len(gs), "SelectedGenes": len(selected_genes), "OddsRatio": odds, "p_value": pval, "Genes": ";".join(sorted(selected_genes & gs))})
+        rows.append({
+            "GeneSet": name,
+            "Overlap": a,
+            "SetSizeInBackground": len(gs),
+            "SelectedGenes": len(selected_genes),
+            "OddsRatio": odds,
+            "p_value": pval,
+            "Genes": ";".join(sorted(selected_genes & gs)),
+        })
     out = pd.DataFrame(rows).sort_values("p_value") if rows else pd.DataFrame()
     if not out.empty:
-        out["FDR_BH"] = (out["p_value"] * len(out) / (np.arange(len(out)) + 1)).clip(upper=1.0)
+        out["FDR_BH"] = benjamini_hochberg(out["p_value"])
     return out
 
 def create_side_by_side_waterfall_html_table_export(
@@ -1302,13 +1648,15 @@ def detect_glycan_col(df: pd.DataFrame) -> Optional[str]:
     return None
 
 
+
 def add_biological_interpretation_columns(merged_gene: pd.DataFrame, delta_thr: float = 0.5) -> pd.DataFrame:
     """Add protein-normalized biological interpretation classes.
 
-    The existing Status column is kept for backward compatibility. The new
-    Biological_Interpretation column is more aligned with a glycoprotein-first
-    workflow: first identify glyco changes, then ask whether total protein
-    abundance explains them.
+    Main rule:
+    - Start from glyco evidence.
+    - Use total protein as context, not as a replacement for site/glycoform evidence.
+    - Do not call a protein-only event "mixed-site behavior"; mixed-site behavior is
+      relevant only when glyco evidence itself is significant.
     """
     df = merged_gene.copy()
     if df.empty:
@@ -1361,17 +1709,29 @@ def add_biological_interpretation_columns(merged_gene: pd.DataFrame, delta_thr: 
         else:
             base = "Not significant"
 
-        if mixed_site and base != "Not significant":
+        if sg and mixed_site and base != "Not significant":
             base = f"{base} | mixed-site behavior"
         return base
 
     df["Biological_Interpretation"] = df.apply(_interpret, axis=1)
     df["Integration_Priority"] = "Lower priority"
-    df.loc[df["Biological_Interpretation"].str.contains("Glycosylation-specific|Discordant|Glyco-enriched|mixed-site", case=False, na=False), "Integration_Priority"] = "High glyco-biology priority"
-    df.loc[df["Biological_Interpretation"].str.contains("Protein-abundance driven", case=False, na=False), "Integration_Priority"] = "Protein-abundance explained"
-    df.loc[df["Biological_Interpretation"].str.contains("Protein-only", case=False, na=False), "Integration_Priority"] = "Protein-only context"
+    df.loc[
+        df["Biological_Interpretation"].str.contains(
+            "Glycosylation-specific|Discordant|Glyco-enriched|mixed-site",
+            case=False,
+            na=False,
+        ),
+        "Integration_Priority",
+    ] = "High glyco-biology priority"
+    df.loc[
+        df["Biological_Interpretation"].str.contains("Protein-abundance driven", case=False, na=False),
+        "Integration_Priority",
+    ] = "Protein-abundance explained"
+    df.loc[
+        df["Biological_Interpretation"].str.contains("Protein-only", case=False, na=False),
+        "Integration_Priority",
+    ] = "Protein-only context"
     return df
-
 
 def build_glycoproteome_first_feature_table(
     glyco_df: pd.DataFrame,
@@ -1958,7 +2318,7 @@ def render_protein_normalized_integration_overview(
         add_dataframe_download_buttons(view[cols], "gpi_protein_normalized_integrated_table", key_suffix="bio_interpretation_table")
 
     with st.container(border=True):
-        st.markdown("#### Optional channel-level log2(Glyco / Protein) heatmap")
+        st.markdown("#### Optional channel-level log2 glyco signal - log2 protein signal heatmap")
         ratio_mat = build_global_ratio_matrix(
             merged_gene,
             glyco_df,
@@ -1976,7 +2336,7 @@ def render_protein_normalized_integration_overview(
             ranking = ratio_mat.abs().mean(axis=1).sort_values(ascending=False).head(top_n).index
             ratio_top = ratio_mat.loc[ranking]
             fig_ratio, ax_ratio = plt.subplots(figsize=(9, max(4.8, 0.28 * len(ratio_top))))
-            sns.heatmap(ratio_top.fillna(0), cmap="vlag", center=0, ax=ax_ratio, cbar_kws={"label": "log2(Glyco / Protein)", "shrink": 0.65})
+            sns.heatmap(ratio_top.fillna(0), cmap="vlag", center=0, ax=ax_ratio, cbar_kws={"label": "log2 glyco signal - log2 protein signal", "shrink": 0.65})
             ax_ratio.set_title("Relative glyco-to-protein ratio map", pad=12)
             ax_ratio.set_xlabel("Sample/channel")
             ax_ratio.set_ylabel("Protein/gene ID")
@@ -1984,6 +2344,106 @@ def render_protein_normalized_integration_overview(
             st.pyplot(fig_ratio)
             add_plot_download_buttons(fig_ratio, "gpi_protein_normalized_ratio_heatmap")
             st.caption("This is a relative signal ratio, not absolute glycan occupancy. Use it as supporting evidence only.")
+
+
+def render_differential_input_qc(
+    glyco_df: pd.DataFrame,
+    prot_df: pd.DataFrame,
+    g_gene_col: str,
+    g_lfc_col: str,
+    g_metric_col: str,
+    p_gene_col: str,
+    p_lfc_col: str,
+    p_metric_col: str,
+    g_int_cols: List[str],
+    p_int_cols: List[str],
+    glyco_alpha: float,
+    prot_alpha: float,
+    glyco_lfc_thr: float,
+    prot_lfc_thr: float,
+):
+    """QC panel for input differential result behavior before integration."""
+    st.markdown("### Input differential-result QC")
+    st.caption(
+        "This panel checks whether the two differential-result files are numerically comparable enough for interpretation. "
+        "It does not change calls; it exposes normalization, scale, and threshold issues."
+    )
+
+    qc = build_differential_qc_table(
+        glyco_df, prot_df,
+        g_gene_col, g_lfc_col, g_metric_col,
+        p_gene_col, p_lfc_col, p_metric_col,
+        glyco_alpha, prot_alpha, glyco_lfc_thr, prot_lfc_thr,
+    )
+    scale_qc = intensity_scale_qc_table(glyco_df, prot_df, g_int_cols, p_int_cols)
+
+    c1, c2 = st.columns([0.55, 0.45], gap="large")
+    with c1:
+        with st.container(border=True):
+            st.markdown("#### Differential-result summary")
+            st.dataframe(qc, use_container_width=True, hide_index=True)
+            add_dataframe_download_buttons(qc, "gpi_input_differential_qc", key_suffix="input_diff_qc")
+
+            for _, row in qc.iterrows():
+                metric_rate = float(row.get("Metric <= alpha (%)", 0.0))
+                median_lfc = row.get("log2FC median", np.nan)
+                dataset = row.get("Dataset", "Dataset")
+                if metric_rate > 50:
+                    st.warning(
+                        f"{dataset}: {metric_rate:.1f}% of rows pass the selected p/q threshold. "
+                        "That is not automatically wrong, but it means effect-size thresholds and glycopeptide support filters must drive prioritization."
+                    )
+                if pd.notna(median_lfc) and abs(float(median_lfc)) >= 0.5:
+                    st.warning(
+                        f"{dataset}: median log2FC is {float(median_lfc):+.2f}. "
+                        "This suggests a global shift or strong biology. Confirm group direction, normalization, and batch structure before making mechanistic claims."
+                    )
+
+    with c2:
+        with st.container(border=True):
+            st.markdown("#### Intensity scale check")
+            st.dataframe(scale_qc, use_container_width=True, hide_index=True)
+            add_dataframe_download_buttons(scale_qc, "gpi_intensity_scale_qc", key_suffix="scale_qc")
+
+            scales = dict(zip(scale_qc["Dataset"], scale_qc["Inferred scale"]))
+            if scales.get("Glycoproteome") != scales.get("Total protein"):
+                st.warning(
+                    "The glycoproteome and total-protein intensity columns appear to be on different scales. "
+                    "The updated app converts both to log2 scale before relative ratio plots. "
+                    "Use fold-change subtraction (`glyco log2FC - protein log2FC`) as the primary protein-normalized result."
+                )
+            elif scales.get("Glycoproteome") == "ambiguous" or scales.get("Total protein") == "ambiguous":
+                st.warning(
+                    "At least one intensity scale is ambiguous. Treat channel-level ratio plots as exploratory, not as occupancy evidence."
+                )
+
+    with st.container(border=True):
+        st.markdown("#### log2FC distribution check")
+        plot_df = pd.concat([
+            pd.DataFrame({"Dataset": "Glycoproteome", "log2FC": safe_numeric(glyco_df[g_lfc_col])}),
+            pd.DataFrame({"Dataset": "Total protein", "log2FC": safe_numeric(prot_df[p_lfc_col])}),
+        ], ignore_index=True).dropna()
+        if plot_df.empty:
+            st.info("No log2FC values available to plot.")
+        else:
+            fig = px.histogram(
+                plot_df,
+                x="log2FC",
+                color="Dataset",
+                nbins=80,
+                barmode="overlay",
+                opacity=0.65,
+                marginal="box",
+                labels={"log2FC": "log2 fold-change"},
+                height=470,
+            )
+            fig.add_vline(x=0, line_dash="dash", line_color="black")
+            fig.add_vline(x=glyco_lfc_thr, line_dash="dot", line_color="gray")
+            fig.add_vline(x=-glyco_lfc_thr, line_dash="dot", line_color="gray")
+            fig.update_layout(plot_bgcolor="white", paper_bgcolor="white")
+            st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+            add_plotly_download_buttons(fig, "gpi_input_log2fc_distribution")
+
 
 @st.cache_data(show_spinner=False)
 def build_summary_tables(
@@ -2035,6 +2495,7 @@ def build_summary_tables(
     merged_gene["Delta_log2FC"] = safe_numeric(merged_gene["log2FC_glyco"]) - safe_numeric(merged_gene["log2FC_prot"])
     merged_gene["Abs_Delta_log2FC"] = merged_gene["Delta_log2FC"].abs()
     merged_gene = add_biological_interpretation_columns(merged_gene, delta_thr=0.5)
+    merged_gene = add_evidence_ranking_columns(merged_gene)
 
     return glyco_df, prot_df, merged_gene
 
@@ -2154,12 +2615,12 @@ def generate_standard_figures(
         ranking = ratio_mat.mean(axis=1).sort_values(ascending=False).head(top_n_ratio).index
         ratio_top = ratio_mat.loc[ranking]
         fig5, ax5 = plt.subplots(figsize=(8.2, max(4.5, 0.28 * len(ratio_top))))
-        sns.heatmap(ratio_top.fillna(0), cmap="vlag", center=0, ax=ax5, cbar_kws={"label": "log2(Glyco / Protein)", "shrink": 0.65})
+        sns.heatmap(ratio_top.fillna(0), cmap="vlag", center=0, ax=ax5, cbar_kws={"label": "log2 glyco signal - log2 protein signal", "shrink": 0.65})
         ax5.set_title("Relative Glyco-to-Protein Ratio Map", pad=12)
         ax5.set_ylabel("")
         plt.tight_layout()
         figs["05_log2_ratio_heatmap"] = fig5
-        caps["05_log2_ratio_heatmap"] = "Relative glyco-to-protein ratio shown as log2(Glyco/Protein), not absolute occupancy."
+        caps["05_log2_ratio_heatmap"] = "Relative glyco-protein signal shown as log2 glyco - log2 protein, not absolute occupancy."
 
     return FigurePack(figures=figs, captions=caps)
 
@@ -2222,7 +2683,7 @@ def generate_report_bundle(
             "GPI Export Bundle",
             f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             "This bundle regenerates standard figures from the current thresholds.",
-            "The ratio heatmap represents relative log2(Glyco/Protein), not absolute glycan occupancy.",
+            "The ratio heatmap represents relative log2 glyco - log2 protein, not absolute glycan occupancy.",
             "Ratio plots filter likely non-glycopeptide rows when glycan/site annotations exist and can optionally median-center sample intensities before ratio calculation.",
         ]
         zf.writestr("README.txt", "\n".join(manifest))
@@ -2290,6 +2751,334 @@ def render_glycopeptide_volcano(
     show_cols = [c for c in [g_gene_col, g_peptide_col, "Glycosite", g_lfc_col, metric_col, "VolcanoStatus"] if c and c in vdf.columns]
     st.dataframe(vdf.sort_values(metric_col).head(100)[show_cols], use_container_width=True, hide_index=True)
     add_dataframe_download_buttons(vdf[show_cols], "glycopeptide_volcano_table", key_suffix="glycopeptide_volcano")
+
+
+
+# -----------------------------------------------------------------------------
+# Additional biologically focused visualization modules
+# -----------------------------------------------------------------------------
+def _compact_label(value: object, max_len: int = 46) -> str:
+    text = "" if pd.isna(value) else str(value)
+    return text if len(text) <= max_len else text[: max_len - 3] + "..."
+
+
+def render_evidence_score_landscape(merged_gene: pd.DataFrame):
+    """Prioritization map: protein-normalized delta versus evidence score."""
+    st.markdown("#### Evidence score landscape")
+    if merged_gene.empty or "Evidence_Score" not in merged_gene.columns:
+        st.info("No integrated evidence score is available.")
+        return
+
+    plot_df = merged_gene.copy()
+    plot_df["Abs_Delta_log2FC"] = safe_numeric(plot_df.get("Abs_Delta_log2FC", np.nan))
+    plot_df["Evidence_Score"] = safe_numeric(plot_df.get("Evidence_Score", np.nan))
+    plot_df = plot_df.dropna(subset=["Abs_Delta_log2FC", "Evidence_Score"])
+    if plot_df.empty:
+        st.info("No proteins have both delta and evidence-score values.")
+        return
+
+    min_score = st.slider(
+        "Minimum evidence score to display",
+        min_value=0.0,
+        max_value=float(np.nanpercentile(plot_df["Evidence_Score"], 99)) if plot_df["Evidence_Score"].notna().any() else 1.0,
+        value=0.0,
+        step=0.5,
+        key="evidence_score_min_display",
+    )
+    plot_df = plot_df[plot_df["Evidence_Score"] >= min_score].copy()
+    if plot_df.empty:
+        st.info("No proteins remain after the evidence-score filter.")
+        return
+
+    hover_cols = [c for c in [
+        "Gene", "DisplayGeneName", "Biological_Interpretation", "Evidence_Tier",
+        "log2FC_glyco", "log2FC_prot", "Delta_log2FC", "glyco_significant_peptides",
+        "glyco_significant_sites", "glyco_consistency", "metric_glyco_best", "metric_prot_best",
+    ] if c in plot_df.columns]
+
+    fig = px.scatter(
+        plot_df,
+        x="Abs_Delta_log2FC",
+        y="Evidence_Score",
+        color="Evidence_Tier" if "Evidence_Tier" in plot_df.columns else None,
+        size="glyco_significant_peptides" if "glyco_significant_peptides" in plot_df.columns else None,
+        hover_data=hover_cols,
+        labels={
+            "Abs_Delta_log2FC": "Absolute glyco minus protein log2FC",
+            "Evidence_Score": "Evidence score",
+        },
+        height=600,
+        title="Candidate prioritization: protein-normalized effect size vs evidence support",
+    )
+    fig.update_layout(plot_bgcolor="white", paper_bgcolor="white")
+    fig.add_vline(x=1.0, line_dash="dash", line_color="gray")
+    st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+    add_plotly_download_buttons(fig, "gpi_evidence_score_landscape")
+
+    top_tbl = plot_df.sort_values("Evidence_Score", ascending=False).head(50)
+    show_cols = [c for c in [
+        "Gene", "DisplayGeneName", "Evidence_Tier", "Biological_Interpretation", "Evidence_Score",
+        "log2FC_glyco", "log2FC_prot", "Delta_log2FC", "glyco_significant_peptides",
+        "glyco_significant_sites", "glyco_consistency", "metric_glyco_best", "metric_prot_best",
+    ] if c in top_tbl.columns]
+    st.dataframe(top_tbl[show_cols], use_container_width=True, hide_index=True)
+    add_dataframe_download_buttons(top_tbl[show_cols], "gpi_top_evidence_score_candidates", key_suffix="evidence_score_landscape")
+
+
+def render_protein_normalized_glycopeptide_volcano(
+    glyco_df: pd.DataFrame,
+    merged_gene: pd.DataFrame,
+    g_gene_col: str,
+    g_peptide_col: Optional[str],
+    g_lfc_col: str,
+    g_metric_col: str,
+    glyco_alpha: float,
+    glyco_lfc_thr: float,
+):
+    """Volcano-like view using row-level glyco minus total-protein log2FC."""
+    st.markdown("#### Protein-normalized glycopeptide volcano")
+    if glyco_df.empty:
+        st.info("No glycoproteome rows are available.")
+        return
+
+    delta_thr = st.number_input(
+        "Protein-normalized delta cutoff",
+        min_value=0.0,
+        value=0.5,
+        step=0.1,
+        format="%.2f",
+        key="pn_volcano_delta_thr",
+        help="Used only for this plot. A larger value is more conservative for glyco-specific interpretation.",
+    )
+
+    feature_df = build_glycoproteome_first_feature_table(
+        glyco_df, g_gene_col, g_peptide_col, g_lfc_col, g_metric_col, glyco_alpha, glyco_lfc_thr
+    )
+    feature_df = add_protein_context_to_glycoform_table(feature_df, merged_gene, g_lfc_col, delta_thr=delta_thr)
+    feature_df[g_metric_col] = safe_numeric(feature_df[g_metric_col])
+    feature_df["Glyco_minus_Protein_log2FC"] = safe_numeric(feature_df.get("Glyco_minus_Protein_log2FC", np.nan))
+    feature_df["neg_log10_metric"] = -np.log10(feature_df[g_metric_col].clip(lower=1e-300))
+
+    plot_df = feature_df.dropna(subset=["Glyco_minus_Protein_log2FC", "neg_log10_metric"]).copy()
+    if plot_df.empty:
+        st.info("No matched total-protein context is available for protein-normalized volcano plotting.")
+        return
+
+    plot_df["Protein_Normalized_Class"] = "Other / weak protein-normalized signal"
+    plot_df.loc[
+        plot_df.get("Glyco_Significant", False).astype(bool) & (plot_df["Glyco_minus_Protein_log2FC"] >= delta_thr),
+        "Protein_Normalized_Class",
+    ] = "Protein-normalized glyco up"
+    plot_df.loc[
+        plot_df.get("Glyco_Significant", False).astype(bool) & (plot_df["Glyco_minus_Protein_log2FC"] <= -delta_thr),
+        "Protein_Normalized_Class",
+    ] = "Protein-normalized glyco down"
+    plot_df.loc[
+        plot_df.get("Glyco_Significant", False).astype(bool) & (plot_df["Glyco_minus_Protein_log2FC"].abs() < delta_thr),
+        "Protein_Normalized_Class",
+    ] = "Likely protein-abundance explained"
+
+    glycan_col = detect_glycan_col(plot_df)
+    hover_cols = [c for c in [
+        "GeneKey", g_gene_col, g_peptide_col, "Glycosite", glycan_col,
+        g_lfc_col, "Total_Protein_log2FC", "Glyco_minus_Protein_log2FC",
+        g_metric_col, "Protein_Context_Interpretation",
+    ] if c and c in plot_df.columns]
+
+    fig = px.scatter(
+        plot_df,
+        x="Glyco_minus_Protein_log2FC",
+        y="neg_log10_metric",
+        color="Protein_Normalized_Class",
+        hover_data=hover_cols,
+        labels={
+            "Glyco_minus_Protein_log2FC": "Glycopeptide log2FC minus total-protein log2FC",
+            "neg_log10_metric": f"-log10({g_metric_col})",
+        },
+        height=620,
+        title="Protein-normalized glycopeptide evidence",
+    )
+    fig.add_vline(x=0, line_dash="solid", line_color="black")
+    fig.add_vline(x=delta_thr, line_dash="dash", line_color="gray")
+    fig.add_vline(x=-delta_thr, line_dash="dash", line_color="gray")
+    if glyco_alpha > 0:
+        fig.add_hline(y=-np.log10(glyco_alpha), line_dash="dot", line_color="gray")
+    fig.update_layout(plot_bgcolor="white", paper_bgcolor="white")
+    st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+    add_plotly_download_buttons(fig, "protein_normalized_glycopeptide_volcano")
+
+    st.caption(
+        "This view is often more useful than a standard volcano because each glycopeptide is adjusted by matched total-protein log2FC. "
+        "It does not prove occupancy; it ranks glycoform changes that are larger than the protein abundance change."
+    )
+    show_cols = [c for c in [
+        "GeneKey", g_gene_col, g_peptide_col, "Glycosite", glycan_col,
+        g_lfc_col, "Total_Protein_log2FC", "Glyco_minus_Protein_log2FC",
+        g_metric_col, "Protein_Normalized_Class", "Protein_Context_Interpretation",
+    ] if c and c in plot_df.columns]
+    st.dataframe(plot_df.sort_values("neg_log10_metric", ascending=False)[show_cols].head(500), use_container_width=True, hide_index=True)
+    add_dataframe_download_buttons(plot_df[show_cols], "protein_normalized_glycopeptide_table", key_suffix="protein_normalized_volcano")
+
+
+def render_global_glycan_composition_summary(
+    glyco_df: pd.DataFrame,
+    merged_gene: pd.DataFrame,
+    g_gene_col: str,
+    g_peptide_col: Optional[str],
+    g_lfc_col: str,
+    g_metric_col: str,
+    glyco_alpha: float,
+    glyco_lfc_thr: float,
+):
+    """Summarize which glycan compositions dominate significant glycopeptide calls."""
+    st.markdown("#### Glycan composition summary")
+    glycan_col = detect_glycan_col(glyco_df)
+    if glycan_col is None:
+        st.info("No glycan composition/annotation column was detected.")
+        return
+
+    feature_df = build_glycoproteome_first_feature_table(
+        glyco_df, g_gene_col, g_peptide_col, g_lfc_col, g_metric_col, glyco_alpha, glyco_lfc_thr
+    )
+    feature_df = add_protein_context_to_glycoform_table(feature_df, merged_gene, g_lfc_col)
+    feature_df[g_lfc_col] = safe_numeric(feature_df[g_lfc_col])
+    feature_df[g_metric_col] = safe_numeric(feature_df[g_metric_col])
+    sig_only = st.checkbox("Show significant glycopeptides only", value=True, key="glycan_summary_sig_only")
+    use_df = feature_df[feature_df["Glyco_Significant"]].copy() if sig_only else feature_df.copy()
+    use_df = use_df.dropna(subset=[glycan_col])
+    use_df = use_df[use_df[glycan_col].astype(str).str.strip().str.lower().ne("nan")]
+    if use_df.empty:
+        st.info("No glycan-annotated rows are available under the current filter.")
+        return
+
+    top_n = st.slider("Top N glycan compositions", 5, 40, 20, 5, key="glycan_summary_top_n")
+    use_df["Glycan_Label"] = use_df[glycan_col].apply(lambda x: _compact_label(x, 70))
+    use_df["Direction"] = np.where(use_df[g_lfc_col] >= 0, "Up", "Down")
+
+    counts = (
+        use_df.groupby(["Glycan_Label", "Direction"], dropna=False)
+        .size()
+        .reset_index(name="Glycopeptide_Count")
+    )
+    top_glycans = counts.groupby("Glycan_Label")["Glycopeptide_Count"].sum().sort_values(ascending=False).head(top_n).index
+    counts = counts[counts["Glycan_Label"].isin(top_glycans)].copy()
+
+    fig = px.bar(
+        counts,
+        x="Glycopeptide_Count",
+        y="Glycan_Label",
+        color="Direction",
+        orientation="h",
+        barmode="stack",
+        labels={"Glycopeptide_Count": "Glycopeptide count", "Glycan_Label": "Glycan composition"},
+        height=max(480, 26 * len(top_glycans)),
+        title="Dominant glycan compositions among glycopeptide calls",
+    )
+    fig.update_layout(yaxis={"categoryorder": "total ascending"}, plot_bgcolor="white", paper_bgcolor="white")
+    st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+    add_plotly_download_buttons(fig, "glycan_composition_summary")
+
+    summary = (
+        use_df.groupby("Glycan_Label")
+        .agg(
+            glycopeptide_count=(g_lfc_col, "size"),
+            unique_genes=("GeneKey", pd.Series.nunique),
+            median_glyco_log2FC=(g_lfc_col, "median"),
+            median_protein_normalized_delta=("Glyco_minus_Protein_log2FC", "median"),
+            best_metric=(g_metric_col, "min"),
+        )
+        .reset_index()
+        .sort_values(["glycopeptide_count", "best_metric"], ascending=[False, True])
+    )
+    st.dataframe(summary.head(100), use_container_width=True, hide_index=True)
+    add_dataframe_download_buttons(summary, "glycan_composition_summary_table", key_suffix="glycan_composition_summary")
+
+
+def render_targeted_site_glycan_matrix(
+    glyco_sub: pd.DataFrame,
+    gene_row: pd.DataFrame,
+    chosen_gene: str,
+    g_lfc_col: str,
+    g_metric_col: str,
+    glyco_alpha: float,
+    glyco_lfc_thr: float,
+):
+    """Within-protein matrix: glycosite by glycan composition."""
+    st.markdown("#### Site-by-glycan matrix")
+    if glyco_sub.empty:
+        st.info("No glycoproteome rows are available for this protein/gene.")
+        return
+
+    glycan_col = detect_glycan_col(glyco_sub)
+    if glycan_col is None:
+        st.info("No glycan composition/annotation column was detected for this protein/gene.")
+        return
+
+    df = glyco_sub.copy()
+    df[g_lfc_col] = safe_numeric(df[g_lfc_col])
+    df[g_metric_col] = safe_numeric(df[g_metric_col])
+    if "Glycosite" not in df.columns:
+        df["Glycosite"] = "UnknownSite"
+
+    protein_lfc = np.nan
+    if gene_row is not None and not gene_row.empty and "log2FC_prot" in gene_row.columns:
+        protein_lfc = pd.to_numeric(gene_row["log2FC_prot"], errors="coerce").iloc[0]
+    df["Total_Protein_log2FC"] = protein_lfc
+    df["Glyco_minus_Protein_log2FC"] = df[g_lfc_col] - protein_lfc if pd.notna(protein_lfc) else np.nan
+    df["Significant"] = (df[g_lfc_col].abs() >= glyco_lfc_thr) & (df[g_metric_col] <= glyco_alpha)
+    df["Glycan_Label"] = df[glycan_col].apply(lambda x: _compact_label(x, 42))
+    df["Site_Label"] = df["Glycosite"].apply(lambda x: _compact_label(x, 36))
+
+    value_choice = st.radio(
+        "Matrix value",
+        ["Glycopeptide log2FC", "Glyco minus protein log2FC"],
+        horizontal=True,
+        key=f"site_glycan_matrix_value_{chosen_gene}",
+    )
+    value_col = "Glyco_minus_Protein_log2FC" if value_choice == "Glyco minus protein log2FC" else g_lfc_col
+    if df[value_col].dropna().empty:
+        st.info("The selected matrix value is not available for this protein/gene.")
+        return
+
+    max_cols = st.slider("Maximum glycan columns", 5, 40, 20, 5, key=f"site_glycan_max_cols_{chosen_gene}")
+    keep_glycans = df["Glycan_Label"].value_counts().head(max_cols).index
+    df = df[df["Glycan_Label"].isin(keep_glycans)].copy()
+
+    mat = df.pivot_table(index="Site_Label", columns="Glycan_Label", values=value_col, aggfunc="median")
+    sig_mat = df.pivot_table(index="Site_Label", columns="Glycan_Label", values="Significant", aggfunc="max").reindex(index=mat.index, columns=mat.columns)
+    if mat.empty:
+        st.info("No site-by-glycan matrix could be built for this protein/gene.")
+        return
+
+    fig, ax = plt.subplots(figsize=(max(8.0, 0.48 * mat.shape[1]), max(4.5, 0.45 * mat.shape[0])))
+    sns.heatmap(
+        mat,
+        cmap="vlag",
+        center=0,
+        ax=ax,
+        linewidths=0.25,
+        linecolor="white",
+        cbar_kws={"label": value_col.replace("_", " "), "shrink": 0.75},
+    )
+    for yi, site in enumerate(mat.index):
+        for xi, glycan in enumerate(mat.columns):
+            try:
+                if bool(sig_mat.loc[site, glycan]):
+                    ax.text(xi + 0.5, yi + 0.5, "*", ha="center", va="center", color="black", fontsize=12, fontweight="bold")
+            except Exception:
+                pass
+    ax.set_title(f"{chosen_gene}: glycosite by glycan composition", pad=12)
+    ax.set_xlabel("Glycan composition")
+    ax.set_ylabel("Glycosite")
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
+    plt.tight_layout()
+    st.pyplot(fig)
+    add_plot_download_buttons(fig, f"{chosen_gene}_site_glycan_matrix")
+    st.caption("Asterisks mark glycopeptide rows passing the selected glyco significance and fold-change thresholds. Empty cells mean no observed row for that site/glycan combination.")
+
+    export_cols = [c for c in ["Site_Label", "Glycan_Label", g_lfc_col, "Total_Protein_log2FC", "Glyco_minus_Protein_log2FC", g_metric_col, "Significant"] if c in df.columns]
+    st.dataframe(df[export_cols].sort_values(["Site_Label", "Glycan_Label"]), use_container_width=True, hide_index=True)
+    add_dataframe_download_buttons(df[export_cols], f"{chosen_gene}_site_glycan_matrix_table", key_suffix=f"site_glycan_{chosen_gene}")
 
 def render_professional_gpi_start_panel(upload_disabled: bool = True):
     """Professional first-run landing panel for the Glyco-Proteome Integrator."""
@@ -2495,13 +3284,19 @@ def render_professional_gpi_start_panel(upload_disabled: bool = True):
 # -----------------------------------------------------------------------------
 
 # =============================================================================
-# Hosted-safe download override
+# Hosted-safe download behavior aligned with GlycoExplorer
 # =============================================================================
 # IMPORTANT:
 # On Posit/RStudio Connect, Python runs on the Connect server/container.
 # Directly writing to Path.home()/Downloads will save on the server, not on the
 # user's laptop. These wrappers keep direct Save-to-Downloads behavior for local
 # standalone Windows/Mac, but switch to browser download buttons when hosted.
+
+# The following helpers intentionally use the same environment switches as the
+# GlycoExplorer utility module:
+#   GLYCOEXPLORER_HOSTED=1      -> browser downloads only
+#   GLYCOEXPLORER_SAVE_MODE     -> browser | local | hybrid
+#   GLYCOEXPLORER_DOWNLOAD_DIR  -> optional local standalone save path
 
 def _env_to_bool_for_downloads(value):
     if value is None:
@@ -2535,6 +3330,33 @@ def _is_hosted_mode() -> bool:
         "RSTUDIO_CONNECT",
     ]
     return any(os.environ.get(v) for v in hosted_env_vars)
+
+
+def _get_save_mode() -> str:
+    """
+    Match GlycoExplorer download behavior.
+
+    Returns:
+        browser -> browser download buttons only
+        local   -> direct Save-to-Downloads buttons only
+        hybrid  -> browser download plus local Save-to-Downloads fallback
+
+    Defaults:
+        Hosted/RConnect: browser
+        Local standalone: hybrid
+
+    Optional override:
+        GLYCOEXPLORER_SAVE_MODE=browser|local|hybrid
+    """
+    import os
+
+    mode = os.environ.get("GLYCOEXPLORER_SAVE_MODE", "").strip().lower()
+    # Keep the GPI UI simple by default: one browser download button per file.
+    # Local/hybrid save modes can still be forced through the environment, but
+    # regular use should not expose duplicate local-save sections.
+    if mode in {"browser", "local", "hybrid"}:
+        return mode
+    return "browser"
 
 
 def _get_downloads_dir():
@@ -2633,7 +3455,7 @@ def _hosted_download_button(data, filename, label=None, key_prefix="hosted_downl
 def _save_bytes_to_downloads(data, filename):
     """
     Local standalone: save directly to Downloads.
-    Hosted/RConnect: render a browser download button instead of writing to the server.
+    Hosted/RConnect: use browser download instead of writing to the server.
     """
     from pathlib import Path
 
@@ -2696,20 +3518,25 @@ def add_hosted_safe_file_download_button(label, data, file_name, key, use_contai
 
 def main():
     with st.sidebar:
-        st.markdown("### GPI Workflow")
-        st.caption("v1.0 | Bioinformatics Workflow")
+        st.markdown("### Glyco-Proteome Integrator (GPI)")
+        st.caption("v1.5 | Bioinformatics Workflow")
         st.divider()
 
-        st.markdown("**Upload data for glycoprotein-first integration**")
+        st.markdown("### Upload Data")
+        st.caption("Upload the differential result tables used for integration.")
+        if "_is_hosted_mode" in globals() and _is_hosted_mode():
+            st.caption("RConnect mode: exports use browser Download buttons so files save to the user's computer, not the server.")
+        st.session_state["show_plot_export_buttons"] = False
         glyco_file = st.file_uploader("1) Glycoproteome / glycopeptide results", type=["csv", "tsv", "txt", "xlsx"], key="glyco_up")
         prot_file = st.file_uploader("2) Total protein results for integration", type=["csv", "tsv", "txt", "xlsx"], key="prot_up")
+        st.caption("Required: gene/protein identifier, log2FC, and p-value or q-value columns in both files.")
 
         current_sig = None
         if glyco_file and prot_file:
             current_sig = (glyco_file.name, glyco_file.size, prot_file.name, prot_file.size)
 
         st.divider()
-        st.markdown("**3. Statistical thresholds**")
+        st.markdown("### Statistical Thresholds")
         metric_choice = st.radio("Significance metric", ["FDR (q-value)", "Nominal p-value"], index=0)
         use_q = metric_choice.startswith("FDR")
 
@@ -2732,15 +3559,15 @@ def main():
             help="A protein/gene passes the total-protein side only when its selected p/q value is at or below this cutoff."
         )
         glyco_lfc_thr = st.slider("Glyco |log2FC| threshold", 0.0, 5.0, 1.0, 0.1)
-        prot_lfc_thr = st.slider("Proteome |log2FC| threshold", 0.0, 5.0, 1.0, 0.1)
+        prot_lfc_thr = st.slider("Proteome |log2FC| threshold", 0.0, 5.0, 0.5, 0.1)
 
         st.divider()
-        st.markdown("**4. Glyco support filters**")
+        st.markdown("### Glyco Support Filters")
         min_sig_peptides = st.slider(
             "Minimum significant glycopeptides per gene",
             1,
             10,
-            1,
+            2,
             1,
             help="Increase this to require stronger glycopeptide-level support before a gene is called glyco-specific or concordant/discordant."
         )
@@ -2768,7 +3595,7 @@ def main():
         script_dir = Path(__file__).resolve().parent
         default_dir = script_dir / "assets" / "glycan_images"
         st.divider()
-        st.markdown("**5. Asset paths**")
+        st.markdown("### Asset Paths")
         user_input = st.text_input("Glycan Image Folder (Optional)", value=str(default_dir) if default_dir.exists() else "")
         glycan_image_dir = Path(user_input).expanduser().resolve() if user_input else default_dir
         if glycan_image_dir.is_dir():
@@ -2780,7 +3607,7 @@ def main():
                 st.warning("Image folder not found. Glycan structure images will not be rendered.")
 
         st.divider()
-        if st.button("Reset Session Data", help="Clear uploads, cache, plots, and compiled reports."):
+        if st.button("Reset session data", key="main_reset_btn", help="Clear uploads, cache, plots, and compiled reports."):
             st.cache_data.clear()
             st.session_state.clear()
             st.rerun()
@@ -2847,13 +3674,49 @@ def main():
                 "Gene": g_gene_col, "Glycosite/Site": g_site_col or "Not detected; falling back to peptide/unknown site",
                 "Peptide": g_peptide_col, "log2FC": g_lfc_col, "Metric": g_metric_col,
                 "Intensity columns detected": len(g_int_cols),
+                "Inferred intensity scale": infer_intensity_scale(glyco_df, g_int_cols),
             })
         with cdet2:
             st.markdown("**Total proteome**")
             st.write({
                 "Gene": p_gene_col, "Protein": p_protein_col, "log2FC": p_lfc_col,
                 "Metric": p_metric_col, "Intensity columns detected": len(p_int_cols),
+                "Inferred intensity scale": infer_intensity_scale(prot_df, p_int_cols),
             })
+
+    # GE-style processed matrix panel: compact metrics, export buttons, and a preview table.
+    with st.expander("Integrated Glyco-Protein Result Matrix", expanded=False):
+        m1, m2, m3, m4 = st.columns(4)
+        matched_gene_count = int(merged_gene["Gene"].nunique()) if "Gene" in merged_gene.columns else len(merged_gene)
+        high_priority_count = int(
+            merged_gene.get("Integration_Priority", pd.Series(dtype=str))
+            .astype(str)
+            .str.contains("High", case=False, na=False)
+            .sum()
+        ) if not merged_gene.empty else 0
+        m1.metric("Glyco rows", f"{len(glyco_df):,}")
+        m2.metric("Protein rows", f"{len(prot_df):,}")
+        m3.metric("Integrated genes", f"{matched_gene_count:,}")
+        m4.metric("High-priority calls", f"{high_priority_count:,}")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        add_dataframe_download_buttons(
+            merged_gene,
+            "gpi_integrated_gene_result_matrix",
+            key_suffix="processed_integration_matrix",
+        )
+
+        preview_n = min(500, len(merged_gene))
+        if preview_n > 0:
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.dataframe(
+                merged_gene.head(preview_n),
+                use_container_width=True,
+                hide_index=True,
+                height=430,
+            )
+            if len(merged_gene) > preview_n:
+                st.caption(f"Showing first {preview_n:,} rows. Download the full matrix using the buttons above.")
 
     if current_sig is not None and current_sig != ss.get("upload_sig"):
         ss["upload_sig"] = current_sig
@@ -2863,7 +3726,7 @@ def main():
         ss["gpi_zip_bytes"] = None
 
     c1, c2, c3, c4 = st.columns(4)
-    if c1.button(("▸ " if not ss["show_overview"] else "▾ ") + "Glycoprotein-First Overview", use_container_width=True):
+    if c1.button(("▸ " if not ss["show_overview"] else "▾ ") + "Data Integrity Check & Glyco Discovery", use_container_width=True):
         state = not ss["show_overview"]
         _reset_module_flags()
         ss["show_overview"] = state
@@ -2875,7 +3738,7 @@ def main():
         state = not ss["show_advanced"]
         _reset_module_flags()
         ss["show_advanced"] = state
-    if c4.button(("▸ " if not ss["show_export"] else "▾ ") + "Export", use_container_width=True):
+    if c4.button(("▸ " if not ss["show_export"] else "▾ ") + "Generate Report & Export", use_container_width=True):
         state = not ss["show_export"]
         _reset_module_flags()
         ss["show_export"] = state
@@ -2888,9 +3751,11 @@ def main():
             """
             **Recommended interpretation order**
 
-            1. Start with **Glycoprotein-First Overview** to identify altered glycopeptides/glycosites first, then review protein-context integration.
-            2. Use **Targeted Protein/Glycosite Evidence** for individual proteins/glycosites; this is the most biologically interpretable view.
-            3. Use **Advanced Integration Views** only after thresholds are final. These plots are summary views, not primary evidence.
+            1. Start with **Glycoprotein-First Overview** to identify altered glycopeptides/glycosites first.
+            2. Check **Input Differential QC** before trusting integrated calls; scale mismatch and global shifts can create misleading ratios.
+            3. Review **Protein Matching QC** to confirm glycoprotein IDs map well to total-protein IDs.
+            4. Use **Targeted Protein/Glycosite Evidence** for individual proteins/glycosites; this is the most biologically interpretable view.
+            5. Use **Advanced Integration Views** only after thresholds are final. These plots are summary views, not primary evidence.
 
             **What the classes mean**
             - **Protein-abundance driven / concordant**: glycopeptide signal and total protein signal move in the same direction.
@@ -2898,7 +3763,7 @@ def main():
             - **Glycosylation-specific**: glycopeptides pass thresholds but total protein does not. This suggests a glyco-level change that should be checked at peptide/site level.
             - **Protein-specific**: total protein passes thresholds but glycopeptides do not.
 
-            **Important caution**: the channel-level log2(Glyco/Protein) ratio is a **relative signal ratio, not glycan occupancy**. It can shift because of peptide detectability, ionization, missingness, or protein-loading effects. The app filters likely non-glycopeptide rows before ratio plots when glycan/site annotations are available, but the output should still be interpreted as relative evidence, not absolute occupancy.
+            **Important caution**: channel-level glyco/protein ratio plots are **scale-aware relative signal ratios, not glycan occupancy**. The updated app converts raw/linear and log2-like intensity columns onto log2 scale before subtracting protein signal from glyco signal. Even after that fix, ratios can shift because of peptide detectability, ionization, missingness, or protein-loading effects. Treat `glyco log2FC - protein log2FC` as the primary protein-normalized result.
             """
         )
 
@@ -2910,8 +3775,9 @@ def main():
             "Overview section",
             [
                 "1. Glycoproteome First",
-                "2. Protein Matching QC",
-                "3. Protein-Normalized Integration",
+                "2. Input Differential QC",
+                "3. Protein Matching QC",
+                "4. Protein-Normalized Integration",
                 "Global Glycopeptide Waterfall",
                 "Global Glycopeptide Volcano",
             ],
@@ -2926,10 +3792,19 @@ def main():
                 glyco_alpha, glyco_lfc_thr, glycan_image_dir, merged_gene
             )
 
-        if overview_subtab == "2. Protein Matching QC":
+        if overview_subtab == "2. Input Differential QC":
+            render_differential_input_qc(
+                glyco_df, prot_df,
+                g_gene_col, g_lfc_col, g_metric_col,
+                p_gene_col, p_lfc_col, p_metric_col,
+                g_int_cols, p_int_cols,
+                glyco_alpha, prot_alpha, glyco_lfc_thr, prot_lfc_thr,
+            )
+
+        if overview_subtab == "3. Protein Matching QC":
             render_protein_matching_qc(glyco_df, prot_df, merged_gene)
 
-        if overview_subtab == "3. Protein-Normalized Integration":
+        if overview_subtab == "4. Protein-Normalized Integration":
             render_protein_normalized_integration_overview(
                 merged_gene, glyco_df, prot_df, g_int_cols, p_int_cols,
                 glyco_lfc_thr, prot_lfc_thr, min_intensity_ratio, median_center_ratio
@@ -3016,7 +3891,7 @@ def main():
                 top_disc = merged_gene.sort_values("Abs_Delta_log2FC", ascending=False).head(25).copy()
                 show_cols = [
                     c for c in [
-                        "Gene", "DisplayGeneName", "Status", "log2FC_glyco", "log2FC_prot", "Delta_log2FC",
+                        "Gene", "DisplayGeneName", "Status", "Biological_Interpretation", "Evidence_Tier", "Evidence_Score", "log2FC_glyco", "log2FC_prot", "Delta_log2FC",
                         "glyco_peptide_count", "glyco_significant_peptides", "glyco_consistency",
                         "metric_glyco_best", "metric_prot_best", "glyco_has_multigene_assignment"
                     ] if c in top_disc.columns
@@ -3049,7 +3924,7 @@ def main():
 
                 explorer_cols = [
                     c for c in [
-                        "Gene", "DisplayGeneName", "Status", "log2FC_glyco", "log2FC_prot",
+                        "Gene", "DisplayGeneName", "Status", "Biological_Interpretation", "Evidence_Tier", "Evidence_Score", "log2FC_glyco", "log2FC_prot",
                         "Delta_log2FC", "Abs_Delta_log2FC", "metric_glyco_best", "metric_prot_best",
                         "glyco_peptide_count", "glyco_significant_peptides", "glyco_consistency",
                         "glyco_direction", "prot_direction", "glyco_has_multigene_assignment"
@@ -3314,20 +4189,20 @@ def main():
                     dcol1, dcol2, dcol3 = st.columns(3)
 
                     with dcol1:
-                        if st.button("Save Combined PNG", key="save_wfl_table_png", use_container_width=True):
-                            try:
-                                outpath = _save_bytes_to_downloads(combined_png, "glycopeptide_waterfall_table.png")
-                                st.success(f"Saved PNG to: {outpath}")
-                            except Exception as e:
-                                st.error(f"Could not save PNG: {e}")
+                        add_bytes_download_button(
+                            "Download Combined PNG",
+                            combined_png,
+                            "glycopeptide_waterfall_table.png",
+                            key_suffix="wfl_table_png",
+                        )
 
                     with dcol2:
-                        if st.button("Save Combined SVG", key="save_wfl_table_svg", use_container_width=True):
-                            try:
-                                outpath = _save_bytes_to_downloads(combined_svg, "glycopeptide_waterfall_table.svg")
-                                st.success(f"Saved SVG to: {outpath}")
-                            except Exception as e:
-                                st.error(f"Could not save SVG: {e}")
+                        add_bytes_download_button(
+                            "Download Combined SVG",
+                            combined_svg,
+                            "glycopeptide_waterfall_table.svg",
+                            key_suffix="wfl_table_svg",
+                        )
 
                     with dcol3:
                         add_dataframe_download_buttons(disp_df, "glycopeptide_waterfall_top_features", key_suffix="wfl_top_features")
@@ -3392,7 +4267,7 @@ def main():
 
         with filters_right:
             if gene_options:
-                tabs = st.tabs(["Glycopeptide Evidence", "Protein-Normalized Ratios", "Integrated Summary", "Raw Tables"])
+                tabs = st.tabs(["Glycopeptide Evidence", "Protein-Normalized Ratios", "Integrated Summary", "Site-Glycan Matrix", "Raw Tables"])
 
                 with tabs[0]:
                     with st.container(border=True):
@@ -3565,7 +4440,7 @@ def main():
 
                 with tabs[1]:
                     with st.container(border=True):
-                        st.markdown("#### Channel-wise relative glyco-to-protein ratio")
+                        st.markdown("#### Channel-wise scale-aware glyco-protein signal")
                         ratio_df = build_long_ratio_df(
                             glyco_sub, prot_sub, g_int_cols, p_int_cols,
                             min_intensity=min_intensity_ratio, median_center=median_center_ratio, glycopeptide_only=True
@@ -3576,9 +4451,9 @@ def main():
                             fig_ratio, ax_ratio = plt.subplots(figsize=(8.5, 4.5))
                             ax_ratio.plot(ratio_df["Sample"], ratio_df["log2Ratio"], marker="o", lw=2)
                             ax_ratio.axhline(0, color="black", ls="--", lw=1)
-                            ax_ratio.set_ylabel("log2(Glyco / Protein)")
+                            ax_ratio.set_ylabel("log2 glyco signal - log2 protein signal")
                             ax_ratio.set_xlabel("TMT channel")
-                            ax_ratio.set_title("Relative glyco-to-protein ratio by channel", pad=12)
+                            ax_ratio.set_title("Scale-aware relative glyco-protein signal by channel", pad=12)
                             plt.setp(ax_ratio.get_xticklabels(), rotation=45, ha="right")
                             plt.tight_layout()
                             st.pyplot(fig_ratio)
@@ -3601,7 +4476,7 @@ def main():
                         else:
                             summary_cols = [
                                 c for c in [
-                                    "Gene", "DisplayGeneName", "Status",
+                                    "Gene", "DisplayGeneName", "Status", "Biological_Interpretation", "Evidence_Tier", "Evidence_Score",
                                     "log2FC_glyco", "log2FC_prot", "Delta_log2FC",
                                     "metric_glyco_best", "metric_prot_best",
                                     "glyco_site_count", "glyco_significant_sites", "glyco_site_direction_mixed",
@@ -3616,6 +4491,12 @@ def main():
                             add_dataframe_download_buttons(summary_download_df.reset_index().rename(columns={"index": "Field"}), f"{chosen_gene}_protein_gene_summary", key_suffix=f"summary_{chosen_gene}")
 
                 with tabs[3]:
+                    with st.container(border=True):
+                        render_targeted_site_glycan_matrix(
+                            glyco_sub, gene_row, chosen_gene, g_lfc_col, g_metric_col, glyco_alpha, glyco_lfc_thr
+                        )
+
+                with tabs[4]:
                     with st.container(border=True):
                         st.markdown("#### Raw evidence tables")
                         st.markdown("**Glycoproteome rows**")
@@ -3633,7 +4514,15 @@ def main():
         with left:
             with st.container(border=True):
                 vis_choice = st.radio("Select plot", [
-                    "Directional UpSet", "Hierarchical Clustermap", "Relative Ratio Heatmap", "Ratio Consistency Dot Plot", "Protein/Gene Set Enrichment", "Discordant Rank Plot"
+                    "Evidence Score Landscape",
+                    "Protein-Normalized Glycopeptide Volcano",
+                    "Glycan Composition Summary",
+                    "Directional UpSet",
+                    "Hierarchical Clustermap",
+                    "Relative Ratio Heatmap",
+                    "Ratio Consistency Dot Plot",
+                    "Protein/Gene Set Enrichment",
+                    "Discordant Rank Plot"
                 ])
                 st.divider()
                 top_n_hm = st.slider("Top N proteins for clustering", 10, 200, min(40, max(10, merged_gene.shape[0])), 5)
@@ -3641,7 +4530,20 @@ def main():
 
         with right:
             with st.container(border=True):
-                if vis_choice == "Directional UpSet":
+                if vis_choice == "Evidence Score Landscape":
+                    render_evidence_score_landscape(merged_gene)
+
+                elif vis_choice == "Protein-Normalized Glycopeptide Volcano":
+                    render_protein_normalized_glycopeptide_volcano(
+                        glyco_df, merged_gene, g_gene_col, g_peptide_col, g_lfc_col, g_metric_col, glyco_alpha, glyco_lfc_thr
+                    )
+
+                elif vis_choice == "Glycan Composition Summary":
+                    render_global_glycan_composition_summary(
+                        glyco_df, merged_gene, g_gene_col, g_peptide_col, g_lfc_col, g_metric_col, glyco_alpha, glyco_lfc_thr
+                    )
+
+                elif vis_choice == "Directional UpSet":
                     if not HAVE_UPSET:
                         st.info("Install `upsetplot` to enable this panel.")
                     else:
@@ -3685,9 +4587,9 @@ def main():
                         keep = ratio_mat.mean(axis=1).sort_values(ascending=False).head(top_n_ratio).index
                         ratio_top = ratio_mat.loc[keep]
                         fig_occ, ax_occ = plt.subplots(figsize=(8.5, max(4.5, 0.28 * len(ratio_top))))
-                        sns.heatmap(ratio_top.fillna(0), cmap="vlag", center=0, ax=ax_occ, cbar_kws={"label": "log2(Glyco / Protein)", "shrink": 0.65})
+                        sns.heatmap(ratio_top.fillna(0), cmap="vlag", center=0, ax=ax_occ, cbar_kws={"label": "log2 glyco signal - log2 protein signal", "shrink": 0.65})
                         ax_occ.set_ylabel("")
-                        ax_occ.set_title("Relative glyco-to-protein ratio heatmap", pad=12)
+                        ax_occ.set_title("Scale-aware relative glyco-protein signal heatmap", pad=12)
                         plt.tight_layout()
                         st.pyplot(fig_occ)
                         add_plot_download_buttons(fig_occ, "relative_ratio_heatmap")
@@ -3719,7 +4621,7 @@ def main():
                             size="n_samples",
                             hover_data=["Gene", "n_up_samples", "n_down_samples", "sd_log2Ratio", "cv_abs_log2Ratio"],
                             labels={
-                                "mean_log2Ratio": "Mean log2(Glyco / Protein)",
+                                "mean_log2Ratio": "Mean log2 glyco signal - log2 protein signal",
                                 "sample_direction_consistency": "Per-sample direction consistency",
                             },
                             color_discrete_map=cmap,
@@ -3835,19 +4737,19 @@ def main():
                     st.success("Report generated successfully.")
                     b1, b2 = st.columns(2)
                     with b1:
-                        if st.button("Save PDF Report", key="save_gpi_pdf_report", use_container_width=True, type="primary"):
-                            try:
-                                outpath = _save_bytes_to_downloads(ss["gpi_pdf_bytes"], f"GPI_Report_{ts}.pdf")
-                                st.success(f"Saved PDF to: {outpath}")
-                            except Exception as e:
-                                st.error(f"Could not save PDF: {e}")
+                        add_bytes_download_button(
+                            "Download PDF Report",
+                            ss["gpi_pdf_bytes"],
+                            f"GPI_Report_{ts}.pdf",
+                            key_suffix="gpi_pdf_report",
+                        )
                     with b2:
-                        if st.button("Save ZIP Bundle", key="save_gpi_zip_bundle", use_container_width=True):
-                            try:
-                                outpath = _save_bytes_to_downloads(ss["gpi_zip_bytes"], f"GPI_Report_Bundle_{ts}.zip")
-                                st.success(f"Saved ZIP to: {outpath}")
-                            except Exception as e:
-                                st.error(f"Could not save ZIP: {e}")
+                        add_bytes_download_button(
+                            "Download ZIP Bundle",
+                            ss["gpi_zip_bytes"],
+                            f"GPI_Report_Bundle_{ts}.zip",
+                            key_suffix="gpi_zip_bundle",
+                        )
                     if st.button("Regenerate report", use_container_width=True):
                         ss["gpi_pdf_bytes"] = None
                         ss["gpi_zip_bytes"] = None
@@ -3856,6 +4758,38 @@ def main():
     if not any([ss["show_overview"], ss["show_targeted"], ss["show_advanced"], ss["show_export"]]):
         faq_section()
 
+
+
+# =============================================================================
+# Centralized browser-safe downloads
+# =============================================================================
+# RConnect cannot save directly to a user's laptop. These overrides keep all
+# downloads browser-based so the browser can ask where to save when configured.
+try:
+    from download_utility import (
+        add_download_button,
+        add_file_download_buttons,
+        add_hosted_safe_file_download_button,
+        add_bytes_download_button,
+        add_bytes_download_button_tp,
+        add_dataframe_download_buttons,
+        add_matplotlib_download_buttons,
+        add_plot_download_buttons,
+        add_plotly_download_buttons,
+        add_figure_download_buttons_tp,
+        add_figure_download_buttons_tp_lf,
+        add_plotly_html_download_button_tp,
+        add_plotly_html_download_button_tp_lf,
+        add_figure_download_buttons_common,
+        add_plotly_html_download_button_common,
+        save_profile_pdf_to_downloads_tp,
+        save_profile_pdf_to_downloads_tp_lf,
+        explain_download_location,
+        _save_bytes_to_downloads,
+        _save_file_to_downloads,
+    )
+except Exception:
+    pass
 
 if __name__ == "__main__":
     main()
