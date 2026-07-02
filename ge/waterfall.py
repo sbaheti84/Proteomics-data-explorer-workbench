@@ -317,13 +317,13 @@ def _ge_create_waterfall_export(
     combined.save(png_out, format="PNG", dpi=(300, 300))
     png_out.seek(0)
     png_bytes = png_out.getvalue()
-    svg_b64 = base64.b64encode(png_bytes).decode("utf-8")
-    svg_text = f"""
-    <svg xmlns="http://www.w3.org/2000/svg" width="{combined_w}" height="{target_h}">
-        <image href="data:image/png;base64,{svg_b64}" width="{combined_w}" height="{target_h}"/>
-    </svg>
-    """.encode("utf-8")
-    return png_bytes, svg_text
+
+    pdf_out = BytesIO()
+    combined.save(pdf_out, format="PDF", resolution=300.0)
+    pdf_out.seek(0)
+    pdf_bytes = pdf_out.getvalue()
+
+    return png_bytes, pdf_bytes
 
 
 def render_ge_structural_waterfall(
@@ -439,16 +439,38 @@ def render_ge_structural_waterfall(
 
             export_cols = ["Point_ID"] + [c for c in [gene_col, peptide_col, glycan_col, prosite_col, annotation_col, "log2FC", sig_col, "Status", "Rank"] if c and c in label_df.columns]
             csv_bytes = label_df[export_cols].to_csv(index=False).encode("utf-8")
-            png_bytes, svg_bytes = _ge_create_waterfall_export(
+            png_bytes, pdf_bytes = _ge_create_waterfall_export(
                 wfl, label_df, glycan_image_dir,
                 gene_col, peptide_col, glycan_col, prosite_col, annotation_col,
                 "log2FC", sig_col, metric_label, alpha_thr, log2fc_thr,
             )
+
             d1, d2, d3 = st.columns(3)
+
             with d1:
-                add_download_button(png_bytes, "glycoexplorer_waterfall_table.png", label="Download PNG", key="ge_wfl_png", mime="image/png")
+                add_download_button(
+                    png_bytes,
+                    "glycoexplorer_waterfall_table.png",
+                    label="Download PNG",
+                    key="ge_wfl_png",
+                    mime="image/png"
+                )
+
             with d2:
-                add_download_button(svg_bytes, "glycoexplorer_waterfall_table.svg", label="Download SVG", key="ge_wfl_svg", mime="image/svg+xml")
+                add_download_button(
+                    pdf_bytes,
+                    "glycoexplorer_waterfall_table_illustrator.pdf",
+                    label="Download PDF for Illustrator",
+                    key="ge_wfl_pdf",
+                    mime="application/pdf"
+                )
+
             with d3:
-                add_download_button(csv_bytes, "glycoexplorer_waterfall_top_features.csv", label="Download CSV", key="ge_wfl_csv", mime="text/csv")
+                add_download_button(
+                    csv_bytes,
+                    "glycoexplorer_waterfall_top_features.csv",
+                    label="Download CSV",
+                    key="ge_wfl_csv",
+                    mime="text/csv"
+                )
 

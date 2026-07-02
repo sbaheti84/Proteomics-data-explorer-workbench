@@ -7,6 +7,12 @@ import importlib
 import importlib.util
 import traceback
 
+# Desktop/PyInstaller build: browser download buttons are unreliable in the embedded
+# Streamlit desktop/webview runtime. Force local Save As mode for the packaged exe.
+if getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS"):
+    os.environ.setdefault("GLYCOEXPLORER_HOSTED", "false")
+    os.environ.setdefault("GLYCOEXPLORER_SAVE_MODE", "dialog")
+
 import streamlit as st
 
 

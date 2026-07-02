@@ -3,6 +3,11 @@ $ErrorActionPreference = "Stop"
 $APP_NAME = "ProteomicsWorkbench"
 $ROOT = (Get-Location).Path
 
+# Build-time defaults for the packaged executable. app.py also sets these at runtime
+# when PyInstaller/frozen mode is detected.
+$env:GLYCOEXPLORER_HOSTED = "false"
+$env:GLYCOEXPLORER_SAVE_MODE = "dialog"
+
 Write-Host "Repository root: $ROOT"
 Write-Host "Cleaning old builds..."
 Remove-Item -Recurse -Force build, dist -ErrorAction SilentlyContinue
@@ -26,6 +31,7 @@ if (!(Test-Path $placeholder)) {
 
 # Optional logo/example folders are bundled only if they exist, but this keeps assets stable.
 Write-Host "Checking expected paths..."
+if (!(Test-Path (Join-Path $ROOT "download_utility.py"))) { throw "download_utility.py is missing. Put the fixed file at repository root before building." }
 foreach ($d in $requiredDirs) {
     $p = Join-Path $ROOT $d
     if (!(Test-Path $p)) { throw "Required path missing after setup: $p" }
@@ -55,6 +61,12 @@ streamlit-desktop-app build app.py `
     --paths "$(Join-Path $ROOT 'tp')" `
     --paths "$(Join-Path $ROOT 'faq')" `
     --add-data "$ROOT\app_launcher_*.py;." `
+    --add-data "$ROOT\download_utility.py;." `
+    --hidden-import download_utility `
+    --hidden-import tkinter `
+    --hidden-import tkinter.filedialog `
+    --hidden-import tkinter.messagebox `
+    --hidden-import _tkinter `
     --hidden-import app_launcher_GE `
     --hidden-import app_launcher_GE_LF `
     --hidden-import app_launcher_TP `

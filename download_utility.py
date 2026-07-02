@@ -3,10 +3,9 @@
 Central browser-safe download helpers for all GlycoExplorer / Total Protein / GPI Streamlit apps.
 
 Key rule:
-    On RConnect/Posit Connect, Python cannot open a local Save As dialog or save
-    directly to the user's laptop. The correct behavior is st.download_button.
-    The browser decides the final folder. To ask for a folder each time, users
-    must enable the browser setting: "Ask where to save each file before downloading".
+    Hosted/RConnect mode must use st.download_button because Python runs on the server.
+    Local packaged .exe mode should not rely on browser downloads. Use a native Save As
+    dialog or save directly to Downloads from the local Python process.
 """
 from __future__ import annotations
 
@@ -54,14 +53,21 @@ def is_hosted_mode() -> bool:
 
 def get_save_mode() -> str:
     """
-    Return browser/local.
+    Return browser/local/dialog.
 
-    Default is browser for both hosted and local Streamlit. Browser download is
-    the only RConnect-safe option and is the only mode where users can choose a
-    target folder through their browser settings.
+    browser:
+        Use Streamlit/browser download. Required for Posit Connect/RConnect.
+    local:
+        Save automatically to Downloads or GLYCOEXPLORER_DOWNLOAD_DIR.
+    dialog:
+        Local executable mode. Open a native Save As dialog and let the user
+        choose the output path. This only works when the Streamlit process is
+        running on the user's own computer.
     """
     mode = os.environ.get("GLYCOEXPLORER_SAVE_MODE", "browser").strip().lower()
-    if mode in {"browser", "local"}:
+    if mode in {"browser", "local", "dialog", "saveas", "save_as"}:
+        if mode in {"saveas", "save_as"}:
+            return "dialog"
         return mode
     return "browser"
 
@@ -185,6 +191,80 @@ def save_bytes_local_only(data: Any, filename: str) -> Path:
     return outpath
 
 
+def _filetypes_for_dialog(filename: str):
+    """Return native file-dialog filters based on extension."""
+    ext = Path(filename).suffix.lower()
+    mapping = {
+        ".csv": [("CSV files", "*.csv")],
+        ".tsv": [("TSV files", "*.tsv")],
+        ".txt": [("Text files", "*.txt")],
+        ".xlsx": [("Excel files", "*.xlsx")],
+        ".xls": [("Excel files", "*.xls")],
+        ".pdf": [("PDF files", "*.pdf")],
+        ".zip": [("ZIP files", "*.zip")],
+        ".png": [("PNG images", "*.png")],
+        ".svg": [("SVG images", "*.svg")],
+        ".html": [("HTML files", "*.html")],
+        ".htm": [("HTML files", "*.htm")],
+    }
+    return mapping.get(ext, []) + [("All files", "*.*")]
+
+
+def ask_user_save_path(default_filename: str) -> Optional[Path]:
+    """Open a native Save As dialog for local executable mode."""
+    if is_hosted_mode():
+        raise RuntimeError("Save As dialog is disabled in hosted/RConnect mode.")
+
+    safe_name = safe_filename(default_filename)
+    ext = Path(safe_name).suffix
+
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except Exception as e:
+        raise RuntimeError(
+            "Could not open a native Save As dialog because tkinter is not available. "
+            "Install/ship tkinter with the executable, or use browser download mode."
+        ) from e
+
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        # Try to keep the dialog above the Streamlit/browser window.
+        try:
+            root.attributes("-topmost", True)
+            root.update()
+            root.lift()
+            root.focus_force()
+        except Exception:
+            pass
+
+        selected = filedialog.asksaveasfilename(
+            title="Save file as",
+            initialfile=safe_name,
+            defaultextension=ext if ext else None,
+            filetypes=_filetypes_for_dialog(safe_name),
+        )
+        if not selected:
+            return None
+        return Path(selected).expanduser()
+    finally:
+        try:
+            root.destroy()
+        except Exception:
+            pass
+
+
+def save_bytes_with_dialog(data: Any, filename: str) -> Optional[Path]:
+    """Ask the local user where to save a file, then write bytes there."""
+    outpath = ask_user_save_path(filename)
+    if outpath is None:
+        return None
+    outpath.parent.mkdir(parents=True, exist_ok=True)
+    outpath.write_bytes(coerce_to_bytes(data))
+    return outpath
+
+
 def add_download_button(
     data: Any,
     file_name: str,
@@ -195,15 +275,50 @@ def add_download_button(
     help: Optional[str] = None,
     type: str = "secondary",
 ):
-    """Browser/RConnect-safe download button for CSV/XLSX/PNG/SVG/PDF/HTML/ZIP/etc."""
+    """Download/save helper for CSV/XLSX/PNG/SVG/PDF/HTML/ZIP/etc.
+
+    Hosted/RConnect mode:
+        Uses st.download_button because a server cannot open a local file picker
+        on the user's machine.
+
+    Local executable mode with GLYCOEXPLORER_SAVE_MODE=dialog:
+        Uses a normal st.button plus tkinter.asksaveasfilename so the user can
+        choose the exact save location.
+    """
     safe_name = safe_filename(file_name)
     file_bytes = coerce_to_bytes(data)
+    save_mode = get_save_mode()
+    button_key = make_streamlit_key(key or "download", safe_name, caller_depth=3)
+
+    if save_mode in {"dialog", "local"} and not is_hosted_mode():
+        if st.button(
+            label=label or f"Save {safe_name}",
+            key=button_key,
+            use_container_width=use_container_width,
+            help=help,
+            type=type,
+        ):
+            try:
+                if save_mode == "dialog":
+                    outpath = save_bytes_with_dialog(file_bytes, safe_name)
+                    if outpath is None:
+                        st.info("Save cancelled.")
+                        return False
+                else:
+                    outpath = save_bytes_local_only(file_bytes, safe_name)
+                st.success(f"Saved to: {outpath}")
+                return True
+            except Exception as e:
+                st.error(f"Could not save file: {e}")
+                return False
+        return False
+
     return st.download_button(
         label=label or f"Download {safe_name}",
         data=file_bytes,
         file_name=safe_name,
         mime=mime or guess_mime(safe_name),
-        key=make_streamlit_key(key or "download", safe_name, caller_depth=3),
+        key=button_key,
         use_container_width=use_container_width,
         help=help,
         type=type,
@@ -215,17 +330,14 @@ def add_browser_download_button(label: str, data: Any, file_name: str, mime: str
 
 
 def add_direct_save_button(label: str, data: Any, file_name: str, key: str, use_container_width: bool = True):
-    """Compatibility wrapper. Uses browser download unless GLYCOEXPLORER_SAVE_MODE=local."""
-    if get_save_mode() == "local" and not is_hosted_mode():
-        if st.button(label, key=key, use_container_width=use_container_width):
-            try:
-                outpath = save_bytes_local_only(data, file_name)
-                st.success(f"Saved to: {outpath}")
-                return True
-            except Exception as e:
-                st.error(f"Could not save file: {e}")
-                return False
-    return add_download_button(data=data, file_name=file_name, label=label, key=key, use_container_width=use_container_width)
+    """Compatibility wrapper. Uses the configured save mode."""
+    return add_download_button(
+        data=data,
+        file_name=file_name,
+        label=label,
+        key=key,
+        use_container_width=use_container_width,
+    )
 
 
 def add_file_download_buttons(data: Any, file_name: str, mime: Optional[str] = None, label: str = "Download file", key_suffix: str = ""):
@@ -443,7 +555,10 @@ def explain_download_location():
 
 # Backward-compatible wrappers. These no longer write to server in hosted/browser mode.
 def _save_bytes_to_downloads(data: Any, filename: str):
-    if get_save_mode() == "local" and not is_hosted_mode():
+    save_mode = get_save_mode()
+    if save_mode == "dialog" and not is_hosted_mode():
+        return save_bytes_with_dialog(data, filename)
+    if save_mode == "local" and not is_hosted_mode():
         return save_bytes_local_only(data, filename)
     add_download_button(data=data, file_name=filename, label=f"Download {safe_filename(filename)}", key=make_streamlit_key("compat_download", safe_filename(filename), caller_depth=2))
     return f"Browser download prepared for {safe_filename(filename)}"
