@@ -134,6 +134,7 @@ def _reset_all_data(clear_cache: bool = False):
     ss["upload_sig"] = None 
     ss.pop("final_pdf_bytes", None)
     ss.pop("final_report_zip_bytes", None)
+    ss.pop("final_report_timestamp", None)
     if clear_cache:
         try:
             st.cache_data.clear()
@@ -968,6 +969,67 @@ def create_protein_profile_figure_tp_lf(
     return fig
 
 
+def build_profile_pdf_bytes_tp_lf(
+    figures: list,
+    gene_names: list,
+    n_cols: int = 5,
+    n_rows: int = 2,
+) -> bytes:
+    """Build the LFQ protein-profile PDF entirely in memory."""
+    from matplotlib.backends.backend_pdf import PdfPages
+    from PIL import Image
+    from io import BytesIO
+
+    valid_items = [
+        (fig, gene)
+        for fig, gene in zip(figures, gene_names)
+        if fig is not None
+    ]
+    if not valid_items:
+        raise ValueError("No protein profile figures were available for PDF export.")
+
+    pdf_buffer = BytesIO()
+    plots_per_page = max(1, int(n_cols) * int(n_rows))
+
+    with PdfPages(pdf_buffer) as pdf:
+        for page_start in range(0, len(valid_items), plots_per_page):
+            page_items = valid_items[page_start:page_start + plots_per_page]
+
+            page_fig, axes = plt.subplots(
+                n_rows,
+                n_cols,
+                figsize=(n_cols * 4.4, n_rows * 4.2),
+            )
+            axes = np.array(axes).reshape(-1)
+
+            for ax in axes:
+                ax.axis("off")
+
+            for ax, (gene_fig, _gene_name) in zip(axes, page_items):
+                gene_fig.canvas.draw()
+
+                image_buffer = BytesIO()
+                gene_fig.savefig(
+                    image_buffer,
+                    format="png",
+                    dpi=260,
+                    bbox_inches="tight",
+                    pad_inches=0.25,
+                )
+                image_buffer.seek(0)
+
+                with Image.open(image_buffer) as img:
+                    ax.imshow(img.copy())
+                ax.axis("off")
+
+            page_fig.tight_layout(pad=0.4)
+            pdf.savefig(page_fig, bbox_inches="tight")
+            plt.close(page_fig)
+
+    pdf_buffer.seek(0)
+    return pdf_buffer.getvalue()
+
+
 def save_profile_pdf_to_downloads_tp_lf(
     figures: list,
     gene_names: list,
@@ -975,87 +1037,14 @@ def save_profile_pdf_to_downloads_tp_lf(
     n_cols: int = 5,
     n_rows: int = 2,
 ):
-    """
-    Save LFQ protein profile figures into a multi-page PDF grid.
-
-    Layout:
-    - 5 proteins per row
-    - 2 rows per page
-    - 10 proteins per page total
-
-    Protein label is kept only from the original plot title.
-    """
-    from matplotlib.backends.backend_pdf import PdfPages
-    from PIL import Image
-    from io import BytesIO
-
-    outdir = _get_downloads_dir()
-    filename = _safe_download_filename(filename)
-    outpath = outdir / filename
-
-    base_outpath = outpath
-    counter = 1
-    while outpath.exists():
-        outpath = base_outpath.with_name(
-            f"{base_outpath.stem}_{counter}{base_outpath.suffix}"
-        )
-        counter += 1
-
-    valid_items = [
-        (fig, gene)
-        for fig, gene in zip(figures, gene_names)
-        if fig is not None
-    ]
-
-    if not valid_items:
-        return outpath
-
-    plots_per_page = n_cols * n_rows
-
-    with PdfPages(outpath) as pdf:
-        for page_start in range(0, len(valid_items), plots_per_page):
-            page_items = valid_items[page_start:page_start + plots_per_page]
-
-            page_fig, axes = plt.subplots(
-                n_rows,
-                n_cols,
-                figsize=(n_cols * 4.4, n_rows * 4.2)
-            )
-
-            axes = np.array(axes).reshape(-1)
-
-            for ax in axes:
-                ax.axis("off")
-
-            for ax, (gene_fig, gene_name) in zip(axes, page_items):
-                # Force matplotlib/statannotations to fully render before export
-                gene_fig.canvas.draw()
-
-                buf = BytesIO()
-                gene_fig.savefig(
-                    buf,
-                    format="png",
-                    dpi=260,
-                    bbox_inches="tight",
-                    pad_inches=0.25
-                )
-                buf.seek(0)
-
-                img = Image.open(buf)
-                ax.imshow(img)
-                ax.axis("off")
-
-                # Do NOT add protein label here.
-                # The original plot already has ax.set_title(gene_name).
-                # Adding another title here causes duplicate protein labels.
-
-                plt.close(gene_fig)
-
-            page_fig.tight_layout(pad=0.4)
-            pdf.savefig(page_fig, bbox_inches="tight")
-            plt.close(page_fig)
-
-    return outpath
+    """Backward-compatible local save wrapper around the in-memory PDF builder."""
+    pdf_bytes = build_profile_pdf_bytes_tp_lf(
+        figures=figures,
+        gene_names=gene_names,
+        n_cols=n_cols,
+        n_rows=n_rows,
+    )
+    return _save_bytes_to_downloads(pdf_bytes, filename)
 
 
 def create_profile_grid_figure_tp_lf(
@@ -1324,15 +1313,13 @@ def render_sidebar_controls_lf():
         example_path = script_dir / "assets" / "example" / "TPLF" / "Protein_abundance_LFQ.csv"
 
         if example_path.exists():
-            with open(example_path, "rb") as f:
-                st.download_button(
-                    "Protein_abundance_LFQ.csv",
-                    f,
-                    key="dl_ex_tp_lf",
-                    file_name="Protein_abundance_LFQ_example.csv",
-                    use_container_width=True,
-                    help="Download a sample LFQ dataset to test the workflow."
-                )
+            add_bytes_download_button_tp_lf(
+                label="Download Protein_abundance_LFQ.csv",
+                data=example_path.read_bytes(),
+                filename="Protein_abundance_LFQ_example.csv",
+                key="dl_ex_tp_lf",
+                help_text="Download a sample LFQ dataset to test the workflow.",
+            )
         else:
             st.info("Example dataset not found in assets directory.")
 
@@ -1494,25 +1481,27 @@ def render_lfq_matrix_panel(df: pd.DataFrame, numeric_cols: list):
 
         dl_col1, dl_col2, spacer = st.columns([1.5, 1.5, 7])
 
-        dl_col1.download_button(
-            "Download CSV",
-            data=df.to_csv(index=False).encode("utf-8"),
-            file_name="uploaded_lfq_proteomics_data.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
+        with dl_col1:
+            add_bytes_download_button_tp_lf(
+                label="Download CSV",
+                data=df.to_csv(index=False).encode("utf-8"),
+                filename="uploaded_lfq_proteomics_data.csv",
+                key="download_uploaded_lfq_csv",
+                help_text="Download the uploaded LFQ matrix as CSV.",
+            )
 
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
             df.to_excel(writer, index=False, sheet_name="Raw_LFQ_Data")
 
-        dl_col2.download_button(
-            "Download Excel",
-            data=buffer.getvalue(),
-            file_name="uploaded_lfq_proteomics_data.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True
-        )
+        with dl_col2:
+            add_bytes_download_button_tp_lf(
+                label="Download Excel",
+                data=buffer.getvalue(),
+                filename="uploaded_lfq_proteomics_data.xlsx",
+                key="download_uploaded_lfq_excel",
+                help_text="Download the uploaded LFQ matrix as Excel.",
+            )
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.dataframe(df, use_container_width=True, height=450)
@@ -1733,13 +1722,11 @@ def add_plotly_html_download_button_tp_lf(fig, base_filename: str, key_suffix: s
 # -----------------------------------------------------------------------------
 
 # =============================================================================
-# Hosted-safe download override
+# Browser-safe and desktop-safe downloads
 # =============================================================================
-# IMPORTANT:
-# On Posit/RStudio Connect, Python runs on the Connect server/container.
-# Directly writing to Path.home()/Downloads will save on the server, not on the
-# user's laptop. These wrappers keep direct Save-to-Downloads behavior for local
-# standalone Windows/Mac, but switch to browser download buttons when hosted.
+# Posit/RStudio Connect runs Python on the server. Writing to Path.home()/Downloads
+# writes inside the server container, not to the user's computer. Browser downloads
+# must be supplied as bytes through st.download_button.
 
 def _env_to_bool_for_downloads(value):
     if value is None:
@@ -1755,9 +1742,16 @@ def _env_to_bool_for_downloads(value):
 def _is_hosted_mode() -> bool:
     import os
 
-    explicit = _env_to_bool_for_downloads(os.environ.get("GLYCOEXPLORER_HOSTED"))
-    if explicit is not None:
-        return explicit
+    for env_name in (
+        "TOTALPROTEOMICS_LFQ_HOSTED",
+        "TOTAL_PROTEOMICS_LFQ_HOSTED",
+        "TOTALPROTEOMICS_HOSTED",
+        "TOTAL_PROTEOMICS_HOSTED",
+        "GLYCOEXPLORER_HOSTED",
+    ):
+        explicit = _env_to_bool_for_downloads(os.environ.get(env_name))
+        if explicit is not None:
+            return explicit
 
     if os.environ.get("POSIT_PRODUCT", "").upper() == "CONNECT":
         return True
@@ -1772,14 +1766,26 @@ def _is_hosted_mode() -> bool:
         "POSIT_CONNECT",
         "RSTUDIO_CONNECT",
     ]
-    return any(os.environ.get(v) for v in hosted_env_vars)
+    if any(os.environ.get(v) for v in hosted_env_vars):
+        return True
+
+    runtime_text = " ".join(
+        [str(globals().get("__file__", "")), os.getcwd()]
+    ).lower()
+    return "rstudio-connect" in runtime_text or "/mnt/app" in runtime_text
 
 
 def _get_downloads_dir():
     import os
     from pathlib import Path
 
-    custom_dir = os.environ.get("GLYCOEXPLORER_DOWNLOAD_DIR", "").strip()
+    custom_dir = (
+        os.environ.get("TOTALPROTEOMICS_LFQ_DOWNLOAD_DIR", "").strip()
+        or os.environ.get("TOTAL_PROTEOMICS_LFQ_DOWNLOAD_DIR", "").strip()
+        or os.environ.get("TOTALPROTEOMICS_DOWNLOAD_DIR", "").strip()
+        or os.environ.get("TOTAL_PROTEOMICS_DOWNLOAD_DIR", "").strip()
+        or os.environ.get("GLYCOEXPLORER_DOWNLOAD_DIR", "").strip()
+    )
     if custom_dir:
         custom_path = Path(custom_dir).expanduser()
         custom_path.mkdir(parents=True, exist_ok=True)
@@ -1790,8 +1796,6 @@ def _get_downloads_dir():
 
 
 def _safe_download_filename(filename):
-    import re
-
     filename = str(filename).strip()
     filename = re.sub(r'[<>:"/\\|?*\x00-\x1F]+', "_", filename)
     filename = re.sub(r"[^A-Za-z0-9._-]+", "_", filename)
@@ -1809,10 +1813,14 @@ def _guess_mime_from_filename(filename):
     lower = str(filename).lower()
     if lower.endswith(".csv"):
         return "text/csv"
-    if lower.endswith(".tsv") or lower.endswith(".txt"):
+    if lower.endswith(".tsv"):
+        return "text/tab-separated-values"
+    if lower.endswith(".txt"):
         return "text/plain"
     if lower.endswith(".xlsx"):
         return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    if lower.endswith(".xls"):
+        return "application/vnd.ms-excel"
     if lower.endswith(".pdf"):
         return "application/pdf"
     if lower.endswith(".zip"):
@@ -1847,39 +1855,24 @@ def _coerce_to_bytes_for_downloads(data):
         if possible_path.exists() and possible_path.is_file():
             return possible_path.read_bytes()
         return data.encode("utf-8")
+    if hasattr(data, "getvalue"):
+        value = data.getvalue()
+        return value if isinstance(value, bytes) else bytes(value)
     return bytes(data)
-
-
-def _hosted_download_button(data, filename, label=None, key_prefix="hosted_download"):
-    import uuid
-    import streamlit as st
-
-    safe_name = _safe_download_filename(filename)
-    file_bytes = _coerce_to_bytes_for_downloads(data)
-    st.download_button(
-        label=label or f"Download {safe_name}",
-        data=file_bytes,
-        file_name=safe_name,
-        mime=_guess_mime_from_filename(safe_name),
-        key=f"{key_prefix}_{safe_name}_{uuid.uuid4().hex[:8]}",
-        use_container_width=True,
-    )
-    st.info("Hosted mode detected: use the browser download button above. Direct server-side saving is disabled.")
-    return f"{safe_name} ready for browser download"
 
 
 def _save_bytes_to_downloads(data, filename):
     """
-    Local standalone: save directly to Downloads.
-    Hosted/RConnect: render a browser download button instead of writing to the server.
+    Legacy local-desktop helper. Hosted applications must use browser downloads.
     """
-    from pathlib import Path
-
     file_bytes = _coerce_to_bytes_for_downloads(data)
     safe_name = _safe_download_filename(filename)
 
     if _is_hosted_mode():
-        return _hosted_download_button(file_bytes, safe_name)
+        raise RuntimeError(
+            "Direct saving is disabled in hosted mode. "
+            "Use add_bytes_download_button_tp_lf() instead."
+        )
 
     outdir = _get_downloads_dir()
     outdir.mkdir(parents=True, exist_ok=True)
@@ -1888,7 +1881,9 @@ def _save_bytes_to_downloads(data, filename):
     base_outpath = outpath
     counter = 1
     while outpath.exists():
-        outpath = base_outpath.with_name(f"{base_outpath.stem}_{counter}{base_outpath.suffix}")
+        outpath = base_outpath.with_name(
+            f"{base_outpath.stem}_{counter}{base_outpath.suffix}"
+        )
         counter += 1
 
     outpath.write_bytes(file_bytes)
@@ -1896,41 +1891,144 @@ def _save_bytes_to_downloads(data, filename):
 
 
 def _save_file_to_downloads(source_path, filename=None):
-    from pathlib import Path
-
     source_path = Path(source_path)
-    return _save_bytes_to_downloads(source_path.read_bytes(), filename or source_path.name)
+    return _save_bytes_to_downloads(
+        source_path.read_bytes(),
+        filename or source_path.name,
+    )
 
 
-def add_hosted_safe_file_download_button(label, data, file_name, key, use_container_width=True):
-    """
-    One-call helper for new export buttons.
-    Hosted/RConnect: st.download_button.
-    Local standalone: direct Save-to-Downloads st.button.
-    """
-    import streamlit as st
+def add_bytes_download_button_tp_lf(
+    label: str,
+    data,
+    filename: str,
+    key: str,
+    help_text: str = "Download file.",
+    type: str = "secondary",
+    use_container_width: bool = True,
+):
+    """Render a browser-native button for CSV/XLSX/TXT/HTML/PDF/ZIP/image bytes."""
+    try:
+        safe_name = _safe_download_filename(filename)
+        file_bytes = _coerce_to_bytes_for_downloads(data)
+    except Exception as e:
+        st.error(f"Could not prepare {filename} for download: {e}")
+        return False
 
-    safe_name = _safe_download_filename(file_name)
-    file_bytes = _coerce_to_bytes_for_downloads(data)
+    clicked = st.download_button(
+        label=label,
+        data=file_bytes,
+        file_name=safe_name,
+        mime=_guess_mime_from_filename(safe_name),
+        key=key,
+        help=help_text,
+        type=type,
+        use_container_width=use_container_width,
+    )
+    if clicked:
+        st.success(f"Downloaded {safe_name}")
+    return clicked
 
-    if _is_hosted_mode():
-        return st.download_button(
-            label=label,
-            data=file_bytes,
-            file_name=safe_name,
-            mime=_guess_mime_from_filename(safe_name),
-            key=key,
-            use_container_width=use_container_width,
+
+def add_hosted_safe_file_download_button(
+    label,
+    data,
+    file_name,
+    key,
+    use_container_width=True,
+    help_text=None,
+    type="secondary",
+):
+    """Compatibility wrapper that always returns the file through the browser."""
+    return add_bytes_download_button_tp_lf(
+        label=label,
+        data=data,
+        filename=file_name,
+        key=key,
+        help_text=help_text or "Download file.",
+        type=type,
+        use_container_width=use_container_width,
+    )
+
+
+def add_figure_download_buttons_tp_lf(
+    fig,
+    base_filename: str,
+    key_suffix: str = "",
+    include_pdf: bool = True,
+):
+    """Browser-native PNG/SVG/PDF exports for Matplotlib figures."""
+    if fig is None:
+        return
+
+    if not key_suffix:
+        key_suffix = uuid.uuid4().hex[:8]
+
+    base_filename = _safe_download_filename(base_filename)
+    png_bytes = _figure_to_bytes_tp_lf(fig, "png")
+    svg_bytes = _figure_to_bytes_tp_lf(fig, "svg")
+    pdf_bytes = _figure_to_bytes_tp_lf(fig, "pdf") if include_pdf else None
+
+    cols = st.columns(3 if include_pdf else 2)
+
+    with cols[0]:
+        add_bytes_download_button_tp_lf(
+            label="Download PNG",
+            data=png_bytes,
+            filename=f"{base_filename}.png",
+            key=f"save_png_{base_filename}_{key_suffix}",
+            help_text="Download the figure as a high-resolution PNG.",
         )
 
-    if st.button(label, key=key, use_container_width=use_container_width):
-        try:
-            outpath = _save_bytes_to_downloads(file_bytes, safe_name)
-            st.success(f"Saved to: {outpath}")
-            return True
-        except Exception as e:
-            st.error(f"Could not save {safe_name}: {e}")
-    return False
+    with cols[1]:
+        add_bytes_download_button_tp_lf(
+            label="Download SVG",
+            data=svg_bytes,
+            filename=f"{base_filename}.svg",
+            key=f"save_svg_{base_filename}_{key_suffix}",
+            help_text="Download the figure as a vector SVG.",
+        )
+
+    if include_pdf:
+        with cols[2]:
+            add_bytes_download_button_tp_lf(
+                label="Download PDF",
+                data=pdf_bytes,
+                filename=f"{base_filename}.pdf",
+                key=f"save_pdf_{base_filename}_{key_suffix}",
+                help_text="Download the figure as a PDF.",
+            )
+
+
+def add_plotly_html_download_button_tp_lf(
+    fig,
+    base_filename: str,
+    key_suffix: str = "",
+):
+    """Browser-native interactive Plotly HTML export."""
+    if fig is None:
+        return
+    if not key_suffix:
+        key_suffix = uuid.uuid4().hex[:8]
+
+    base_filename = _safe_download_filename(base_filename)
+    try:
+        html_bytes = fig.to_html(
+            include_plotlyjs="cdn",
+            full_html=True,
+        ).encode("utf-8")
+    except Exception as e:
+        st.warning(f"Could not prepare interactive HTML export: {e}")
+        return
+
+    add_bytes_download_button_tp_lf(
+        label="Download Interactive HTML",
+        data=html_bytes,
+        filename=f"{base_filename}.html",
+        key=f"save_html_{base_filename}_{key_suffix}",
+        help_text="Download the interactive Plotly figure as HTML.",
+    )
+
 
 def main():
     init_session_state_defaults()
@@ -2623,28 +2721,31 @@ def main():
                     download_diff_df = ss["diff_results"].copy()
                     dl_col1, dl_col2 = st.columns(2)
                     
-                    csv_diff = download_diff_df.to_csv(index=False).encode('utf-8')
-                    dl_col1.download_button(
-                        label="Download Results (CSV)",
-                        data=csv_diff,
-                        file_name="differential_analysis_results_lfq_totalproteome.csv",
-                        mime="text/csv",
-                        use_container_width=True,
-                        key="dl_diff_csv",
-                        help="Export the complete differential analysis statistics table as a CSV file."
-                    )
+                    csv_diff = download_diff_df.to_csv(index=False).encode("utf-8")
+                    with dl_col1:
+                        add_bytes_download_button_tp_lf(
+                            label="Download Results (CSV)",
+                            data=csv_diff,
+                            filename="differential_analysis_results_lfq_totalproteome.csv",
+                            key="dl_diff_csv",
+                            help_text="Download the complete differential-analysis table as CSV.",
+                        )
+
                     buffer_diff = BytesIO()
-                    with pd.ExcelWriter(buffer_diff, engine='openpyxl') as writer:
-                        download_diff_df.to_excel(writer, index=False, sheet_name='LFQ_Differential_Results')
-                    dl_col2.download_button(
-                        label="Download Results (Excel)",
-                        data=buffer_diff.getvalue(),
-                        file_name="differential_analysis_results_lfq_totalproteome.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
-                        key="dl_diff_xlsx",
-                        help="Export the complete differential analysis statistics table as an Excel file."
-                    )
+                    with pd.ExcelWriter(buffer_diff, engine="openpyxl") as writer:
+                        download_diff_df.to_excel(
+                            writer,
+                            index=False,
+                            sheet_name="LFQ_Differential_Results",
+                        )
+                    with dl_col2:
+                        add_bytes_download_button_tp_lf(
+                            label="Download Results (Excel)",
+                            data=buffer_diff.getvalue(),
+                            filename="differential_analysis_results_lfq_totalproteome.xlsx",
+                            key="dl_diff_xlsx",
+                            help_text="Download the complete differential-analysis table as Excel.",
+                        )
         # ---------------------------------------------------------------------
         # EXPLORE RESULTS TAB
         # ---------------------------------------------------------------------
@@ -2898,23 +2999,23 @@ def main():
 
                                 c1, c2 = st.columns(2)
                                 with c1:
-                                    st.download_button(
-                                        "Download Significant Rows CSV",
+                                    add_bytes_download_button_tp_lf(
+                                        label="Download Significant Rows CSV",
                                         data=sig_rows.to_csv(index=False).encode("utf-8"),
-                                        file_name="significant_total_protein_results.csv",
-                                        mime="text/csv",
-                                        key=f"dl_sig_rows_{ss.get('explore_mode_tp', 'plot')}"
+                                        filename="significant_total_protein_results.csv",
+                                        key=f"dl_sig_rows_{ss.get('explore_mode_tp', 'plot')}",
+                                        help_text="Download rows passing the active significance thresholds.",
                                     )
 
                                 if sig_genes:
                                     gene_txt = "\n".join(sig_genes)
                                     with c2:
-                                        st.download_button(
-                                            f"Download Protein List TXT ({n_genes})",
+                                        add_bytes_download_button_tp_lf(
+                                            label=f"Download Protein List TXT ({n_genes})",
                                             data=gene_txt.encode("utf-8"),
-                                            file_name="significant_total_protein_identifier_list.txt",
-                                            mime="text/plain",
-                                            key=f"dl_sig_genes_{ss.get('explore_mode_tp', 'plot')}"
+                                            filename="significant_total_protein_identifier_list.txt",
+                                            key=f"dl_sig_genes_{ss.get('explore_mode_tp', 'plot')}",
+                                            help_text="Download the de-duplicated significant protein list.",
                                         )
                                     st.code(gene_txt, language="text")
 
@@ -3021,35 +3122,32 @@ def main():
                                     hide_index=True,
                                 )
 
-                                st.download_button(
-                                    "Download Numbered Waterfall Table CSV",
+                                add_bytes_download_button_tp_lf(
+                                    label="Download Numbered Waterfall Table CSV",
                                     data=numbered_wf_table.to_csv(index=False).encode("utf-8"),
-                                    file_name="lfq_total_protein_waterfall_numbered_table.csv",
-                                    mime="text/csv",
+                                    filename="lfq_total_protein_waterfall_numbered_table.csv",
                                     key="dl_waterfall_numbered_table_csv",
-                                    use_container_width=True,
+                                    help_text="Download the numbered waterfall annotation table.",
                                 )
 
                             plt.close(wf_fig)
 
                             dlc1, dlc2 = st.columns(2)
                             with dlc1:
-                                st.download_button(
-                                    "Download PNG",
-                                    data=png_buf,
-                                    file_name="lfq_total_protein_waterfall.png",
-                                    mime="image/png",
+                                add_bytes_download_button_tp_lf(
+                                    label="Download PNG",
+                                    data=png_buf.getvalue(),
+                                    filename="lfq_total_protein_waterfall.png",
                                     key="dl_waterfall_png",
-                                    use_container_width=True,
+                                    help_text="Download the waterfall plot as PNG.",
                                 )
                             with dlc2:
-                                st.download_button(
-                                    "Download SVG",
-                                    data=svg_buf,
-                                    file_name="lfq_total_protein_waterfall.svg",
-                                    mime="image/svg+xml",
+                                add_bytes_download_button_tp_lf(
+                                    label="Download SVG",
+                                    data=svg_buf.getvalue(),
+                                    filename="lfq_total_protein_waterfall.svg",
                                     key="dl_waterfall_svg",
-                                    use_container_width=True,
+                                    help_text="Download the waterfall plot as SVG.",
                                 )
 
 
@@ -3258,23 +3356,22 @@ def main():
                                             else:
                                                 ss["report_boxplot_fig"] = profile_figs[0]
 
-                                            if st.button(
-                                                "Download Protein Profiles PDF",
-                                                key="download_top_profile_pdf",
-                                                use_container_width=True,
-                                                help="Save all displayed protein profile plots as a multi-page PDF in your Downloads folder."
-                                            ):
-                                                try:
-                                                    outpath = save_profile_pdf_to_downloads_tp_lf(
-                                                        profile_figs,
-                                                        profile_gene_names,
-                                                        filename="lfq_top_significant_protein_profiles.pdf",
-                                                        n_cols=5,
-                                                        n_rows=2
-                                                    )
-                                                    st.success(f"Saved PDF to: {outpath}")
-                                                except Exception as e:
-                                                    st.error(f"Could not save PDF: {e}")
+                                            try:
+                                                profile_pdf_bytes = build_profile_pdf_bytes_tp_lf(
+                                                    figures=profile_figs,
+                                                    gene_names=profile_gene_names,
+                                                    n_cols=5,
+                                                    n_rows=2,
+                                                )
+                                                add_bytes_download_button_tp_lf(
+                                                    label="Download Protein Profiles PDF",
+                                                    data=profile_pdf_bytes,
+                                                    filename="lfq_top_significant_protein_profiles.pdf",
+                                                    key="download_top_profile_pdf",
+                                                    help_text="Download all displayed protein profiles as a multi-page PDF.",
+                                                )
+                                            except Exception as e:
+                                                st.error(f"Could not prepare protein-profile PDF: {e}")
                                         else:
                                             st.warning("No profile plots could be generated for the selected proteins.")
 
@@ -3339,19 +3436,23 @@ def main():
                     buf.seek(0)
                     return buf.getvalue()
                 def _add_fig_to_zip(zf, folder, name, fig):
+                    """Add a session-state figure without closing the source figure."""
                     try:
                         png_bytes = _fig_to_png_bytes(fig)
                         zf.writestr(f"{folder}/{name}.png", png_bytes)
-                    finally:
-                        try:
-                            plt.close(fig)
-                        except Exception:
-                            pass
+                    except Exception as e:
+                        zf.writestr(
+                            f"{folder}/{name}_EXPORT_WARNING.txt",
+                            f"Could not export this figure: {e}",
+                        )
                 def _build_report_zip_tp_lf():
                     zip_buffer = BytesIO()
                     with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
                         if ss.get("final_pdf_bytes") is not None:
-                            zf.writestr("report/final_report.pdf", ss["final_pdf_bytes"])
+                            zf.writestr(
+                                "report/final_report.pdf",
+                                _coerce_to_bytes_for_downloads(ss["final_pdf_bytes"]),
+                            )
                         if ss.get("raw_df") is not None and not ss["raw_df"].empty:
                             zf.writestr("tables/raw_data.csv", ss["raw_df"].to_csv(index=False))
                         if ss.get("expr_processed") is not None and not ss["expr_processed"].empty:
@@ -3420,52 +3521,87 @@ def main():
                     zip_buffer.seek(0)
                     return zip_buffer.getvalue()
                 if "final_pdf_bytes" not in ss:
-                    if st.button("Compile PDF Report & ZIP Bundle", use_container_width=True, type="primary", help="Generate a PDF document and ZIP bundle containing all currently selected plots and parameters."):
+                    if st.button(
+                        "Compile PDF Report & ZIP Bundle",
+                        use_container_width=True,
+                        type="primary",
+                        help="Generate a PDF document and ZIP bundle containing all currently selected plots and parameters.",
+                    ):
                         with st.spinner("Compiling plots and generating PDF... this may take a moment."):
                             try:
                                 from tp.report_utility import generate_final_pdf
-                                ss["final_pdf_bytes"] = generate_final_pdf()
+
+                                generated_pdf = generate_final_pdf()
+                                ss["final_pdf_bytes"] = _coerce_to_bytes_for_downloads(generated_pdf)
                                 ss["final_report_zip_bytes"] = _build_report_zip_tp_lf()
-                                st.rerun() 
+                                ss["final_report_timestamp"] = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+                                st.rerun()
                             except Exception as e:
                                 st.error(f"Failed to generate report: {e}")
-                
+
                 else:
                     st.success("Report generated successfully.")
-                    
-                    timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M')
-                    st.download_button(
-                        label="Download PDF Report",
-                        data=ss["final_pdf_bytes"],
-                        file_name=f"TotalProteomics_LFQ_Report_{timestamp}.pdf",
-                        mime="application/pdf",
-                        use_container_width=True,
-                        type="primary",
-                        key="final_report_download",
-                        help="Save the compiled PDF report to your device."
-                    )
-                    if "final_report_zip_bytes" not in ss:
+
+                    if "final_report_timestamp" not in ss:
+                        ss["final_report_timestamp"] = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+                    timestamp = ss["final_report_timestamp"]
+
+                    try:
+                        pdf_bytes = _coerce_to_bytes_for_downloads(ss.get("final_pdf_bytes"))
+                        st.caption(f"PDF size: {len(pdf_bytes) / 1024 / 1024:.2f} MB")
+                    except Exception as e:
+                        pdf_bytes = None
+                        st.error(f"PDF report data are invalid: {e}")
+
+                    if "final_report_zip_bytes" not in ss or ss.get("final_report_zip_bytes") is None:
                         try:
                             ss["final_report_zip_bytes"] = _build_report_zip_tp_lf()
                         except Exception as e:
+                            ss["final_report_zip_bytes"] = None
                             st.warning(f"PDF is ready, but ZIP bundle could not be prepared: {e}")
-                    if ss.get("final_report_zip_bytes") is not None:
-                        st.download_button(
-                            label="Download ZIP Bundle (PDF + Images + Tables)",
-                            data=ss["final_report_zip_bytes"],
-                            file_name=f"TotalProteomics_LFQ_Report_Bundle_{timestamp}.zip",
-                            mime="application/zip",
-                            use_container_width=True,
-                            key="final_report_zip_download",
-                            help="Download a complete ZIP archive including the PDF report, all generated visualization images (PNG), and tabular data (CSV)."
-                        )
+
+                    zip_bytes = ss.get("final_report_zip_bytes")
+                    if zip_bytes is not None:
+                        try:
+                            zip_bytes = _coerce_to_bytes_for_downloads(zip_bytes)
+                            st.caption(f"ZIP size: {len(zip_bytes) / 1024 / 1024:.2f} MB")
+                        except Exception as e:
+                            zip_bytes = None
+                            st.warning(f"ZIP bundle data are invalid: {e}")
+
+                    dl_col1, dl_col2 = st.columns(2)
+                    with dl_col1:
+                        if pdf_bytes is not None:
+                            add_bytes_download_button_tp_lf(
+                                label="Download PDF Report",
+                                data=pdf_bytes,
+                                filename=f"TotalProteomics_LFQ_Report_{timestamp}.pdf",
+                                key="final_report_download",
+                                help_text="Download the compiled PDF report through the browser.",
+                                type="primary",
+                            )
+
+                    with dl_col2:
+                        if zip_bytes is not None:
+                            add_bytes_download_button_tp_lf(
+                                label="Download ZIP Bundle",
+                                data=zip_bytes,
+                                filename=f"TotalProteomics_LFQ_Report_Bundle_{timestamp}.zip",
+                                key="final_report_zip_download",
+                                help_text="Download the PDF, images, and tables as one ZIP archive.",
+                            )
+                        else:
+                            st.warning("ZIP bundle is not available. Regenerate the report.")
+
                     if st.button(
-                        "Regenerate Report", 
+                        "Regenerate Report",
                         use_container_width=True,
-                        help="Discard the current report and generate a new one with updated data/plots."
+                        help="Discard the current report and generate a new one with updated data/plots.",
+                        key="regenerate_final_report",
                     ):
                         ss.pop("final_pdf_bytes", None)
                         ss.pop("final_report_zip_bytes", None)
+                        ss.pop("final_report_timestamp", None)
                         st.rerun()
     # ====================== DEFAULT STATE & FAQ ======================
     any_tab_active = (
@@ -3479,15 +3615,23 @@ def main():
     faq_section()
 
 # =============================================================================
-# Centralized browser-safe downloads
+# Optional shared download imports
 # =============================================================================
-# RConnect cannot save directly to a user's laptop. These overrides keep all
-# downloads browser-based so the browser can ask where to save when configured.
+# Import utility-only names, then restore this app's browser-safe implementations.
+_tp_lf_local_download_functions = {
+    "add_hosted_safe_file_download_button": add_hosted_safe_file_download_button,
+    "add_bytes_download_button_tp_lf": add_bytes_download_button_tp_lf,
+    "add_figure_download_buttons_tp_lf": add_figure_download_buttons_tp_lf,
+    "add_plotly_html_download_button_tp_lf": add_plotly_html_download_button_tp_lf,
+    "save_profile_pdf_to_downloads_tp_lf": save_profile_pdf_to_downloads_tp_lf,
+    "_save_bytes_to_downloads": _save_bytes_to_downloads,
+    "_save_file_to_downloads": _save_file_to_downloads,
+}
+
 try:
     from download_utility import (
         add_download_button,
         add_file_download_buttons,
-        add_hosted_safe_file_download_button,
         add_bytes_download_button,
         add_bytes_download_button_tp,
         add_dataframe_download_buttons,
@@ -3495,19 +3639,17 @@ try:
         add_plot_download_buttons,
         add_plotly_download_buttons,
         add_figure_download_buttons_tp,
-        add_figure_download_buttons_tp_lf,
         add_plotly_html_download_button_tp,
-        add_plotly_html_download_button_tp_lf,
         add_figure_download_buttons_common,
         add_plotly_html_download_button_common,
         save_profile_pdf_to_downloads_tp,
-        save_profile_pdf_to_downloads_tp_lf,
         explain_download_location,
-        _save_bytes_to_downloads,
-        _save_file_to_downloads,
     )
 except Exception:
     pass
+
+# Do not allow a shared helper to replace the tested LFQ browser-download path.
+globals().update(_tp_lf_local_download_functions)
 
 if __name__ == "__main__":
     if "session_initialized_tp_lf" not in st.session_state:

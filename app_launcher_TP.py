@@ -151,6 +151,7 @@ def _reset_all_data(clear_cache: bool = False):
 
     ss.pop("final_pdf_bytes", None)
     ss.pop("final_report_zip_bytes", None)
+    ss.pop("final_report_timestamp", None)
 
     if clear_cache:
         try:
@@ -200,70 +201,63 @@ def clean_tmt_sample(col: str) -> str:
 
 def quantile_normalize(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Quantile normalize a feature x sample matrix while preserving the exact
-    original shape, row index, and column names.
+    Quantile-normalize a feature x sample matrix without changing its shape.
 
-    This version is robust to missing values. The previous implementation used
-    stack()/unstack(), which drops rows/features with all missing values and can
-    produce a smaller matrix, causing errors such as:
+    Missing values and rows containing only missing values are preserved. The
+    implementation uses positional assignment, so duplicate row labels cannot
+    cause an index-length mismatch. This avoids the stack()/unstack() failure:
         ValueError: Length mismatch: Expected axis has X elements, new values have Y elements
     """
-    if df is None or df.empty:
+    if df is None:
+        return None
+    if df.empty:
         return df.copy()
 
-    # Force numeric values but keep original row/column labels.
-    x = df.apply(pd.to_numeric, errors="coerce").copy()
+    x = df.apply(pd.to_numeric, errors="coerce")
+    arr = x.to_numpy(dtype=float, copy=True)
 
-    # Rows with no observed values cannot be normalized; preserve them as NaN.
-    valid_rows = x.notna().any(axis=1)
+    # Normalize only rows having at least one finite value. All-missing rows are
+    # restored as NaN in the final matrix.
+    valid_rows = np.isfinite(arr).any(axis=1)
     if not valid_rows.any():
-        return pd.DataFrame(np.nan, index=df.index, columns=df.columns)
+        return pd.DataFrame(np.nan, index=df.index, columns=df.columns, dtype=float)
 
-    x_valid = x.loc[valid_rows].copy()
+    valid_arr = arr[valid_rows, :]
+    sorted_arr = np.sort(valid_arr, axis=0)
 
-    # Quantile normalization with NaN-safe sorting.
-    # np.sort places NaNs at the end. We compute the mean at each sorted rank
-    # ignoring NaNs, then map those rank means back to each column.
-    arr = x_valid.to_numpy(dtype=float)
-    sorted_arr = np.sort(arr, axis=0)
-
-    with np.errstate(invalid="ignore"):
+    with np.errstate(invalid="ignore", divide="ignore"):
         rank_means = np.nanmean(sorted_arr, axis=1)
 
-    # If the highest ranks are all NaN, fill them with the last finite rank mean.
-    rank_means = pd.Series(rank_means).ffill().bfill().to_numpy()
+    # Ranks that are missing in every sample can occur near the upper end when
+    # columns contain different numbers of observed values. Fill them from the
+    # nearest finite rank mean so every observed value receives a value.
+    rank_means = (
+        pd.Series(rank_means, dtype=float)
+        .ffill()
+        .bfill()
+        .to_numpy(dtype=float)
+    )
 
-    normalized = np.full(arr.shape, np.nan, dtype=float)
+    normalized_valid = np.full(valid_arr.shape, np.nan, dtype=float)
 
-    for j in range(arr.shape[1]):
-        col = arr[:, j]
-        non_na = np.isfinite(col)
-
-        if not non_na.any():
+    for col_idx in range(valid_arr.shape[1]):
+        col = valid_arr[:, col_idx]
+        observed_positions = np.flatnonzero(np.isfinite(col))
+        if observed_positions.size == 0:
             continue
 
-        order = np.argsort(col[non_na], kind="mergesort")
-        non_na_positions = np.where(non_na)[0]
-        sorted_positions = non_na_positions[order]
+        order = np.argsort(col[observed_positions], kind="mergesort")
+        sorted_positions = observed_positions[order]
+        normalized_valid[sorted_positions, col_idx] = rank_means[: observed_positions.size]
 
-        normalized[sorted_positions, j] = rank_means[:len(sorted_positions)]
+    normalized_full = np.full(arr.shape, np.nan, dtype=float)
+    normalized_full[valid_rows, :] = normalized_valid
 
-    out_valid = pd.DataFrame(
-        normalized,
-        index=x_valid.index,
-        columns=x_valid.columns
-    )
-
-    # Re-expand to the original full shape and labels.
-    out = pd.DataFrame(
-        np.nan,
-        index=df.index,
-        columns=df.columns,
-        dtype=float
-    )
-
-    out.loc[out_valid.index, out_valid.columns] = out_valid
-
+    out = pd.DataFrame(normalized_full, index=df.index, columns=df.columns)
+    if out.shape != df.shape:
+        raise RuntimeError(
+            f"Quantile normalization changed matrix shape from {df.shape} to {out.shape}."
+        )
     return out
 
 def apply_batch_correction(df: pd.DataFrame, batch_dict: dict, method: str, is_log2: bool, irs_refs: dict = None) -> pd.DataFrame:
@@ -835,18 +829,27 @@ def add_bytes_download_button_tp(
     help_text: str = "Download file.",
     type: str = "secondary",
 ):
-    """Streamlit native download button replacement for raw bytes/dataframes with success message."""
-    btn_clicked = st.download_button(
+    """Render a browser-native download button for CSV/XLSX/PDF/ZIP/TXT bytes."""
+    try:
+        safe_name = _safe_download_filename(filename)
+        file_bytes = _coerce_to_bytes_for_downloads(data)
+    except Exception as e:
+        st.error(f"Could not prepare {filename} for download: {e}")
+        return False
+
+    clicked = st.download_button(
         label=label,
-        data=data,
-        file_name=filename,
+        data=file_bytes,
+        file_name=safe_name,
+        mime=_guess_mime_from_filename(safe_name),
         key=key,
         help=help_text,
         type=type,
-        use_container_width=True
+        use_container_width=True,
     )
-    if btn_clicked:
-        st.success(f"Downloaded {filename}")
+    if clicked:
+        st.success(f"Downloaded {safe_name}")
+    return clicked
 
 def create_static_ma_plot_tp(
     res: pd.DataFrame,
@@ -1211,6 +1214,64 @@ def create_profile_grid_figure_tp(
     return grid_fig
 
 
+def build_profile_pdf_bytes_tp(
+    figures: list,
+    gene_names: list,
+    n_cols: int = 5,
+    n_rows: int = 2,
+) -> bytes:
+    """Build a multi-page protein-profile PDF entirely in memory."""
+    from matplotlib.backends.backend_pdf import PdfPages
+    from PIL import Image
+    from io import BytesIO
+
+    valid_items = [
+        (fig, gene)
+        for fig, gene in zip(figures, gene_names)
+        if fig is not None
+    ]
+    if not valid_items:
+        raise ValueError("No protein profile figures were available for PDF export.")
+
+    plots_per_page = n_cols * n_rows
+    pdf_buffer = BytesIO()
+
+    with PdfPages(pdf_buffer) as pdf:
+        for page_start in range(0, len(valid_items), plots_per_page):
+            page_items = valid_items[page_start:page_start + plots_per_page]
+            page_fig, axes = plt.subplots(
+                n_rows,
+                n_cols,
+                figsize=(n_cols * 4.4, n_rows * 4.2),
+            )
+            axes = np.array(axes).reshape(-1)
+
+            for ax in axes:
+                ax.axis("off")
+
+            for ax, (gene_fig, _gene_name) in zip(axes, page_items):
+                gene_fig.canvas.draw()
+                image_buffer = BytesIO()
+                gene_fig.savefig(
+                    image_buffer,
+                    format="png",
+                    dpi=260,
+                    bbox_inches="tight",
+                    pad_inches=0.25,
+                )
+                image_buffer.seek(0)
+                with Image.open(image_buffer) as img:
+                    ax.imshow(img.copy())
+                ax.axis("off")
+
+            page_fig.tight_layout(pad=0.4)
+            pdf.savefig(page_fig, bbox_inches="tight")
+            plt.close(page_fig)
+
+    pdf_buffer.seek(0)
+    return pdf_buffer.getvalue()
+
+
 def save_profile_pdf_to_downloads_tp(
     figures: list,
     gene_names: list,
@@ -1218,85 +1279,14 @@ def save_profile_pdf_to_downloads_tp(
     n_cols: int = 5,
     n_rows: int = 2,
 ):
-    """
-    Save protein profile figures into a multi-page PDF grid.
-
-    Layout:
-    - 5 proteins per row
-    - 2 rows per page
-    - 10 proteins per page total
-
-    Protein name is kept only from the original plot title.
-    """
-    from matplotlib.backends.backend_pdf import PdfPages
-    from PIL import Image
-    from io import BytesIO
-
-    outdir = _get_downloads_dir()
-    filename = _safe_download_filename(filename)
-    outpath = outdir / filename
-
-    base_outpath = outpath
-    counter = 1
-    while outpath.exists():
-        outpath = base_outpath.with_name(
-            f"{base_outpath.stem}_{counter}{base_outpath.suffix}"
-        )
-        counter += 1
-
-    valid_items = [
-        (fig, gene)
-        for fig, gene in zip(figures, gene_names)
-        if fig is not None
-    ]
-
-    if not valid_items:
-        return outpath
-
-    plots_per_page = n_cols * n_rows
-
-    with PdfPages(outpath) as pdf:
-        for page_start in range(0, len(valid_items), plots_per_page):
-            page_items = valid_items[page_start:page_start + plots_per_page]
-
-            page_fig, axes = plt.subplots(
-                n_rows,
-                n_cols,
-                figsize=(n_cols * 4.4, n_rows * 4.2)
-            )
-
-            axes = np.array(axes).reshape(-1)
-
-            for ax in axes:
-                ax.axis("off")
-
-            for ax, (gene_fig, gene_name) in zip(axes, page_items):
-                gene_fig.canvas.draw()
-
-                buf = BytesIO()
-                gene_fig.savefig(
-                    buf,
-                    format="png",
-                    dpi=260,
-                    bbox_inches="tight",
-                    pad_inches=0.25
-                )
-                buf.seek(0)
-
-                img = Image.open(buf)
-                ax.imshow(img)
-                ax.axis("off")
-
-                # Do not add protein name here; the individual plot already has it.
-
-                plt.close(gene_fig)
-
-            page_fig.tight_layout(pad=0.4)
-            pdf.savefig(page_fig, bbox_inches="tight")
-            plt.close(page_fig)
-
-    return outpath
-
+    """Backward-compatible local save wrapper around the in-memory PDF builder."""
+    pdf_bytes = build_profile_pdf_bytes_tp(
+        figures=figures,
+        gene_names=gene_names,
+        n_cols=n_cols,
+        n_rows=n_rows,
+    )
+    return _save_bytes_to_downloads(pdf_bytes, filename)
 
 def create_total_protein_waterfall_plot_tp(
     res: pd.DataFrame,
@@ -2025,9 +2015,16 @@ def _env_to_bool_for_downloads(value):
 def _is_hosted_mode() -> bool:
     import os
 
-    explicit = _env_to_bool_for_downloads(os.environ.get("GLYCOEXPLORER_HOSTED"))
-    if explicit is not None:
-        return explicit
+    # Explicit application-specific override. Keep the GlycoExplorer variable as
+    # a backward-compatible fallback for shared deployments.
+    for env_name in (
+        "TOTALPROTEOMICS_HOSTED",
+        "TOTAL_PROTEOMICS_HOSTED",
+        "GLYCOEXPLORER_HOSTED",
+    ):
+        explicit = _env_to_bool_for_downloads(os.environ.get(env_name))
+        if explicit is not None:
+            return explicit
 
     if os.environ.get("POSIT_PRODUCT", "").upper() == "CONNECT":
         return True
@@ -2042,14 +2039,26 @@ def _is_hosted_mode() -> bool:
         "POSIT_CONNECT",
         "RSTUDIO_CONNECT",
     ]
-    return any(os.environ.get(v) for v in hosted_env_vars)
+    if any(os.environ.get(v) for v in hosted_env_vars):
+        return True
+
+    # Posit Connect installations do not always expose the same environment
+    # variables. The deployed application path is a reliable final check.
+    runtime_text = " ".join(
+        [str(globals().get("__file__", "")), os.getcwd()]
+    ).lower()
+    return "rstudio-connect" in runtime_text or "/mnt/app" in runtime_text
 
 
 def _get_downloads_dir():
     import os
     from pathlib import Path
 
-    custom_dir = os.environ.get("GLYCOEXPLORER_DOWNLOAD_DIR", "").strip()
+    custom_dir = (
+        os.environ.get("TOTALPROTEOMICS_DOWNLOAD_DIR", "").strip()
+        or os.environ.get("TOTAL_PROTEOMICS_DOWNLOAD_DIR", "").strip()
+        or os.environ.get("GLYCOEXPLORER_DOWNLOAD_DIR", "").strip()
+    )
     if custom_dir:
         custom_path = Path(custom_dir).expanduser()
         custom_path.mkdir(parents=True, exist_ok=True)
@@ -2172,16 +2181,25 @@ def _save_file_to_downloads(source_path, filename=None):
     return _save_bytes_to_downloads(source_path.read_bytes(), filename or source_path.name)
 
 
-def add_hosted_safe_file_download_button(label, data, file_name, key, use_container_width=True):
+def add_hosted_safe_file_download_button(
+    label,
+    data,
+    file_name,
+    key,
+    use_container_width=True,
+    help_text=None,
+    type="secondary",
+):
     """
-    One-call helper for new export buttons.
-    Hosted/RConnect: st.download_button.
-    Local standalone: direct Save-to-Downloads st.button.
+    Hosted/RConnect: return bytes through the browser with st.download_button.
+    Local standalone: save directly to the local Downloads directory.
     """
-    import streamlit as st
-
-    safe_name = _safe_download_filename(file_name)
-    file_bytes = _coerce_to_bytes_for_downloads(data)
+    try:
+        safe_name = _safe_download_filename(file_name)
+        file_bytes = _coerce_to_bytes_for_downloads(data)
+    except Exception as e:
+        st.error(f"Could not prepare {file_name} for download: {e}")
+        return False
 
     if _is_hosted_mode():
         return st.download_button(
@@ -2190,10 +2208,18 @@ def add_hosted_safe_file_download_button(label, data, file_name, key, use_contai
             file_name=safe_name,
             mime=_guess_mime_from_filename(safe_name),
             key=key,
+            help=help_text,
+            type=type,
             use_container_width=use_container_width,
         )
 
-    if st.button(label, key=key, use_container_width=use_container_width):
+    if st.button(
+        label,
+        key=key,
+        help=help_text,
+        type=type,
+        use_container_width=use_container_width,
+    ):
         try:
             outpath = _save_bytes_to_downloads(file_bytes, safe_name)
             st.success(f"Saved to: {outpath}")
@@ -3710,23 +3736,23 @@ def main():
                                                 ss["report_boxplot_fig"] = grid_fig
                                             else:
                                                 ss["report_boxplot_fig"] = profile_figs[0]
-                                            if st.button(
-                                                "Download Protein Profiles PDF",
-                                                key="download_top_profile_pdf",
-                                                use_container_width=True,
-                                                help="Save all displayed protein profile plots as a multi-page PDF in your Downloads folder."
-                                            ):
-                                                try:
-                                                    outpath = save_profile_pdf_to_downloads_tp(
-                                                        profile_figs,
-                                                        profile_gene_names,
-                                                        filename="top_protein_profiles.pdf",
-                                                        n_cols=5,
-                                                        n_rows=2
-                                                    )
-                                                    st.success(f"Saved PDF to: {outpath}")
-                                                except Exception as e:
-                                                    st.error(f"Could not save PDF: {e}")
+                                            try:
+                                                profile_pdf_bytes = build_profile_pdf_bytes_tp(
+                                                    profile_figs,
+                                                    profile_gene_names,
+                                                    n_cols=5,
+                                                    n_rows=2,
+                                                )
+                                                add_bytes_download_button_tp(
+                                                    label="Download Protein Profiles PDF",
+                                                    data=profile_pdf_bytes,
+                                                    filename="top_protein_profiles.pdf",
+                                                    key="download_top_profile_pdf",
+                                                    help_text="Download all displayed protein profile plots as a multi-page PDF.",
+                                                    type="secondary",
+                                                )
+                                            except Exception as e:
+                                                st.error(f"Could not prepare protein profile PDF: {e}")
                                         else:
                                             st.warning("No profile plots could be generated for the selected proteins.")
 
@@ -3807,7 +3833,10 @@ def main():
 
                     with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
                         if ss.get("final_pdf_bytes") is not None:
-                            zf.writestr("report/final_report.pdf", ss["final_pdf_bytes"])
+                            zf.writestr(
+                                "report/final_report.pdf",
+                                _coerce_to_bytes_for_downloads(ss["final_pdf_bytes"]),
+                            )
 
                         if ss.get("raw_df") is not None and not ss["raw_df"].empty:
                             zf.writestr("tables/raw_data.csv", ss["raw_df"].to_csv(index=False))
@@ -3894,9 +3923,11 @@ def main():
                             try:
                                 from tp.report_utility import generate_final_pdf
 
-                                ss["final_pdf_bytes"] = generate_final_pdf()
+                                generated_pdf = generate_final_pdf()
+                                ss["final_pdf_bytes"] = _coerce_to_bytes_for_downloads(generated_pdf)
                                 ss["final_report_zip_bytes"] = _build_report_zip_tp()
-                                st.rerun() 
+                                ss["final_report_timestamp"] = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+                                st.rerun()
 
                             except Exception as e:
                                 st.error(f"Failed to generate report: {e}")
@@ -3904,35 +3935,58 @@ def main():
                 else:
                     st.success("Report generated successfully.")
                     
-                    timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M')
+                    if "final_report_timestamp" not in ss:
+                        ss["final_report_timestamp"] = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+                    timestamp = ss["final_report_timestamp"]
 
-                    add_bytes_download_button_tp(
-                        label="Download PDF Report",
-                        data=ss["final_pdf_bytes"],
-                        filename=f"TotalProteomics_Report_{timestamp}.pdf",
-                        key="save_final_report_pdf",
-                        help_text="Save the compiled PDF report directly to your local Downloads folder.",
-                        type="primary",
-                    )
+                    pdf_bytes = _coerce_to_bytes_for_downloads(ss.get("final_pdf_bytes"))
+                    st.caption(f"PDF size: {len(pdf_bytes) / 1024 / 1024:.2f} MB")
 
-                    if "final_report_zip_bytes" not in ss:
+                    if "final_report_zip_bytes" not in ss or ss.get("final_report_zip_bytes") is None:
                         try:
                             ss["final_report_zip_bytes"] = _build_report_zip_tp()
                         except Exception as e:
+                            ss["final_report_zip_bytes"] = None
                             st.warning(f"PDF is ready, but ZIP bundle could not be prepared: {e}")
 
-                    if ss.get("final_report_zip_bytes") is not None:
+                    zip_bytes = ss.get("final_report_zip_bytes")
+                    if zip_bytes is not None:
+                        zip_bytes = _coerce_to_bytes_for_downloads(zip_bytes)
+                        st.caption(f"ZIP size: {len(zip_bytes) / 1024 / 1024:.2f} MB")
+
+                    dl_col1, dl_col2 = st.columns(2)
+                    with dl_col1:
                         add_bytes_download_button_tp(
-                            label="Download ZIP Bundle (PDF + Images + Tables)",
-                            data=ss["final_report_zip_bytes"],
-                            filename=f"TotalProteomics_Report_Bundle_{timestamp}.zip",
-                            key="save_final_report_zip",
-                            help_text="Save a complete ZIP archive including the PDF report, plots, and tables directly to your local Downloads folder."
+                            label="Download PDF Report",
+                            data=pdf_bytes,
+                            filename=f"TotalProteomics_Report_{timestamp}.pdf",
+                            key="save_final_report_pdf",
+                            help_text="Download the compiled PDF report through the browser.",
+                            type="primary",
                         )
 
-                    if st.button("Regenerate Report", use_container_width=True, help="Discard the current report and generate a new one with updated data/plots."):
+                    with dl_col2:
+                        if zip_bytes is not None:
+                            add_bytes_download_button_tp(
+                                label="Download ZIP Bundle",
+                                data=zip_bytes,
+                                filename=f"TotalProteomics_Report_Bundle_{timestamp}.zip",
+                                key="save_final_report_zip",
+                                help_text="Download the PDF, images, and tabular outputs as one ZIP archive.",
+                                type="secondary",
+                            )
+                        else:
+                            st.warning("ZIP bundle is not available. Regenerate the report.")
+
+                    if st.button(
+                        "Regenerate Report",
+                        use_container_width=True,
+                        help="Discard the current report and generate a new one with updated data and plots.",
+                        key="regenerate_final_report",
+                    ):
                         ss.pop("final_pdf_bytes", None)
                         ss.pop("final_report_zip_bytes", None)
+                        ss.pop("final_report_timestamp", None)
                         st.rerun()
 
     st.markdown("<br>", unsafe_allow_html=True)
@@ -3940,35 +3994,40 @@ def main():
 
 
 # =============================================================================
-# Centralized browser-safe downloads
+# Optional shared download imports
 # =============================================================================
-# RConnect cannot save directly to a user's laptop. These overrides keep all
-# downloads browser-based so the browser can ask where to save when configured.
+# Import utility-only names, but keep this app's browser-safe implementations.
+_tp_local_download_functions = {
+    "add_hosted_safe_file_download_button": add_hosted_safe_file_download_button,
+    "add_bytes_download_button_tp": add_bytes_download_button_tp,
+    "add_figure_download_buttons_tp": add_figure_download_buttons_tp,
+    "add_plotly_html_download_button_tp": add_plotly_html_download_button_tp,
+    "save_profile_pdf_to_downloads_tp": save_profile_pdf_to_downloads_tp,
+    "_save_bytes_to_downloads": _save_bytes_to_downloads,
+    "_save_file_to_downloads": _save_file_to_downloads,
+}
+
 try:
     from download_utility import (
         add_download_button,
         add_file_download_buttons,
-        add_hosted_safe_file_download_button,
         add_bytes_download_button,
-        add_bytes_download_button_tp,
         add_dataframe_download_buttons,
         add_matplotlib_download_buttons,
         add_plot_download_buttons,
         add_plotly_download_buttons,
-        add_figure_download_buttons_tp,
         add_figure_download_buttons_tp_lf,
-        add_plotly_html_download_button_tp,
         add_plotly_html_download_button_tp_lf,
         add_figure_download_buttons_common,
         add_plotly_html_download_button_common,
-        save_profile_pdf_to_downloads_tp,
         save_profile_pdf_to_downloads_tp_lf,
         explain_download_location,
-        _save_bytes_to_downloads,
-        _save_file_to_downloads,
     )
 except Exception:
     pass
+
+# Do not allow a shared helper to replace the tested Total Proteomics download path.
+globals().update(_tp_local_download_functions)
 
 if __name__ == "__main__":
     if "session_initialized_tp" not in st.session_state:

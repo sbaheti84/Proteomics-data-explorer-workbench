@@ -98,6 +98,44 @@ def load_module_safely(module_name: str):
 # =============================================================================
 DASHBOARD_OPTION = "-- Select an app --"
 
+# APP_MODULES = {
+#     "GlycoExplorer (TMT)": {
+#         "module": "app_launcher_GE",
+#         "desc": "Analyze and visualize TMT glycoproteomics results.",
+#         "category": "GlycoProteomics",
+#     },
+#     "GlycoExplorer (Label-Free)": {
+#         "module": "app_launcher_GE_LF",
+#         "desc": "Analyze and visualize label-free glycoproteomics results.",
+#         "category": "GlycoProteomics",
+#     },
+#     "Total Proteome (TMT)": {
+#         "module": "app_launcher_TP",
+#         "desc": "Perform proteome-level QC, normalization, and reporting.",
+#         "category": "Proteomics",
+#     },
+#     "Total Proteome (Label-Free)": {
+#         "module": "app_launcher_TP_LF",
+#         "desc": "Perform label-free QC, normalization, and reporting.",
+#         "category": "Proteomics",
+#     },
+#     "Glyco-Proteome Integrator": {
+#         "module": "app_launcher_GPI",
+#         "desc": "Integrate glycoprotein and total proteome results.",
+#         "category": "Integration",
+#     },
+#     "Glycopeptide Mass Calculator": {
+#         "module": "app_launcher_GMC",
+#         "desc": "Compute peptide/glycopeptide masses and fragmentation ions.",
+#         "category": "Utilities",
+#     },
+#     "Fragment Ion Extractor": {
+#         "module": "app_launcher_FIIE",
+#         "desc": "Extract specific fragment ions and analyze mzML/mgf data.",
+#         "category": "Utilities",
+#     },
+# }
+
 APP_MODULES = {
     "GlycoExplorer (TMT)": {
         "module": "app_launcher_GE",
@@ -124,17 +162,8 @@ APP_MODULES = {
         "desc": "Integrate glycoprotein and total proteome results.",
         "category": "Integration",
     },
-    "Glycopeptide Mass Calculator": {
-        "module": "app_launcher_GMC",
-        "desc": "Compute peptide/glycopeptide masses and fragmentation ions.",
-        "category": "Utilities",
-    },
-    "Fragment Ion Extractor": {
-        "module": "app_launcher_FIIE",
-        "desc": "Extract specific fragment ions and analyze mzML/mgf data.",
-        "category": "Utilities",
-    },
-}
+} 
+
 
 
 # =============================================================================
@@ -456,7 +485,7 @@ def render_dashboard():
 
         st.markdown("<br>", unsafe_allow_html=True)
 
-        st.markdown("### Utilities")
+        #st.markdown("### Utilities")
 
         for app_name, info in APP_MODULES.items():
             if info["category"] == "Utilities":
