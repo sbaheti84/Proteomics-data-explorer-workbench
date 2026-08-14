@@ -247,6 +247,15 @@ ss.setdefault("global_all_groups", [])
 ss.setdefault("batch_dict", {})
 ss.setdefault("batch_corrected", False)
 
+# Permanent batch configuration state. These are separate from Streamlit
+# widget keys so the setup survives when this panel is hidden.
+ss.setdefault("enable_batch_correction", False)
+ss.setdefault("batch_method_selected", "ComBat (Empirical Bayes)")
+ss.setdefault("batch_num_selected", 2)
+ss.setdefault("batch_config", {})
+ss.setdefault("batch_correction_run_signature", None)
+ss.setdefault("batch_correction_applied_method", "None")
+
 # One-time session defaults
 ss.setdefault("merged_ready", False)
 ss.setdefault("raw_merged_df", None)
@@ -802,7 +811,7 @@ def compute_diffexp(
 
     df[control_label] = df[ctrl].mean(axis=1)
     df[test_label] = df[test].mean(axis=1)
-    pseudo = 1.0
+    pseudo = 0.0
     df["log2FC"] = np.log2(df[test_label] + pseudo) - np.log2(df[control_label] + pseudo)
 
     pvals = []
@@ -966,8 +975,21 @@ def _reset_all_data(clear_cache: bool = False):
     ss["global_all_groups"] = []
     
     ss["batch_dict"] = {}
+    ss["batch_config"] = {}
     ss["batch_corrected"] = False
-    
+    ss["enable_batch_correction"] = False
+    ss["batch_method_selected"] = "ComBat (Empirical Bayes)"
+    ss["batch_num_selected"] = 2
+    ss["batch_correction_run_signature"] = None
+    ss["batch_correction_applied_method"] = "None"
+
+    # Clear temporary Streamlit widget keys used by the batch panel.
+    for _k in list(ss.keys()):
+        if (
+            str(_k).startswith("_ge_lfq_batch_")
+            or str(_k).startswith("batch_sel_")
+        ):
+            ss.pop(_k, None)
     ss["show_report"] = False
     ss["merged_ready"] = False
     ss["raw_merged_df"] = None
@@ -1667,6 +1689,11 @@ def main():
                     ss["filtered_df"] = None
                     ss["filtered_ready"] = False
                     ss["batch_corrected"] = False
+                    ss["enable_batch_correction"] = False
+                    ss["batch_dict"] = {}
+                    ss["batch_config"] = {}
+                    ss["batch_correction_run_signature"] = None
+                    ss["batch_correction_applied_method"] = "None"
                     st.success("Successfully built pGlyco label-free matrix!")
                 except Exception as e:
                     st.error(f"Processing failed: {e}")
@@ -1686,6 +1713,11 @@ def main():
                             ss["filtered_df"] = None
                             ss["filtered_ready"] = False
                             ss["batch_corrected"] = False
+                            ss["enable_batch_correction"] = False
+                            ss["batch_dict"] = {}
+                            ss["batch_config"] = {}
+                            ss["batch_correction_run_signature"] = None
+                            ss["batch_correction_applied_method"] = "None"
                             st.success(f"Successfully joined {len(msfragger_uploads)} files into {len(merged)} unique MSFragger glycoforms!")
                 except Exception as e:
                     st.error(f"MSFragger LFQ Processing failed: {e}")
@@ -1981,78 +2013,334 @@ def main():
             # ---- BATCH CORRECTION UI ----
             with st.container(border=True):
                 st.markdown("#### Batch Effect Correction")
-                apply_batch = st.toggle("Apply Batch Effect Correction", value=ss.get("batch_corrected", False))
-                
-                if apply_batch:
-                    batch_method = st.selectbox(
-                        "Batch Correction Method",
-                        options=[
-                            "ComBat (Empirical Bayes)", 
-                            "Median Centering", 
-                            "Mean Centering", 
-                            "Standardize (Mean + Variance)"
-                        ],
-                        help="ComBat is recommended for LFQ. Requires the 'neuroCombat' package."
-                    )
-                    
-                    num_batches = st.number_input("Number of Batches", min_value=2, max_value=10, value=2)
-                    batch_dict = {}
-                    unassigned_cols = sample_cols.copy()
-                    
-                    for b in range(num_batches):
-                        default_b = unassigned_cols[:max(1, len(unassigned_cols)//(num_batches-b))] if unassigned_cols else []
-                        b_cols = st.multiselect(
-                            f"Batch {b+1} Samples",
-                            options=sample_cols,
-                            default=default_b,
-                            format_func=fmt,
-                            key=f"batch_sel_{b}"
-                        )
-                        batch_dict[f"Batch {b+1}"] = b_cols
-                        unassigned_cols = [c for c in unassigned_cols if c not in b_cols]
 
-                    if st.button("Run Batch Correction", type="primary"):
-                        assigned_samples = set(c for cols in batch_dict.values() for c in cols)
-                        if not assigned_samples:
-                            st.error("Assign at least one sample to a batch.")
-                        else:
-                            try:
-                                # Pre-process for log2 (required for LFQ batch correction methods)
-                                tmp_vals = ss["raw_merged_df"][sample_cols].astype(float)
-                                tmp_vals[tmp_vals <= 0] = np.nan
-                                tmp_log = np.log2(tmp_vals)
-                                
-                                batch_list = list(batch_dict.values())
-                                
-                                corrected_log = apply_batch_correction(tmp_log, batch_list, batch_method)
-                                corrected_raw = (2 ** corrected_log).fillna(0)
-                                
-                                corrected_df = ss["raw_merged_df"].copy()
-                                corrected_df[sample_cols] = corrected_raw
-                                
-                                ss["merged_df"] = corrected_df
-                                ss["batch_dict"] = batch_dict
-                                ss["batch_corrected"] = True
-                                
-                                # Invalidate downstream
-                                ss["diffexp_df"] = None
-                                ss["diff_done"] = False
-                                st.success(f"{batch_method} applied successfully! Downstream analysis will use corrected abundances.")
-                                
-                            except ImportError as i_err:
-                                st.error(str(i_err))
-                            except RuntimeError as r_err:
-                                st.error(str(r_err))
-                            except Exception as e:
-                                st.error(f"Batch correction failed: {e}")
+                # Only samples assigned to biological groups are eligible.
+                batch_allowed_samples = [
+                    c for c in (ss.get("global_all_groups", []) or [])
+                    if c in sample_cols
+                ]
+
+                if not batch_allowed_samples:
+                    st.info(
+                        "Assign samples to Group 1/2/3 first before enabling batch correction."
+                    )
                 else:
-                    if ss.get("batch_corrected", False):
-                        st.info("Batch correction disabled. Restoring raw uncorrected data.")
-                        ss["merged_df"] = ss["raw_merged_df"].copy()
+                    # ---------------------------------------------------------
+                    # Persistent ON/OFF state
+                    # ---------------------------------------------------------
+                    if "_ge_lfq_batch_toggle" not in ss:
+                        ss["_ge_lfq_batch_toggle"] = bool(
+                            ss.get("enable_batch_correction", False)
+                        )
+
+                    apply_batch = st.toggle(
+                        "Apply Batch Effect Correction",
+                        key="_ge_lfq_batch_toggle"
+                    )
+                    ss["enable_batch_correction"] = bool(apply_batch)
+
+                    if apply_batch:
+                        with st.container(border=True):
+                            st.markdown("##### Batch Setup")
+
+                            # -------------------------------------------------
+                            # Persistent correction method
+                            # -------------------------------------------------
+                            batch_methods = [
+                                "ComBat (Empirical Bayes)",
+                                "Median Centering",
+                                "Mean Centering",
+                                "Standardize (Mean + Variance)"
+                            ]
+
+                            saved_method = ss.get(
+                                "batch_method_selected",
+                                batch_methods[0]
+                            )
+                            if saved_method not in batch_methods:
+                                saved_method = batch_methods[0]
+
+                            if "_ge_lfq_batch_method" not in ss:
+                                ss["_ge_lfq_batch_method"] = saved_method
+
+                            batch_method = st.selectbox(
+                                "Batch Correction Method",
+                                options=batch_methods,
+                                help=(
+                                    "ComBat is recommended for LFQ and requires "
+                                    "the 'neuroCombat' package."
+                                ),
+                                key="_ge_lfq_batch_method"
+                            )
+                            ss["batch_method_selected"] = batch_method
+
+                            # -------------------------------------------------
+                            # Persistent number of batches
+                            # -------------------------------------------------
+                            saved_n = int(ss.get("batch_num_selected", 2))
+                            saved_n = max(2, min(10, saved_n))
+
+                            if "_ge_lfq_num_batches" not in ss:
+                                ss["_ge_lfq_num_batches"] = saved_n
+
+                            num_batches = int(
+                                st.number_input(
+                                    "Number of Batches",
+                                    min_value=2,
+                                    max_value=10,
+                                    step=1,
+                                    key="_ge_lfq_num_batches"
+                                )
+                            )
+                            ss["batch_num_selected"] = num_batches
+
+                            # -------------------------------------------------
+                            # Persistent sample assignments
+                            # -------------------------------------------------
+                            stored_batch_config = (
+                                ss.get("batch_config", {})
+                                or ss.get("batch_dict", {})
+                                or {}
+                            )
+
+                            batch_dict = {}
+                            selected_so_far = []
+
+                            for b in range(num_batches):
+                                batch_name = f"Batch {b+1}"
+                                widget_key = f"_ge_lfq_batch_sel_{b}"
+
+                                if widget_key in ss:
+                                    prev_source = ss.get(widget_key, [])
+                                else:
+                                    prev_source = stored_batch_config.get(
+                                        batch_name, []
+                                    )
+
+                                prev_selected = [
+                                    c for c in (prev_source or [])
+                                    if c in batch_allowed_samples
+                                ]
+
+                                available_for_batch = [
+                                    c for c in batch_allowed_samples
+                                    if c not in selected_so_far
+                                    or c in prev_selected
+                                ]
+
+                                prev_selected = [
+                                    c for c in prev_selected
+                                    if c in available_for_batch
+                                ]
+
+                                # Re-seed widget state when the panel is rebuilt.
+                                ss[widget_key] = prev_selected
+
+                                b_cols = st.multiselect(
+                                    f"{batch_name} Samples",
+                                    options=available_for_batch,
+                                    format_func=fmt,
+                                    key=widget_key
+                                )
+
+                                b_cols = [
+                                    c for c in b_cols
+                                    if c in batch_allowed_samples
+                                ]
+
+                                batch_dict[batch_name] = b_cols
+                                selected_so_far.extend(
+                                    [c for c in b_cols if c not in selected_so_far]
+                                )
+
+                            # Save immediately so navigation cannot erase the setup.
+                            ss["batch_config"] = {
+                                k: list(v) for k, v in batch_dict.items()
+                            }
+
+                            assigned_samples = [
+                                c for cols in batch_dict.values() for c in cols
+                            ]
+
+                            duplicated = sorted({
+                                c for c in assigned_samples
+                                if sum(
+                                    c in cols
+                                    for cols in batch_dict.values()
+                                ) > 1
+                            })
+
+                            unassigned_samples = [
+                                c for c in batch_allowed_samples
+                                if c not in assigned_samples
+                            ]
+
+                            nonempty_batches = {
+                                k: v for k, v in batch_dict.items() if v
+                            }
+
+                            if duplicated:
+                                st.error(
+                                    "A sample cannot be assigned to more than one batch: "
+                                    + ", ".join([fmt(c) for c in duplicated])
+                                )
+
+                            if unassigned_samples:
+                                st.warning(
+                                    "These grouped samples are not assigned to any batch: "
+                                    + ", ".join(
+                                        [fmt(c) for c in unassigned_samples]
+                                    )
+                                )
+
+                            if len(nonempty_batches) < 2:
+                                st.warning(
+                                    "Assign samples to at least two non-empty batches."
+                                )
+
+                            current_signature = (
+                                batch_method,
+                                num_batches,
+                                tuple(
+                                    (name, tuple(cols))
+                                    for name, cols in batch_dict.items()
+                                )
+                            )
+
+                            # Changing the setup invalidates an earlier correction.
+                            previous_signature = ss.get(
+                                "batch_correction_run_signature"
+                            )
+                            if (
+                                ss.get("batch_corrected", False)
+                                and previous_signature is not None
+                                and previous_signature != current_signature
+                            ):
+                                ss["merged_df"] = ss["raw_merged_df"].copy()
+                                ss["batch_corrected"] = False
+                                ss["batch_dict"] = {}
+                                ss["batch_correction_applied_method"] = "None"
+                                ss["diffexp_df"] = None
+                                ss["filtered_df"] = None
+                                ss["diff_done"] = False
+                                ss["filtered_ready"] = False
+
+                                st.info(
+                                    "Batch configuration changed. "
+                                    "Click **Run Batch Correction** again."
+                                )
+
+                            can_run_batch = (
+                                not duplicated
+                                and not unassigned_samples
+                                and len(nonempty_batches) >= 2
+                            )
+
+                            if st.button(
+                                "Run Batch Correction",
+                                type="primary",
+                                key="run_batch_correction_btn_lfq",
+                                disabled=not can_run_batch
+                            ):
+                                try:
+                                    # LFQ batch correction is performed on log2 values.
+                                    # Always start from the original uncorrected matrix.
+                                    tmp_vals = (
+                                        ss["raw_merged_df"][batch_allowed_samples]
+                                        .apply(pd.to_numeric, errors="coerce")
+                                        .astype(float)
+                                    )
+                                    tmp_vals[tmp_vals <= 0] = np.nan
+                                    tmp_log = np.log2(tmp_vals)
+
+                                    batch_list = list(
+                                        nonempty_batches.values()
+                                    )
+
+                                    corrected_log = apply_batch_correction(
+                                        tmp_log,
+                                        batch_list,
+                                        batch_method
+                                    )
+
+                                    corrected_raw = (
+                                        2 ** corrected_log
+                                    ).fillna(0)
+
+                                    corrected_df = ss["raw_merged_df"].copy()
+                                    corrected_df[
+                                        batch_allowed_samples
+                                    ] = corrected_raw[
+                                        batch_allowed_samples
+                                    ]
+
+                                    ss["merged_df"] = corrected_df
+                                    ss["batch_dict"] = {
+                                        k: list(v)
+                                        for k, v in nonempty_batches.items()
+                                    }
+                                    ss["batch_config"] = {
+                                        k: list(v)
+                                        for k, v in batch_dict.items()
+                                    }
+                                    ss["batch_corrected"] = True
+                                    ss["batch_correction_run_signature"] = (
+                                        current_signature
+                                    )
+                                    ss["batch_correction_applied_method"] = (
+                                        batch_method
+                                    )
+
+                                    # Invalidate downstream results based on old data.
+                                    ss["diffexp_df"] = None
+                                    ss["filtered_df"] = None
+                                    ss["diff_done"] = False
+                                    ss["filtered_ready"] = False
+
+                                    st.success(
+                                        f"{batch_method} applied successfully. "
+                                        "QC PCA can show before or after batch correction, "
+                                        "and downstream analysis will use corrected abundances."
+                                    )
+
+                                except ImportError as i_err:
+                                    st.error(str(i_err))
+                                except RuntimeError as r_err:
+                                    st.error(str(r_err))
+                                except Exception as e:
+                                    st.error(
+                                        f"Batch correction failed: {e}"
+                                    )
+
+                            elif ss.get("batch_corrected", False):
+                                st.success(
+                                    f"{ss.get('batch_correction_applied_method', batch_method)} "
+                                    "applied successfully. QC PCA can show before or after "
+                                    "batch correction, and downstream analysis will use "
+                                    "corrected abundances."
+                                )
+
+                    else:
+                        # Turning correction OFF restores original abundances.
+                        # Keep batch_config so the setup can be restored if re-enabled.
+                        if (
+                            ss.get("batch_corrected", False)
+                            and isinstance(
+                                ss.get("raw_merged_df"),
+                                pd.DataFrame
+                            )
+                            and not ss["raw_merged_df"].empty
+                        ):
+                            ss["merged_df"] = ss["raw_merged_df"].copy()
+                            ss["diffexp_df"] = None
+                            ss["filtered_df"] = None
+                            ss["diff_done"] = False
+                            ss["filtered_ready"] = False
+
+                        ss["batch_dict"] = {}
                         ss["batch_corrected"] = False
-                        ss["diffexp_df"] = None
-                        ss["diff_done"] = False
-                        st.rerun()
+                        ss["batch_correction_run_signature"] = None
+                        ss["batch_correction_applied_method"] = "None"
 
         with right:
             with st.container(border=True):
@@ -2061,7 +2349,11 @@ def main():
                 group_samples = ss.get("global_group_samples", [])
                 group_labels = ss.get("global_group_labels", [])
                 control_idx = ss.get("global_control_group_idx", 0)
-                batch_dict = ss.get("batch_dict", {})
+                batch_dict = (
+                    ss.get("batch_config", {})
+                    if ss.get("enable_batch_correction", False)
+                    else ss.get("batch_dict", {})
+                )
 
                 rows = []
                 for col in sample_cols:
@@ -2075,7 +2367,11 @@ def main():
                     batch_name = "N/A"
                     for b_name, b_cols in batch_dict.items():
                         if col in b_cols:
-                            batch_name = b_name if ss.get("batch_corrected") else "Unassigned"
+                            batch_name = (
+                                b_name
+                                if ss.get("enable_batch_correction", False)
+                                else "Unassigned"
+                            )
                             break
 
                     rows.append({
@@ -2191,7 +2487,39 @@ def main():
 
                     if mode == "Principal Component Analysis (PCA)":
                         st.markdown("**PCA Display Options**")
-                        data_for_pca = df[all_groups].dropna()
+
+                        if (
+                            ss.get("batch_corrected", False)
+                            and isinstance(
+                                ss.get("raw_merged_df"),
+                                pd.DataFrame
+                            )
+                            and not ss["raw_merged_df"].empty
+                        ):
+                            pca_data_source = st.radio(
+                                "Data Source",
+                                [
+                                    "After Batch Correction",
+                                    "Before Batch Correction"
+                                ],
+                                horizontal=True,
+                                key="lfq_pca_data_source"
+                            )
+
+                            if pca_data_source == "Before Batch Correction":
+                                pca_source_df = ss["raw_merged_df"]
+                            else:
+                                pca_source_df = ss["merged_df"]
+
+                            st.caption(
+                                "Switch between the same samples before and after "
+                                "batch correction."
+                            )
+                        else:
+                            pca_data_source = "Current Data"
+                            pca_source_df = df
+
+                        data_for_pca = pca_source_df[all_groups].dropna()
                         if not data_for_pca.empty and len(data_for_pca.columns) > 0:
                             n_comps = min(10, data_for_pca.shape[0], data_for_pca.shape[1])
                             pc_cols = [f"PC{i+1}" for i in range(n_comps)]
@@ -2296,80 +2624,66 @@ def main():
                     if len(all_groups) >= 1:
                         batch_was_applied = (
                             ss.get("batch_corrected", False)
-                            and isinstance(ss.get("raw_merged_df"), pd.DataFrame)
+                            and isinstance(
+                                ss.get("raw_merged_df"),
+                                pd.DataFrame
+                            )
                             and not ss["raw_merged_df"].empty
                         )
 
                         if batch_was_applied:
-                            st.markdown(
-                                """
-                                <span style="
-                                    background-color:#e8f4ff;
-                                    color:#005a9c;
-                                    padding:5px 10px;
-                                    border-radius:999px;
-                                    font-size:0.85rem;
-                                    font-weight:600;
-                                ">
-                                Batch correction applied
-                                </span>
-                                """,
-                                unsafe_allow_html=True
+                            selected_pca_source = ss.get(
+                                "lfq_pca_data_source",
+                                "After Batch Correction"
                             )
-                            st.markdown("<br>", unsafe_allow_html=True)
-                            pca_col1, pca_col2 = st.columns(2, gap="large")
-                            with pca_col1:
-                                st.markdown("PCA Before Batch Correction")
-                                create_pca_plot(
-                                    df=ss["raw_merged_df"],
-                                    group_samples=group_samples,
-                                    group_labels=group_labels,
-                                    title="PCA Before Batch Correction",
-                                    pc_x=ss.get("pca_x", "PC1"),
-                                    pc_y=ss.get("pca_y", "PC2"),
-                                    draw_ellipses=ss.get("pca_draw_ellipses", False),
-                                    hide_outliers=ss.get("pca_hide_outliers", False),
-                                    label_outliers=ss.get("pca_label_outliers", True),
-                                    zoom_q=ss.get("pca_zoom_q", 1.0),
-                                    palette=ss.get("pca_palette", None),
-                                    quant_mode="LFQ",
-                                    key_suffix="before_batch"
-                                )
-                            with pca_col2:
-                                st.markdown("PCA After Batch Correction")
-                                create_pca_plot(
-                                    df=df,
-                                    group_samples=group_samples,
-                                    group_labels=group_labels,
-                                    title="PCA After Batch Correction",
-                                    pc_x=ss.get("pca_x", "PC1"),
-                                    pc_y=ss.get("pca_y", "PC2"),
-                                    draw_ellipses=ss.get("pca_draw_ellipses", False),
-                                    hide_outliers=ss.get("pca_hide_outliers", False),
-                                    label_outliers=ss.get("pca_label_outliers", True),
-                                    zoom_q=ss.get("pca_zoom_q", 1.0),
-                                    palette=ss.get("pca_palette", None),
-                                    quant_mode="LFQ",
-                                    key_suffix="after_batch"
-                                )
+
+                            if selected_pca_source == "Before Batch Correction":
+                                pca_df = ss["raw_merged_df"]
+                                pca_title = "PCA Before Batch Correction"
+                            else:
+                                pca_df = ss["merged_df"]
+                                pca_title = "PCA After Batch Correction"
+
+                            st.success(
+                                f"{ss.get('batch_correction_applied_method', 'Batch correction')} "
+                                "is active. Downstream analysis uses corrected abundances."
+                            )
+                            st.caption(
+                                "Use **Data Source** in PCA Display Options to switch "
+                                "between before and after batch correction."
+                            )
                         else:
-                            create_pca_plot(
-                                df=df,
-                                group_samples=group_samples,
-                                group_labels=group_labels,
-                                title="PCA",
-                                pc_x=ss.get("pca_x", "PC1"),
-                                pc_y=ss.get("pca_y", "PC2"),
-                                draw_ellipses=ss.get("pca_draw_ellipses", False),
-                                hide_outliers=ss.get("pca_hide_outliers", False),
-                                label_outliers=ss.get("pca_label_outliers", True),
-                                zoom_q=ss.get("pca_zoom_q", 1.0),
-                                palette=ss.get("pca_palette", None),
-                                quant_mode="LFQ",
-                                key_suffix="single_pca"
-                            )
+                            pca_df = df
+                            pca_title = "PCA"
+
+                        # One PCA at a time prevents duplicate download-button keys
+                        # created internally by create_pca_plot().
+                        create_pca_plot(
+                            df=pca_df,
+                            group_samples=group_samples,
+                            group_labels=group_labels,
+                            title=pca_title,
+                            pc_x=ss.get("pca_x", "PC1"),
+                            pc_y=ss.get("pca_y", "PC2"),
+                            draw_ellipses=ss.get(
+                                "pca_draw_ellipses", False
+                            ),
+                            hide_outliers=ss.get(
+                                "pca_hide_outliers", False
+                            ),
+                            label_outliers=ss.get(
+                                "pca_label_outliers", True
+                            ),
+                            zoom_q=ss.get("pca_zoom_q", 1.0),
+                            palette=ss.get("pca_palette", None),
+                            quant_mode="LFQ",
+                            key_suffix="single_pca"
+                        )
                     else:
-                        st.info("No samples available for PCA (check global selection).")
+                        st.info(
+                            "No samples available for PCA "
+                            "(check global selection)."
+                        )
 
                 elif ss.get("run_corr", False):
                     if len(all_groups) >= 2:

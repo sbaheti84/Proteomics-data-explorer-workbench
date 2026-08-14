@@ -8,7 +8,7 @@ $ROOT = (Get-Location).Path
 $env:GLYCOEXPLORER_HOSTED = "false"
 $env:GLYCOEXPLORER_SAVE_MODE = "dialog"
 
-Write-Host "Repository root: $ROOT"
+Write-Host "Repository root: $ROOT" 
 Write-Host "Cleaning old builds..."
 Remove-Item -Recurse -Force build, dist -ErrorAction SilentlyContinue
 Remove-Item -Force "$APP_NAME.spec" -ErrorAction SilentlyContinue
@@ -55,13 +55,17 @@ streamlit-desktop-app build app.py `
     "--theme.textColor=#1e293b" `
     "--theme.font=sans serif" `
   --pyinstaller-options `
-    --onefile `
+    --onedir `
     --paths "$ROOT" `
     --paths "$(Join-Path $ROOT 'ge')" `
     --paths "$(Join-Path $ROOT 'tp')" `
     --paths "$(Join-Path $ROOT 'faq')" `
     --add-data "$ROOT\app_launcher_*.py;." `
+    --add-data "$ROOT\total_proteome_lfq_naguider.py;." `
     --add-data "$ROOT\download_utility.py;." `
+    --add-data "$ROOT\naguider_impute.R;." `
+    --add-data "$ROOT\r_bundle\R;R" `
+    --add-data "$ROOT\r_bundle\library;R_library" `
     --hidden-import download_utility `
     --hidden-import tkinter `
     --hidden-import tkinter.filedialog `

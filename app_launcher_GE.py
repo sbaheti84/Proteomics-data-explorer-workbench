@@ -75,6 +75,14 @@ ss.setdefault("show_report", False)
 ss.setdefault("merged_df_before_batch", None)
 ss.setdefault("enable_batch_correction", False)
 
+# Permanent batch-configuration state.
+# These keys are deliberately separate from Streamlit widget keys so the
+# configuration survives when the Data Filtering panel is not rendered.
+ss.setdefault("batch_method_selected", "ComBat (Empirical Bayes)")
+ss.setdefault("batch_num_selected", 2)
+ss.setdefault("batch_config", {})
+ss.setdefault("irs_ref_config", {})
+
 # Explore tab flags
 for k in [
     "run_pca", "run_corr", "run_peptide_freq",
@@ -272,7 +280,24 @@ def _reset_all_data(clear_cache: bool = False):
     ss["global_control_group_idx"] = 0
     ss["global_all_groups"] = []
     ss["batch_dict"] = {}
+    ss["batch_config"] = {}
+    ss["irs_ref_config"] = {}
     ss["batch_corrected"] = False
+    ss["enable_batch_correction"] = False
+    ss["batch_method_selected"] = "ComBat (Empirical Bayes)"
+    ss["batch_num_selected"] = 2
+    ss["merged_df_before_batch"] = None
+
+    # Clear temporary Streamlit batch widget keys.
+    for _k in list(ss.keys()):
+        if (
+            str(_k).startswith("_ge_batch_")
+            or str(_k).startswith("_ge_irs_ref_")
+            or str(_k).startswith("batch_sel_")
+            or str(_k).startswith("irs_ref_")
+        ):
+            ss.pop(_k, None)
+
     ss["show_report"] = False
     ss["merged_ready"] = False
     ss["merged_df"] = None
@@ -1429,148 +1454,353 @@ def main():
                 if not batch_allowed_samples:
                     st.info("Assign samples to Group 1/2/3 first before enabling batch correction.")
                 else:
+                    # -------------------------------------------------------------
+                    # Persistent toggle
+                    # -------------------------------------------------------------
+                    # A temporary widget key is used because Streamlit may remove
+                    # widget keys when this panel is hidden. The permanent setting
+                    # remains in ss["enable_batch_correction"].
+                    if "_ge_batch_toggle" not in ss:
+                        ss["_ge_batch_toggle"] = bool(
+                            ss.get("enable_batch_correction", False)
+                        )
+
                     apply_batch = st.toggle(
                         "Apply Batch Effect Correction",
-                        value=ss.get("enable_batch_correction", False),
-                        key="enable_batch_correction"
+                        key="_ge_batch_toggle"
                     )
+                    ss["enable_batch_correction"] = bool(apply_batch)
 
                     if apply_batch:
-                        batch_method = st.selectbox(
-                            "Batch Correction Method",
-                            options=["ComBat (Empirical Bayes)", "Median Centering", "Internal Reference Scaling (IRS)"],
-                            help="ComBat requires neuroCombat. IRS requires a common pool channel across multiplexes.",
-                            key="batch_method_ui"
-                        )
+                        with st.container(border=True):
+                            st.markdown("##### Batch Setup")
 
-                        num_batches = st.radio(
-                            "Number of Batches",
-                            [2, 3, 4],
-                            horizontal=True,
-                            key="num_batches_ui"
-                        )
-
-                        batch_dict = {}
-                        selected_so_far = []
-
-                        for b in range(num_batches):
-                            prev_key = f"batch_sel_{b}"
-                            prev_selected = _sanitize(ss.get(prev_key, []), batch_allowed_samples)
-
-                            available_for_batch = [
-                                c for c in batch_allowed_samples
-                                if c not in selected_so_far or c in prev_selected
+                            # -----------------------------------------------------
+                            # Persistent batch method
+                            # -----------------------------------------------------
+                            batch_methods = [
+                                "ComBat (Empirical Bayes)",
+                                "Median Centering",
+                                "Internal Reference Scaling (IRS)"
                             ]
 
-                            prev_selected = _sanitize(prev_selected, available_for_batch)
+                            saved_method = ss.get(
+                                "batch_method_selected",
+                                batch_methods[0]
+                            )
+                            if saved_method not in batch_methods:
+                                saved_method = batch_methods[0]
 
-                            b_cols = st.multiselect(
-                                f"Batch {b+1} Samples",
-                                options=available_for_batch,
-                                default=prev_selected,
-                                format_func=fmt,
-                                key=prev_key
+                            if "_ge_batch_method" not in ss:
+                                ss["_ge_batch_method"] = saved_method
+
+                            batch_method = st.selectbox(
+                                "Batch Correction Method",
+                                options=batch_methods,
+                                help=(
+                                    "ComBat requires neuroCombat. "
+                                    "IRS requires a common pool channel across multiplexes."
+                                ),
+                                key="_ge_batch_method"
+                            )
+                            ss["batch_method_selected"] = batch_method
+
+                            # -----------------------------------------------------
+                            # Persistent number of batches
+                            # -----------------------------------------------------
+                            batch_count_options = [2, 3, 4]
+                            saved_num_batches = int(
+                                ss.get("batch_num_selected", 2)
+                            )
+                            if saved_num_batches not in batch_count_options:
+                                saved_num_batches = 2
+
+                            if "_ge_num_batches" not in ss:
+                                ss["_ge_num_batches"] = saved_num_batches
+
+                            num_batches = st.radio(
+                                "Number of Batches",
+                                batch_count_options,
+                                horizontal=True,
+                                key="_ge_num_batches"
+                            )
+                            ss["batch_num_selected"] = int(num_batches)
+
+                            # -----------------------------------------------------
+                            # Persistent batch sample assignments
+                            # -----------------------------------------------------
+                            # Prefer saved UI configuration. If this is an older
+                            # session, fall back to the batches used for the last
+                            # successful correction.
+                            stored_batch_config = (
+                                ss.get("batch_config", {})
+                                or ss.get("batch_dict", {})
+                                or {}
                             )
 
-                            b_cols = _sanitize(b_cols, batch_allowed_samples)
-                            batch_dict[f"Batch {b+1}"] = b_cols
-                            selected_so_far = _uniq(selected_so_far + b_cols)
+                            batch_dict = {}
+                            selected_so_far = []
 
-                        assigned_samples = _uniq([c for cols in batch_dict.values() for c in cols])
-                        unassigned_batch_samples = [
-                            c for c in batch_allowed_samples if c not in assigned_samples
-                        ]
+                            for b in range(num_batches):
+                                batch_name = f"Batch {b+1}"
+                                widget_key = f"_ge_batch_sel_{b}"
 
-                        if unassigned_batch_samples:
-                            st.warning(
-                                "These grouped samples are not assigned to any batch: "
-                                + ", ".join([fmt(c) for c in unassigned_batch_samples])
-                            )
-
-                        # Provide IRS Reference Dropdowns if IRS is chosen
-                        irs_ref_dict = {}
-                        if batch_method == "Internal Reference Scaling (IRS)":
-                            nonempty_batches_irs = {k: v for k, v in batch_dict.items() if v}
-                            if nonempty_batches_irs:
-                                st.markdown("**Select the Reference/Pool Sample for each batch:**")
-                                for b_name, b_cols in nonempty_batches_irs.items():
-                                    irs_ref_dict[b_name] = st.selectbox(
-                                        f"{b_name} Reference Channel",
-                                        options=b_cols,
-                                        format_func=fmt,
-                                        key=f"irs_ref_{b_name}"
+                                if widget_key in ss:
+                                    prev_source = ss.get(widget_key, [])
+                                else:
+                                    prev_source = stored_batch_config.get(
+                                        batch_name, []
                                     )
 
-                        if st.button("Run Batch Correction", type="primary", key="run_batch_correction_btn"):
-                            assigned_samples = _uniq([c for cols in batch_dict.values() for c in cols])
-                            nonempty_batches = {k: v for k, v in batch_dict.items() if v}
-
-                            duplicated = [
-                                c for c in assigned_samples
-                                if sum(c in cols for cols in batch_dict.values()) > 1
-                            ]
-
-                            if duplicated:
-                                st.error(
-                                    "A sample cannot be assigned to more than one batch: "
-                                    + ", ".join([fmt(c) for c in duplicated])
+                                prev_selected = _sanitize(
+                                    prev_source,
+                                    batch_allowed_samples
                                 )
 
-                            elif len(nonempty_batches) < 2:
-                                st.error("Please assign samples to at least two non-empty batches.")
+                                available_for_batch = [
+                                    c for c in batch_allowed_samples
+                                    if c not in selected_so_far
+                                    or c in prev_selected
+                                ]
 
-                            elif set(assigned_samples) != set(batch_allowed_samples):
-                                st.error("Please assign every grouped sample to one batch before running correction.")
+                                prev_selected = _sanitize(
+                                    prev_selected,
+                                    available_for_batch
+                                )
 
-                            else:
-                                try:
-                                    # Save raw/pre-correction matrix only once
-                                    if ss.get("merged_df_before_batch") is None or not ss.get("batch_corrected", False):
-                                        ss["merged_df_before_batch"] = ss["merged_df"].copy()
+                                # Seed the widget from permanent state when the
+                                # Data Filtering panel is rebuilt.
+                                ss[widget_key] = prev_selected
 
-                                    input_df_for_batch = ss["merged_df_before_batch"].copy()
+                                b_cols = st.multiselect(
+                                    f"{batch_name} Samples",
+                                    options=available_for_batch,
+                                    format_func=fmt,
+                                    key=widget_key
+                                )
 
-                                    if batch_method == "ComBat (Empirical Bayes)":
-                                        corrected_df = apply_combat_batch_correction(
-                                            input_df_for_batch,
-                                            nonempty_batches,
-                                            batch_allowed_samples
-                                        )
-                                    elif batch_method == "Internal Reference Scaling (IRS)":
-                                        corrected_df = apply_irs_batch_correction(
-                                            input_df_for_batch,
-                                            nonempty_batches,
-                                            irs_ref_dict,
-                                            batch_allowed_samples
-                                        )
-                                    else:
-                                        corrected_df = apply_median_centering_batch_correction(
-                                            input_df_for_batch,
-                                            nonempty_batches,
-                                            batch_allowed_samples
-                                        )
+                                b_cols = _sanitize(
+                                    b_cols,
+                                    batch_allowed_samples
+                                )
+                                batch_dict[batch_name] = b_cols
+                                selected_so_far = _uniq(
+                                    selected_so_far + b_cols
+                                )
 
-                                    ss["merged_df"] = corrected_df
-                                    ss["batch_dict"] = nonempty_batches
-                                    ss["batch_corrected"] = True
-                                    ss["diffexp_df"] = None
-                                    ss["filtered_df"] = None
-                                    ss["diff_done"] = False
-                                    ss["filtered_ready"] = False
+                            # Save assignments immediately, not only after the
+                            # correction button is clicked.
+                            ss["batch_config"] = {
+                                k: list(v) for k, v in batch_dict.items()
+                            }
 
-                                    st.success(
-                                        f"{batch_method} applied successfully. Downstream analysis will use corrected abundances."
+                            assigned_samples = _uniq(
+                                [
+                                    c
+                                    for cols in batch_dict.values()
+                                    for c in cols
+                                ]
+                            )
+
+                            unassigned_batch_samples = [
+                                c
+                                for c in batch_allowed_samples
+                                if c not in assigned_samples
+                            ]
+
+                            if unassigned_batch_samples:
+                                st.warning(
+                                    "These grouped samples are not assigned to any batch: "
+                                    + ", ".join(
+                                        [fmt(c) for c in unassigned_batch_samples]
+                                    )
+                                )
+
+                            # -----------------------------------------------------
+                            # Persistent IRS reference channels
+                            # -----------------------------------------------------
+                            irs_ref_dict = {}
+                            if batch_method == "Internal Reference Scaling (IRS)":
+                                nonempty_batches_irs = {
+                                    k: v for k, v in batch_dict.items() if v
+                                }
+
+                                if nonempty_batches_irs:
+                                    st.markdown(
+                                        "**Select the Reference/Pool Sample for each batch:**"
                                     )
 
-                                except ImportError as ie:
-                                    st.error(str(ie))
-                                except Exception as e:
-                                    st.error(f"Batch correction failed: {e}")
+                                    saved_irs_refs = ss.get(
+                                        "irs_ref_config", {}
+                                    ) or {}
+
+                                    for b_idx, (b_name, b_cols) in enumerate(
+                                        nonempty_batches_irs.items()
+                                    ):
+                                        irs_widget_key = f"_ge_irs_ref_{b_idx}"
+
+                                        saved_ref = saved_irs_refs.get(b_name)
+                                        if saved_ref not in b_cols:
+                                            saved_ref = b_cols[0]
+
+                                        if irs_widget_key not in ss:
+                                            ss[irs_widget_key] = saved_ref
+                                        elif ss[irs_widget_key] not in b_cols:
+                                            ss[irs_widget_key] = saved_ref
+
+                                        irs_ref_dict[b_name] = st.selectbox(
+                                            f"{b_name} Reference Channel",
+                                            options=b_cols,
+                                            format_func=fmt,
+                                            key=irs_widget_key
+                                        )
+
+                                    ss["irs_ref_config"] = dict(irs_ref_dict)
+
+                            # -----------------------------------------------------
+                            # Run correction
+                            # -----------------------------------------------------
+                            if st.button(
+                                "Run Batch Correction",
+                                type="primary",
+                                key="run_batch_correction_btn"
+                            ):
+                                assigned_samples = _uniq(
+                                    [
+                                        c
+                                        for cols in batch_dict.values()
+                                        for c in cols
+                                    ]
+                                )
+                                nonempty_batches = {
+                                    k: v
+                                    for k, v in batch_dict.items()
+                                    if v
+                                }
+
+                                duplicated = [
+                                    c
+                                    for c in assigned_samples
+                                    if sum(
+                                        c in cols
+                                        for cols in batch_dict.values()
+                                    ) > 1
+                                ]
+
+                                if duplicated:
+                                    st.error(
+                                        "A sample cannot be assigned to more than one batch: "
+                                        + ", ".join(
+                                            [fmt(c) for c in duplicated]
+                                        )
+                                    )
+
+                                elif len(nonempty_batches) < 2:
+                                    st.error(
+                                        "Please assign samples to at least two non-empty batches."
+                                    )
+
+                                elif set(assigned_samples) != set(batch_allowed_samples):
+                                    st.error(
+                                        "Please assign every grouped sample to one batch before running correction."
+                                    )
+
+                                else:
+                                    try:
+                                        # Always retain the original uncorrected
+                                        # matrix for PCA-before comparison and for
+                                        # restoring the data if correction is turned off.
+                                        if (
+                                            ss.get("merged_df_before_batch") is None
+                                            or not ss.get("batch_corrected", False)
+                                        ):
+                                            ss["merged_df_before_batch"] = (
+                                                ss["merged_df"].copy()
+                                            )
+
+                                        input_df_for_batch = (
+                                            ss["merged_df_before_batch"].copy()
+                                        )
+
+                                        if batch_method == "ComBat (Empirical Bayes)":
+                                            corrected_df = apply_combat_batch_correction(
+                                                input_df_for_batch,
+                                                nonempty_batches,
+                                                batch_allowed_samples
+                                            )
+
+                                        elif batch_method == "Internal Reference Scaling (IRS)":
+                                            corrected_df = apply_irs_batch_correction(
+                                                input_df_for_batch,
+                                                nonempty_batches,
+                                                irs_ref_dict,
+                                                batch_allowed_samples
+                                            )
+
+                                        else:
+                                            corrected_df = apply_median_centering_batch_correction(
+                                                input_df_for_batch,
+                                                nonempty_batches,
+                                                batch_allowed_samples
+                                            )
+
+                                        ss["merged_df"] = corrected_df
+                                        ss["batch_dict"] = {
+                                            k: list(v)
+                                            for k, v in nonempty_batches.items()
+                                        }
+                                        ss["batch_config"] = {
+                                            k: list(v)
+                                            for k, v in batch_dict.items()
+                                        }
+                                        ss["batch_method_selected"] = batch_method
+                                        ss["batch_num_selected"] = int(num_batches)
+                                        ss["batch_corrected"] = True
+
+                                        ss["diffexp_df"] = None
+                                        ss["filtered_df"] = None
+                                        ss["diff_done"] = False
+                                        ss["filtered_ready"] = False
+
+                                        st.success(
+                                            f"{batch_method} applied successfully. "
+                                            "QC PCA will show before and after batch correction, "
+                                            "and downstream analysis will use corrected abundances."
+                                        )
+
+                                    except ImportError as ie:
+                                        st.error(str(ie))
+                                    except Exception as e:
+                                        st.error(
+                                            f"Batch correction failed: {e}"
+                                        )
 
                     else:
+                        # If correction had already been applied, turning the
+                        # toggle OFF should restore the original data rather than
+                        # merely changing the flag while leaving corrected values.
+                        if (
+                            ss.get("batch_corrected", False)
+                            and isinstance(
+                                ss.get("merged_df_before_batch"),
+                                pd.DataFrame
+                            )
+                            and not ss["merged_df_before_batch"].empty
+                        ):
+                            ss["merged_df"] = (
+                                ss["merged_df_before_batch"].copy()
+                            )
+                            ss["diffexp_df"] = None
+                            ss["filtered_df"] = None
+                            ss["diff_done"] = False
+                            ss["filtered_ready"] = False
+
                         ss["batch_dict"] = {}
                         ss["batch_corrected"] = False
-                        ss["merged_df_before_batch"] = None
+
+                        # Keep batch_config and merged_df_before_batch so the
+                        # user's assignments can be restored if correction is
+                        # turned back on during this session.
 
         with right:
             with st.container(border=True):
@@ -1580,7 +1810,11 @@ def main():
                 group_samples = ss.get("global_group_samples", [])
                 group_labels  = ss.get("global_group_labels", [])
                 control_idx   = ss.get("global_control_group_idx", 0)
-                batch_dict    = ss.get("batch_dict", {})
+                batch_dict = (
+                    ss.get("batch_config", {})
+                    if ss.get("enable_batch_correction", False)
+                    else ss.get("batch_dict", {})
+                )
 
                 rows = []
                 for col in sample_cols:
@@ -1611,9 +1845,14 @@ def main():
 
                 st.dataframe(meta_df, width='stretch', hide_index=True)
 
+                # Pass CSV as bytes, not as a str. The centralized download utility
+                # treats strings as possible file paths; a full CSV string can exceed
+                # the OS filename-length limit and raise OSError: [Errno 63].
+                sample_metadata_csv = meta_df.to_csv(index=False).encode("utf-8")
+
                 add_hosted_safe_file_download_button(
                     label="Download sample metadata CSV",
-                    data=meta_df.to_csv(index=False),
+                    data=sample_metadata_csv,
                     file_name="sample_metadata_mapping.csv",
                     key="download_sample_metadata_csv",
                     use_container_width=True,
@@ -1887,6 +2126,11 @@ def main():
                         )
 
                         if batch_was_applied:
+                            st.caption(
+                                "Compare the same grouped samples before and after batch correction. "
+                                "A useful correction should reduce technical batch separation without "
+                                "removing the expected biological group structure."
+                            )
                             st.markdown(
                                 """
                                 <span style="

@@ -132,12 +132,30 @@ def _reset_all_data(clear_cache: bool = False):
     ss["global_all_groups"] = []
     
     ss["batch_dict"] = {}
+    ss["batch_config"] = {}
     ss["irs_ref_dict"] = {}
     ss["enable_batch_correction"] = False
     ss["batch_method_ui"] = "None"
+    ss["batch_num_selected"] = 2
+    ss["batch_correction_requested"] = False
+    ss["batch_correction_applied"] = False
+    ss["batch_correction_applied_method"] = "None"
+    ss["batch_correction_run_signature"] = None
+    ss["batch_correction_last_error"] = None
+
+    # Clear temporary Streamlit batch widget state.
+    for _k in list(ss.keys()):
+        if (
+            str(_k).startswith("_tp_tmt_batch_")
+            or str(_k).startswith("_tp_tmt_irs_")
+            or str(_k).startswith("batch_sel_")
+            or str(_k).startswith("irs_ref_")
+        ):
+            ss.pop(_k, None)
 
     ss["raw_df"] = None
     ss["expr_raw"] = None
+    ss["expr_pre_batch"] = None
     ss["expr_processed"] = None
     ss["diff_results"] = None
     ss["filtered_df"] = None
@@ -168,9 +186,17 @@ def init_session_state_defaults():
         "global_control_group_idx": 0,
         "global_all_groups": [],
         "batch_dict": {},
+        "batch_config": {},
         "irs_ref_dict": {},
         "enable_batch_correction": False,
         "batch_method_ui": "None",
+        "batch_num_selected": 2,
+        "batch_correction_requested": False,
+        "batch_correction_applied": False,
+        "batch_correction_applied_method": "None",
+        "batch_correction_run_signature": None,
+        "batch_correction_last_error": None,
+        "expr_pre_batch": None,
         "show_overview": False,
         "show_suite": False,
         "show_global_select": False,
@@ -266,6 +292,7 @@ def apply_batch_correction(df: pd.DataFrame, batch_dict: dict, method: str, is_l
     Handles mathematical differences depending on whether df is log2 transformed.
     """
     out = df.copy()
+    ss["batch_correction_last_error"] = None
     
     if method == "Internal Reference Scaling (IRS)":
         if not irs_refs:
@@ -334,7 +361,12 @@ def apply_batch_correction(df: pd.DataFrame, batch_dict: dict, method: str, is_l
                 
     elif method == "ComBat (Empirical Bayes)":
         if not HAS_COMBAT:
-            st.error("❌ The 'neuroCombat' package is not installed. Please run `pip install neuroCombat` to use this feature. Falling back to uncorrected data.")
+            msg = (
+                "The 'neuroCombat' package is not installed. "
+                "Please run `pip install neuroCombat` to use ComBat."
+            )
+            ss["batch_correction_last_error"] = msg
+            st.error(msg)
             return out
             
         sample_to_batch = {}
@@ -372,7 +404,12 @@ def apply_batch_correction(df: pd.DataFrame, batch_dict: dict, method: str, is_l
             out[valid_cols] = corrected_df
             
         except Exception as e:
-            st.error(f"ComBat correction failed: {e}. Check if your batches have too few samples or zero-variance rows. Falling back to uncorrected data.")
+            msg = (
+                f"ComBat correction failed: {e}. "
+                "Check if your batches have too few samples or zero-variance rows."
+            )
+            ss["batch_correction_last_error"] = msg
+            st.error(msg)
 
     return out
 
@@ -2410,112 +2447,386 @@ def main():
                     ss["global_control_group_idx"] = 0
                     st.info("Assign samples to groups to select a global reference.")
 
-            # ---- NEW BATCH CORRECTION UI ----
+            # ---- BATCH CORRECTION UI ----
             with st.container(border=True):
                 st.markdown("#### Batch Effect Correction")
+
                 batch_allowed_samples = ss.get("global_all_groups", [])
-                batch_allowed_samples = _sanitize(batch_allowed_samples, sample_cols)
+                batch_allowed_samples = _sanitize(
+                    batch_allowed_samples,
+                    sample_cols
+                )
 
                 if not batch_allowed_samples:
-                    st.info("Assign samples to biological groups first before enabling batch correction.")
+                    st.info(
+                        "Assign samples to biological groups first "
+                        "before enabling batch correction."
+                    )
                 else:
+                    # ---------------------------------------------------------
+                    # Persistent ON/OFF state
+                    # ---------------------------------------------------------
+                    # Use a temporary widget key and keep the permanent analysis
+                    # setting separately. Widget keys can disappear while this
+                    # workflow panel is hidden.
+                    if "_tp_tmt_batch_toggle" not in ss:
+                        ss["_tp_tmt_batch_toggle"] = bool(
+                            ss.get("enable_batch_correction", False)
+                        )
+
                     apply_batch = st.toggle(
                         "Apply Batch Effect Correction",
-                        value=ss.get("enable_batch_correction", False),
-                        key="enable_batch_correction"
+                        key="_tp_tmt_batch_toggle"
                     )
+                    ss["enable_batch_correction"] = bool(apply_batch)
 
                     if apply_batch:
-                        batch_method = st.selectbox(
-                            "Batch Correction Method",
-                            options=[
+                        with st.container(border=True):
+                            st.markdown("##### Batch Setup")
+
+                            # -------------------------------------------------
+                            # Persistent correction method
+                            # -------------------------------------------------
+                            batch_methods = [
                                 "ComBat (Empirical Bayes)",
                                 "Internal Reference Scaling (IRS)",
                                 "Median Centering",
                                 "Mean Centering",
                                 "Standardize (Mean + Variance)"
-                            ],
-                            help="IRS requires a common pool channel across multiplexes. ComBat requires neuroCombat.",
-                            key="batch_method_ui_sel"
-                        )
-                        ss["batch_method_ui"] = batch_method
-
-                        num_batches = st.radio("Number of Batches", [2, 3, 4], horizontal=True, key="num_batches_ui")
-
-                        batch_dict = {}
-                        selected_so_far = []
-
-                        for b in range(num_batches):
-                            prev_key = f"batch_sel_{b}"
-                            prev_selected = _sanitize(ss.get(prev_key, []), batch_allowed_samples)
-
-                            available_for_batch = [
-                                c for c in batch_allowed_samples
-                                if c not in selected_so_far or c in prev_selected
                             ]
 
-                            prev_selected = _sanitize(prev_selected, available_for_batch)
+                            saved_method = ss.get(
+                                "batch_method_ui",
+                                "ComBat (Empirical Bayes)"
+                            )
+                            if saved_method not in batch_methods:
+                                saved_method = "ComBat (Empirical Bayes)"
 
-                            b_cols = st.multiselect(
-                                f"Batch {b+1} Samples",
-                                options=available_for_batch,
-                                default=prev_selected,
-                                format_func=lambda x: pretty_labels.get(x, x),
-                                key=prev_key
+                            if "_tp_tmt_batch_method" not in ss:
+                                ss["_tp_tmt_batch_method"] = saved_method
+
+                            batch_method = st.selectbox(
+                                "Batch Correction Method",
+                                options=batch_methods,
+                                help=(
+                                    "IRS requires a common pool channel across "
+                                    "multiplexes. ComBat requires neuroCombat."
+                                ),
+                                key="_tp_tmt_batch_method"
+                            )
+                            ss["batch_method_ui"] = batch_method
+
+                            # -------------------------------------------------
+                            # Persistent number of batches
+                            # -------------------------------------------------
+                            batch_count_options = [2, 3, 4]
+                            saved_num_batches = int(
+                                ss.get("batch_num_selected", 2)
+                            )
+                            if saved_num_batches not in batch_count_options:
+                                saved_num_batches = 2
+
+                            if "_tp_tmt_batch_num" not in ss:
+                                ss["_tp_tmt_batch_num"] = saved_num_batches
+
+                            num_batches = st.radio(
+                                "Number of Batches",
+                                batch_count_options,
+                                horizontal=True,
+                                key="_tp_tmt_batch_num"
+                            )
+                            ss["batch_num_selected"] = int(num_batches)
+
+                            # -------------------------------------------------
+                            # Persistent sample assignments
+                            # -------------------------------------------------
+                            stored_batch_config = (
+                                ss.get("batch_config", {})
+                                or ss.get("batch_dict", {})
+                                or {}
                             )
 
-                            b_cols = _sanitize(b_cols, batch_allowed_samples)
-                            batch_dict[f"Batch {b+1}"] = b_cols
-                            selected_so_far = _uniq(selected_so_far + b_cols)
-                            
-                        ss["batch_dict"] = batch_dict
+                            batch_dict = {}
+                            selected_so_far = []
 
-                        assigned_samples = _uniq([c for cols in batch_dict.values() for c in cols])
-                        unassigned_batch_samples = [c for c in batch_allowed_samples if c not in assigned_samples]
+                            for b in range(num_batches):
+                                batch_name = f"Batch {b+1}"
+                                widget_key = f"_tp_tmt_batch_sel_{b}"
 
-                        if unassigned_batch_samples:
-                            st.warning(
-                                "These grouped samples are not assigned to any batch: "
-                                + ", ".join([pretty_labels.get(c, c) for c in unassigned_batch_samples])
-                            )
-                            
-                        irs_ref_dict = {}
-                        if batch_method == "Internal Reference Scaling (IRS)":
-                            nonempty_batches_irs = {k: v for k, v in batch_dict.items() if v}
-                            if nonempty_batches_irs:
-                                st.markdown("**Select the Reference/Pool Sample for each batch:**")
-                                for b_name, b_cols in nonempty_batches_irs.items():
-                                    irs_ref_dict[b_name] = st.selectbox(
-                                        f"{b_name} Reference Channel",
-                                        options=b_cols,
-                                        format_func=lambda x: pretty_labels.get(x, x),
-                                        key=f"irs_ref_{b_name}"
+                                if widget_key in ss:
+                                    prev_source = ss.get(widget_key, [])
+                                else:
+                                    prev_source = stored_batch_config.get(
+                                        batch_name, []
                                     )
-                                ss["irs_ref_dict"] = irs_ref_dict
 
-                        # --- Add the Execution Button Here ---
-                        if st.button("Run Batch Correction", type="primary", key="run_batch_correction_btn"):
-                            assigned_samples = _uniq([c for cols in batch_dict.values() for c in cols])
-                            nonempty_batches = {k: v for k, v in batch_dict.items() if v}
+                                prev_selected = _sanitize(
+                                    prev_source,
+                                    batch_allowed_samples
+                                )
+
+                                available_for_batch = [
+                                    c for c in batch_allowed_samples
+                                    if c not in selected_so_far
+                                    or c in prev_selected
+                                ]
+
+                                prev_selected = _sanitize(
+                                    prev_selected,
+                                    available_for_batch
+                                )
+
+                                # Re-seed the widget from permanent state when
+                                # the Data Filtering panel is reconstructed.
+                                ss[widget_key] = prev_selected
+
+                                b_cols = st.multiselect(
+                                    f"{batch_name} Samples",
+                                    options=available_for_batch,
+                                    format_func=lambda x: pretty_labels.get(x, x),
+                                    key=widget_key
+                                )
+
+                                b_cols = _sanitize(
+                                    b_cols,
+                                    batch_allowed_samples
+                                )
+                                batch_dict[batch_name] = b_cols
+                                selected_so_far = _uniq(
+                                    selected_so_far + b_cols
+                                )
+
+                            # Save immediately; do not wait for the Run button.
+                            ss["batch_config"] = {
+                                k: list(v)
+                                for k, v in batch_dict.items()
+                            }
+
+                            assigned_samples = _uniq(
+                                [
+                                    c
+                                    for cols in batch_dict.values()
+                                    for c in cols
+                                ]
+                            )
 
                             duplicated = [
-                                c for c in assigned_samples
-                                if sum(c in cols for cols in batch_dict.values()) > 1
+                                c
+                                for c in assigned_samples
+                                if sum(
+                                    c in cols
+                                    for cols in batch_dict.values()
+                                ) > 1
                             ]
+
+                            unassigned_batch_samples = [
+                                c
+                                for c in batch_allowed_samples
+                                if c not in assigned_samples
+                            ]
+
+                            nonempty_batches = {
+                                k: v
+                                for k, v in batch_dict.items()
+                                if v
+                            }
 
                             if duplicated:
                                 st.error(
-                                    "A sample cannot be assigned to more than one batch: "
-                                    + ", ".join([pretty_labels.get(c, c) for c in duplicated])
+                                    "A sample cannot be assigned to more than "
+                                    "one batch: "
+                                    + ", ".join(
+                                        [
+                                            pretty_labels.get(c, c)
+                                            for c in duplicated
+                                        ]
+                                    )
                                 )
-                            elif len(nonempty_batches) < 2:
-                                st.error("Please assign samples to at least two non-empty batches.")
+
+                            if unassigned_batch_samples:
+                                st.warning(
+                                    "These grouped samples are not assigned to "
+                                    "any batch: "
+                                    + ", ".join(
+                                        [
+                                            pretty_labels.get(c, c)
+                                            for c in unassigned_batch_samples
+                                        ]
+                                    )
+                                )
+
+                            if len(nonempty_batches) < 2:
+                                st.warning(
+                                    "Assign samples to at least two non-empty "
+                                    "batches."
+                                )
+
+                            # -------------------------------------------------
+                            # IRS reference channels
+                            # -------------------------------------------------
+                            irs_ref_dict = {}
+                            if batch_method == "Internal Reference Scaling (IRS)":
+                                if nonempty_batches:
+                                    st.markdown(
+                                        "**Select the Reference/Pool Sample "
+                                        "for each batch:**"
+                                    )
+
+                                    saved_irs = (
+                                        ss.get("irs_ref_dict", {}) or {}
+                                    )
+
+                                    for b_idx, (b_name, b_cols) in enumerate(
+                                        nonempty_batches.items()
+                                    ):
+                                        irs_key = f"_tp_tmt_irs_ref_{b_idx}"
+
+                                        saved_ref = saved_irs.get(b_name)
+                                        if saved_ref not in b_cols:
+                                            saved_ref = b_cols[0]
+
+                                        if irs_key not in ss:
+                                            ss[irs_key] = saved_ref
+                                        elif ss[irs_key] not in b_cols:
+                                            ss[irs_key] = saved_ref
+
+                                        irs_ref_dict[b_name] = st.selectbox(
+                                            f"{b_name} Reference Channel",
+                                            options=b_cols,
+                                            format_func=lambda x: (
+                                                pretty_labels.get(x, x)
+                                            ),
+                                            key=irs_key
+                                        )
+
+                                    ss["irs_ref_dict"] = dict(irs_ref_dict)
                             else:
-                                st.success(f"{batch_method} parameters saved! The correction will be mathematically applied in the Data Integrity module. Proceed to next tab to view the corrected PCA.")
+                                irs_ref_dict = {}
+
+                            current_signature = (
+                                batch_method,
+                                int(num_batches),
+                                tuple(
+                                    (name, tuple(cols))
+                                    for name, cols in batch_dict.items()
+                                ),
+                                tuple(
+                                    sorted(
+                                        (
+                                            str(k),
+                                            str(v)
+                                        )
+                                        for k, v in irs_ref_dict.items()
+                                    )
+                                )
+                            )
+
+                            previous_signature = ss.get(
+                                "batch_correction_run_signature"
+                            )
+
+                            if (
+                                ss.get("batch_correction_requested", False)
+                                and previous_signature is not None
+                                and previous_signature != current_signature
+                            ):
+                                ss["batch_correction_requested"] = False
+                                ss["batch_correction_applied"] = False
+                                ss["batch_correction_applied_method"] = "None"
+                                ss["expr_pre_batch"] = None
+                                ss["expr_processed"] = None
+                                ss["diff_results"] = None
+                                ss["filtered_df"] = None
+                                ss["filtered_ready"] = False
+
+                                st.info(
+                                    "Batch configuration changed. "
+                                    "Click **Run Batch Correction** again."
+                                )
+
+                            can_run_batch = (
+                                not duplicated
+                                and not unassigned_batch_samples
+                                and len(nonempty_batches) >= 2
+                            )
+
+                            if batch_method == "Internal Reference Scaling (IRS)":
+                                can_run_batch = (
+                                    can_run_batch
+                                    and len(irs_ref_dict)
+                                    == len(nonempty_batches)
+                                )
+
+                            if st.button(
+                                "Run Batch Correction",
+                                type="primary",
+                                key="run_batch_correction_btn",
+                                disabled=not can_run_batch,
+                                help=(
+                                    "Validate and lock this batch design. "
+                                    "The correction is then applied with the "
+                                    "selected preprocessing settings in the "
+                                    "Data Integrity module."
+                                )
+                            ):
+                                ss["batch_dict"] = {
+                                    k: list(v)
+                                    for k, v in nonempty_batches.items()
+                                }
+                                ss["batch_config"] = {
+                                    k: list(v)
+                                    for k, v in batch_dict.items()
+                                }
+                                if batch_method == "Internal Reference Scaling (IRS)":
+                                    ss["irs_ref_dict"] = dict(irs_ref_dict)
+
+                                ss["batch_correction_requested"] = True
+                                ss["batch_correction_applied"] = False
+                                ss["batch_correction_applied_method"] = batch_method
+                                ss["batch_correction_run_signature"] = current_signature
+                                ss["batch_correction_last_error"] = None
+
+                                ss["expr_pre_batch"] = None
+                                ss["expr_processed"] = None
+                                ss["diff_results"] = None
+                                ss["filtered_df"] = None
+                                ss["filtered_ready"] = False
+
+                                st.success(
+                                    f"{batch_method} batch setup saved. "
+                                    "Open Data Integrity Check & Sanity Profiling "
+                                    "to apply the correction with the selected "
+                                    "preprocessing settings."
+                                )
+
+                            elif ss.get("batch_correction_requested", False):
+                                if ss.get("batch_correction_applied", False):
+                                    st.success(
+                                        f"{ss.get('batch_correction_applied_method', batch_method)} "
+                                        "applied successfully. QC can compare "
+                                        "before and after batch correction, and "
+                                        "downstream analysis uses corrected abundances."
+                                    )
+                                else:
+                                    st.info(
+                                        f"{batch_method} batch setup is ready. "
+                                        "Open Data Integrity Check & Sanity Profiling "
+                                        "to apply the correction."
+                                    )
+
                     else:
                         ss["batch_dict"] = {}
                         ss["irs_ref_dict"] = {}
                         ss["batch_method_ui"] = "None"
+                        ss["batch_correction_requested"] = False
+                        ss["batch_correction_applied"] = False
+                        ss["batch_correction_applied_method"] = "None"
+                        ss["batch_correction_run_signature"] = None
+                        ss["expr_pre_batch"] = None
+                        ss["expr_processed"] = None
+                        ss["diff_results"] = None
+                        ss["filtered_df"] = None
+                        ss["filtered_ready"] = False
 
         with right:
             with st.container(border=True):
@@ -2538,7 +2849,11 @@ def main():
                                 
                         batch_name = "Unassigned"
                         if ss.get("enable_batch_correction"):
-                            for b_name, b_cols in ss.get("batch_dict", {}).items():
+                            visible_batch_dict = (
+                                ss.get("batch_config", {})
+                                or ss.get("batch_dict", {})
+                            )
+                            for b_name, b_cols in visible_batch_dict.items():
                                 if c in b_cols:
                                     batch_name = b_name
                                     break
@@ -2597,46 +2912,99 @@ def main():
                 pre_quant = st.checkbox("Quantile normalize", value=ss.get("pre_quantile", True), key="pre_quantile")
 
             with st.spinner("Processing Matrix..."):
-                expr_raw = df[["RowID"] + ss["global_all_groups"]].groupby("RowID").mean().apply(pd.to_numeric, errors="coerce")
+                expr_raw = (
+                    df[["RowID"] + ss["global_all_groups"]]
+                    .groupby("RowID")
+                    .mean()
+                    .apply(pd.to_numeric, errors="coerce")
+                )
                 expr_raw.rename(columns=pretty_labels, inplace=True)
-                expr_proc = expr_raw.copy()
-                
+
+                expr_base = expr_raw.copy()
+
                 # 1. Zero Handling
-                if pre_zero: 
-                    expr_proc = expr_proc.replace(0, np.nan)
-                    
+                if pre_zero:
+                    expr_base = expr_base.replace(0, np.nan)
+
                 # 2. Log2 Transform
                 if pre_log2:
-                    mn = expr_proc.min().min()
-                    if mn <= 0: 
-                        expr_proc = expr_proc + abs(mn) + 1e-6
-                    expr_proc = np.log2(expr_proc)
-                    
-                # 3. Batch Correction
+                    mn = expr_base.min().min()
+                    if pd.notna(mn) and mn <= 0:
+                        expr_base = expr_base + abs(mn) + 1e-6
+                    expr_base = np.log2(expr_base)
+
                 batch_method = ss.get("batch_method_ui", "None")
-                if ss.get("enable_batch_correction") and batch_method != "None":
+                batch_requested = (
+                    ss.get("enable_batch_correction", False)
+                    and ss.get("batch_correction_requested", False)
+                    and batch_method != "None"
+                )
+
+                expr_pre_batch = expr_base.copy()
+                expr_proc = expr_base.copy()
+
+                if batch_requested:
                     translated_batch_dict = {}
-                    for b_name, b_cols in ss["batch_dict"].items():
-                        translated_batch_dict[b_name] = [pretty_labels.get(c, c) for c in b_cols]
-                        
-                    translated_irs_refs = {k: pretty_labels.get(v, v) for k, v in ss.get("irs_ref_dict", {}).items()}
-                        
+                    for b_name, b_cols in ss.get("batch_dict", {}).items():
+                        translated_batch_dict[b_name] = [
+                            pretty_labels.get(c, c)
+                            for c in b_cols
+                        ]
+
+                    translated_irs_refs = {
+                        k: pretty_labels.get(v, v)
+                        for k, v in ss.get("irs_ref_dict", {}).items()
+                    }
+
                     expr_proc = apply_batch_correction(
-                        df=expr_proc, 
-                        batch_dict=translated_batch_dict, 
-                        method=batch_method, 
+                        df=expr_proc,
+                        batch_dict=translated_batch_dict,
+                        method=batch_method,
                         is_log2=pre_log2,
                         irs_refs=translated_irs_refs
                     )
-                    
+
+                    if ss.get("batch_correction_last_error"):
+                        ss["batch_correction_applied"] = False
+                    else:
+                        ss["batch_correction_applied"] = True
+                        ss["batch_correction_applied_method"] = batch_method
+                else:
+                    ss["batch_correction_applied"] = False
+                    ss["batch_correction_applied_method"] = "None"
+
                 # 4. Quantile Normalization
+                # Apply the same normalization to both matrices so Before/After
+                # PCA differs by batch correction rather than normalization.
                 if pre_quant:
+                    expr_pre_batch = quantile_normalize(expr_pre_batch)
                     expr_proc = quantile_normalize(expr_proc)
 
                 ss["expr_raw"] = expr_raw
+                ss["expr_pre_batch"] = expr_pre_batch
                 ss["expr_processed"] = expr_proc
 
-            st.success(f"Matrix processed! Tracking {expr_proc.shape[0]} unique protein features.")
+            if ss.get("batch_correction_applied", False):
+                st.success(
+                    f"{ss.get('batch_correction_applied_method', batch_method)} "
+                    "applied successfully. QC can compare before and after "
+                    "batch correction, and downstream analysis will use "
+                    "corrected abundances."
+                )
+            elif (
+                ss.get("enable_batch_correction", False)
+                and not ss.get("batch_correction_requested", False)
+            ):
+                st.warning(
+                    "Batch correction is enabled but has not been run. "
+                    "Return to Data Filtering & Group Specification and click "
+                    "**Run Batch Correction**."
+                )
+
+            st.success(
+                f"Matrix processed! Tracking "
+                f"{expr_proc.shape[0]} unique protein features."
+            )
         
         st.divider()    
         st.markdown("#### Quality Control Plots")
@@ -2653,10 +3021,34 @@ def main():
         with left_qc:
             with st.container(border=True):
                 
-                if pre_quant or pre_log2 or ss.get("enable_batch_correction"):
-                    view_data = st.radio("Data Source:", ["Processed", "Raw (Un-transformed)"])
+                if ss.get("batch_correction_applied", False):
+                    view_data = st.radio(
+                        "Data Source:",
+                        [
+                            "After Batch Correction",
+                            "Before Batch Correction",
+                            "Raw (Un-transformed)"
+                        ],
+                        key="tmt_qc_data_source"
+                    )
+
+                    if view_data == "Before Batch Correction":
+                        qc_target = ss["expr_pre_batch"]
+                    elif view_data == "Raw (Un-transformed)":
+                        qc_target = expr_raw
+                    else:
+                        qc_target = expr_proc
+
+                elif pre_quant or pre_log2:
+                    view_data = st.radio(
+                        "Data Source:",
+                        ["Processed", "Raw (Un-transformed)"],
+                        key="tmt_qc_data_source"
+                    )
                     if view_data == "Raw (Un-transformed)":
                         qc_target = expr_raw
+                    else:
+                        qc_target = expr_proc
 
                 qc_mode = st.radio(
                     "Select QC Plot:", 
@@ -2719,13 +3111,39 @@ def main():
 
         with right_qc:
             if qc_mode == "PCA":
-                short_groups = [[pretty_labels[c] for c in gcols] for gcols in ss["global_group_samples"]]
-                
+                short_groups = [
+                    [pretty_labels[c] for c in gcols]
+                    for gcols in ss["global_group_samples"]
+                ]
+
+                pca_title = "PCA of Samples"
+
+                if ss.get("batch_correction_applied", False):
+                    selected_source = ss.get(
+                        "tmt_qc_data_source",
+                        "After Batch Correction"
+                    )
+
+                    if selected_source == "Before Batch Correction":
+                        pca_title = "PCA Before Batch Correction"
+                    elif selected_source == "After Batch Correction":
+                        pca_title = "PCA After Batch Correction"
+                    elif selected_source == "Raw (Un-transformed)":
+                        pca_title = "PCA of Raw TMT Abundances"
+
+                    st.caption(
+                        "Use **Data Source** on the left to switch between "
+                        "Before Batch Correction and After Batch Correction."
+                    )
+
+                # Keep exactly one PCA plot on the page. create_pca_plot()
+                # creates its own download buttons, so this avoids duplicate
+                # Streamlit element keys.
                 fig = create_pca_plot(
                     df=qc_target,
                     group_samples=short_groups,
                     group_labels=ss["global_group_labels"],
-                    title="PCA of Samples",
+                    title=pca_title,
                     pc_x=ss.get("pca_x", "PC1"),
                     pc_y=ss.get("pca_y", "PC2"),
                     hide_outliers=ss.get("pca_hide_outliers", False),

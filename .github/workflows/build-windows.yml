@@ -16,17 +16,88 @@ jobs:
         with:
           python-version: "3.12.8"
 
+      # NEW ------------------------------------------------------
+      - name: Set up R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: "4.5.1"
+          use-public-rspm: true
+
+      # Restore the exact R environment from renv.lock
+      - name: Restore R dependencies
+        uses: r-lib/actions/setup-renv@v2
+      # ----------------------------------------------------------
+
+      - name: Verify R / NAguideR
+        shell: powershell
+        run: |
+          Rscript --version
+
+          Rscript -e "
+          pkgs <- c(
+            'NAguideR',
+            'e1071',
+            'impute',
+            'SeqKnn',
+            'pcaMethods',
+            'norm',
+            'imputeLCMD',
+            'VIM',
+            'rrcovNA',
+            'mice',
+            'missForest',
+            'GMSimpute',
+            'DreamAI'
+          );
+          for (p in pkgs)
+            cat(sprintf('%-15s %s\n',
+              p,
+              if (requireNamespace(p, quietly=TRUE)) 'OK' else 'MISSING'
+            ))
+          "
+
+      # NEW: copy R + project R library into folders that
+      # PyInstaller can package.
+      - name: Stage bundled R runtime
+        shell: powershell
+        run: |
+          $ROOT = (Get-Location).Path
+
+          $RHOME = (& Rscript -e "cat(R.home())").Trim()
+          $RLIB  = (& Rscript -e "cat(.libPaths()[1])").Trim()
+
+          Write-Host "R_HOME = $RHOME"
+          Write-Host "R library = $RLIB"
+
+          Remove-Item -Recurse -Force "$ROOT\r_bundle" -ErrorAction SilentlyContinue
+
+          New-Item -ItemType Directory -Force "$ROOT\r_bundle\R" | Out-Null
+          New-Item -ItemType Directory -Force "$ROOT\r_bundle\library" | Out-Null
+
+          Write-Host "Copying R runtime..."
+          Copy-Item -Recurse -Force "$RHOME\*" "$ROOT\r_bundle\R\"
+
+          Write-Host "Copying R packages..."
+          Copy-Item -Recurse -Force "$RLIB\*" "$ROOT\r_bundle\library\"
+
+          Write-Host "Checking bundled Rscript..."
+          Get-ChildItem -Recurse "$ROOT\r_bundle\R" -Filter "Rscript.exe"
+
+          Write-Host "Bundled R library:"
+          Get-ChildItem "$ROOT\r_bundle\library" | Select-Object Name
+
       - name: Show repository contents
         shell: powershell
         run: |
           Write-Host "Current directory:"
           Get-Location
-          Write-Host "Top-level repository files:"
-          Get-ChildItem -Force | Select-Object Name, Mode, Length | Format-Table -AutoSize
-          Write-Host "Assets folder:"
-          if (Test-Path "assets") { Get-ChildItem -Recurse assets | Select-Object FullName, Length | Format-Table -AutoSize } else { Write-Host "assets folder is missing" }
 
-      - name: Install dependencies
+          Write-Host "Top-level repository files:"
+          Get-ChildItem -Force |
+            Select-Object Name, Mode, Length |
+            Format-Table -AutoSize
+
+      - name: Install Python dependencies
         shell: powershell
         run: |
           python -m pip install --upgrade pip
@@ -41,20 +112,19 @@ jobs:
       - name: Show build output
         shell: powershell
         run: |
-          Write-Host "Listing dist folder:"
           Get-ChildItem -Recurse dist
 
       - name: Zip Windows app
         shell: powershell
         run: |
-          if (Test-Path "dist\ProteomicsWorkbench.exe") {
-            Compress-Archive -Path "dist\ProteomicsWorkbench.exe" -DestinationPath "ProteomicsWorkbench-Windows.zip" -Force
-          }
-          elseif (Test-Path "dist\ProteomicsWorkbench") {
-            Compress-Archive -Path "dist\ProteomicsWorkbench\*" -DestinationPath "ProteomicsWorkbench-Windows.zip" -Force
+          if (Test-Path "dist\ProteomicsWorkbench") {
+            Compress-Archive `
+              -Path "dist\ProteomicsWorkbench\*" `
+              -DestinationPath "ProteomicsWorkbench-Windows.zip" `
+              -Force
           }
           else {
-            Write-Error "Could not find ProteomicsWorkbench build output in dist."
+            Write-Error "Could not find ProteomicsWorkbench build output."
           }
 
       - name: Upload Windows app
