@@ -1,87 +1,244 @@
-#!/usr/bin/env Rscript
+options(
+  repos = c(
+    CRAN = "https://cloud.r-project.org"
+  )
+)
 
-# Install the R backend used by the Streamlit LFQ + NAguideR integration.
-# This installs NAguideR plus the method-specific packages required by the
-# 23 imputation choices exposed in the Python application.
+cat("R version:\n")
+print(R.version.string)
 
-options(repos = c(CRAN = "https://cloud.r-project.org"))
+# ------------------------------------------------------------
+# Basic installer packages
+# ------------------------------------------------------------
 
-install_cran_if_missing <- function(pkgs) {
-  missing <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly = TRUE)]
-  if (length(missing)) {
-    message("Installing CRAN packages: ", paste(missing, collapse = ", "))
-    install.packages(missing, dependencies = NA)
+cran_bootstrap <- c(
+  "remotes",
+  "BiocManager"
+)
+
+for (pkg in cran_bootstrap) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg)
   }
 }
 
-install_cran_if_missing(c("remotes", "BiocManager"))
 
-# Bioconductor packages used directly by NAguideR methods.
-bioc_pkgs <- c("impute", "pcaMethods")
-missing_bioc <- bioc_pkgs[!vapply(bioc_pkgs, requireNamespace, logical(1), quietly = TRUE)]
-if (length(missing_bioc)) {
-  message("Installing Bioconductor packages: ", paste(missing_bioc, collapse = ", "))
-  BiocManager::install(missing_bioc, ask = FALSE, update = FALSE)
+# ------------------------------------------------------------
+# CRAN packages
+# ------------------------------------------------------------
+
+cran_packages <- c(
+  "e1071",
+  "norm",
+  "imputeLCMD",
+  "VIM",
+  "rrcovNA",
+  "mice",
+  "missForest",
+  "randomForest",
+  "glmnet",
+  "foreach",
+  "itertools",
+  "iterators"
+)
+
+for (pkg in cran_packages) {
+
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+
+    cat("Installing CRAN package:", pkg, "\n")
+
+    tryCatch(
+      install.packages(pkg),
+      error = function(e) {
+        cat("FAILED:", pkg, "\n")
+        cat(conditionMessage(e), "\n")
+      }
+    )
+  }
 }
 
-# Core CRAN packages called directly by the Streamlit R bridge.
-install_cran_if_missing(c(
-  "e1071", "norm", "imputeLCMD", "VIM", "rrcovNA", "mice", "missForest"
-))
 
-# NAguideR documents these archived/modified packages for local installation.
+# ------------------------------------------------------------
+# Bioconductor packages
+# ------------------------------------------------------------
+
+bioc_packages <- c(
+  "impute",
+  "pcaMethods"
+)
+
+for (pkg in bioc_packages) {
+
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+
+    cat("Installing Bioconductor package:", pkg, "\n")
+
+    tryCatch(
+      BiocManager::install(
+        pkg,
+        ask = FALSE,
+        update = FALSE
+      ),
+      error = function(e) {
+        cat("FAILED:", pkg, "\n")
+        cat(conditionMessage(e), "\n")
+      }
+    )
+  }
+}
+
+
+# ------------------------------------------------------------
+# NAguideR special source packages
+# ------------------------------------------------------------
+
+gms_file <- file.path(
+  getwd(),
+  "r_packages",
+  "GMSimpute_0.0.1.1.tar.gz"
+)
+
+seqknn_file <- file.path(
+  getwd(),
+  "r_packages",
+  "SeqKnn_1.0.1.tar.gz"
+)
+
+
+if (!requireNamespace("GMSimpute", quietly = TRUE)) {
+
+  if (!file.exists(gms_file)) {
+    stop(
+      paste(
+        "Missing required file:",
+        gms_file
+      )
+    )
+  }
+
+  cat("Installing GMSimpute from:", gms_file, "\n")
+
+  install.packages(
+    gms_file,
+    repos = NULL,
+    type = "source"
+  )
+}
+
+
 if (!requireNamespace("SeqKnn", quietly = TRUE)) {
-  message("Installing SeqKnn from the NAguideR repository ...")
-  remotes::install_url(
-    "https://raw.githubusercontent.com/wangshisheng/NAguideR/master/SeqKnn_1.0.1.tar.gz",
-    upgrade = "never",
-    dependencies = NA
+
+  if (!file.exists(seqknn_file)) {
+    stop(
+      paste(
+        "Missing required file:",
+        seqknn_file
+      )
+    )
+  }
+
+  cat("Installing SeqKnn from:", seqknn_file, "\n")
+
+  install.packages(
+    seqknn_file,
+    repos = NULL,
+    type = "source"
   )
 }
 
-if (!requireNamespace("GMSImpute", quietly = TRUE)) {
-  message("Installing NAguideR-modified GMSImpute ...")
-  remotes::install_url(
-    "https://raw.githubusercontent.com/wangshisheng/NAguideR/master/GMSimpute_0.0.1.1.tar.gz",
-    upgrade = "never",
-    dependencies = NA
-  )
-}
+
+# ------------------------------------------------------------
+# DreamAI
+#
+# IMPORTANT:
+# Package is inside /Code in the GitHub repository.
+# ------------------------------------------------------------
 
 if (!requireNamespace("DreamAI", quietly = TRUE)) {
-  message("Installing DreamAI from GitHub ...")
+
+  cat("Installing DreamAI from GitHub...\n")
+
   remotes::install_github(
     "WangLab-MSSM/DreamAI/Code",
-    upgrade = "never",
-    dependencies = NA
+    dependencies = TRUE,
+    upgrade = "never"
   )
 }
 
-# Install the NAguideR package after SeqKnn and the Bioconductor dependencies
-# are present. NAguideR itself is used by the trKNN implementation and provides
-# provenance for the R-backed workflow. Its normal Imports are installed here.
+
+# ------------------------------------------------------------
+# NAguideR
+# ------------------------------------------------------------
+
 if (!requireNamespace("NAguideR", quietly = TRUE)) {
-  message("Installing NAguideR from GitHub ...")
+
+  cat("Installing NAguideR...\n")
+
   remotes::install_github(
     "wangshisheng/NAguideR",
-    upgrade = "never",
-    dependencies = NA
+    dependencies = TRUE,
+    upgrade = "never"
   )
 }
 
-cat("\nNAguideR LFQ backend package check:\n")
-check <- c(
-  "NAguideR", "e1071", "impute", "SeqKnn", "pcaMethods", "norm",
-  "imputeLCMD", "VIM", "rrcovNA", "mice", "missForest", "GMSimpute", "DreamAI"
+
+# ------------------------------------------------------------
+# Final validation
+# ------------------------------------------------------------
+
+required_packages <- c(
+  "NAguideR",
+  "e1071",
+  "impute",
+  "SeqKnn",
+  "pcaMethods",
+  "norm",
+  "imputeLCMD",
+  "VIM",
+  "rrcovNA",
+  "mice",
+  "missForest",
+  "GMSimpute",
+  "DreamAI"
 )
-status <- vapply(check, requireNamespace, logical(1), quietly = TRUE)
-for (p in check) {
-  cat(sprintf("  %-12s %s\n", p, if (status[[p]]) "OK" else "MISSING"))
+
+
+cat("\n========================================\n")
+cat("Final package validation\n")
+cat("========================================\n")
+
+failed <- character()
+
+for (pkg in required_packages) {
+
+  ok <- requireNamespace(
+    pkg,
+    quietly = TRUE
+  )
+
+  cat(
+    sprintf(
+      "%-15s %s\n",
+      pkg,
+      if (ok) "OK" else "MISSING"
+    )
+  )
+
+  if (!ok) {
+    failed <- c(failed, pkg)
+  }
 }
 
-if (!all(status)) {
-  missing <- names(status)[!status]
-  stop("Installation finished with missing packages: ", paste(missing, collapse = ", "))
+
+if (length(failed) > 0) {
+
+  stop(
+    paste(
+      "Failed to install:",
+      paste(failed, collapse = ", ")
+    )
+  )
 }
 
-cat("\nAll R packages required by the LFQ NAguideR backend are available.\n")
+cat("\nAll required R packages are installed.\n")
