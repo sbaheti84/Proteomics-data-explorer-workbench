@@ -1,41 +1,39 @@
 # ============================================================
 # install_naguider_r_dependencies.R
 #
-# Install all R dependencies required by:
-#   - NAguideR
-#   - SeqKnn
-#   - GMSimpute
-#   - DreamAI
+# Complete R dependency installer for:
+#   Proteomics-data-explorer-workbench
+#   NAguideR
+#   GMSImpute
+#   SeqKnn
+#   DreamAI
 #
-# Designed for:
-#   - GitHub Actions
-#   - Windows
-#   - R 4.5.x
-#   - Bundling into PyInstaller application
+# Expected files:
 #
-# Required repository files:
-#
-#   r_packages/SeqKnn_1.0.1.tar.gz
 #   r_packages/GMSimpute_0.0.1.1.tar.gz
+#   r_packages/SeqKnn_1.0.1.tar.gz
 #
+# Tested/designed for:
+#   Windows GitHub Actions
+#   R 4.5.x
 # ============================================================
 
 
-# ------------------------------------------------------------
-# Global options
-# ------------------------------------------------------------
+# ============================================================
+# Global configuration
+# ============================================================
 
 options(
     repos = c(
         CRAN = "https://cloud.r-project.org"
     ),
-    Ncpus = 2,
-    timeout = 1200
+    timeout = 1800,
+    Ncpus = 2
 )
 
 cat("\n")
 cat("============================================================\n")
-cat("NAguideR dependency installation\n")
+cat(" NAguideR R Dependency Installation\n")
 cat("============================================================\n")
 
 cat("\nR version:\n")
@@ -47,7 +45,7 @@ cat(R.version$platform, "\n")
 cat("\nR_HOME:\n")
 cat(R.home(), "\n")
 
-cat("\nLibrary paths:\n")
+cat("\nR library paths:\n")
 print(.libPaths())
 
 cat("\nCRAN repository:\n")
@@ -55,24 +53,44 @@ print(getOption("repos"))
 
 
 # ============================================================
-# Helper functions
+# Helper: package installed?
 # ============================================================
 
+package_ok <- function(pkg) {
 
-install_cran_package <- function(pkg) {
+    requireNamespace(
+        pkg,
+        quietly = TRUE
+    )
+}
 
-    if (requireNamespace(pkg, quietly = TRUE)) {
 
-        version <- tryCatch(
-            as.character(packageVersion(pkg)),
-            error = function(e) "unknown"
-        )
+# ============================================================
+# Helper: package version
+# ============================================================
+
+package_version_safe <- function(pkg) {
+
+    tryCatch(
+        as.character(packageVersion(pkg)),
+        error = function(e) "unknown"
+    )
+}
+
+
+# ============================================================
+# Helper: install CRAN package
+# ============================================================
+
+install_cran <- function(pkg) {
+
+    if (package_ok(pkg)) {
 
         cat(
             sprintf(
-                "CRAN %-20s already installed [%s]\n",
+                "%-22s already installed [%s]\n",
                 pkg,
-                version
+                package_version_safe(pkg)
             )
         )
 
@@ -84,8 +102,9 @@ install_cran_package <- function(pkg) {
     cat("Installing CRAN package:", pkg, "\n")
     cat("------------------------------------------------------------\n")
 
-    tryCatch(
+    result <- tryCatch(
         {
+
             install.packages(
                 pkg,
                 dependencies = c(
@@ -94,38 +113,34 @@ install_cran_package <- function(pkg) {
                     "LinkingTo"
                 )
             )
+
+            TRUE
+
         },
         error = function(e) {
 
-            cat("\nFAILED installing CRAN package:", pkg, "\n")
-            cat("Error:", conditionMessage(e), "\n")
+            cat("\nERROR installing:", pkg, "\n")
+            cat(conditionMessage(e), "\n")
 
-            stop(
-                paste(
-                    "Failed to install CRAN package:",
-                    pkg
-                ),
-                call. = FALSE
-            )
+            FALSE
         }
     )
 
-    if (!requireNamespace(pkg, quietly = TRUE)) {
+    if (!result || !package_ok(pkg)) {
 
         stop(
-            paste(
-                "CRAN package installation completed but",
-                pkg,
-                "cannot be loaded."
+            paste0(
+                "CRAN package installation failed: ",
+                pkg
             ),
             call. = FALSE
         )
     }
 
     cat(
-        "Successfully installed:",
+        "Installed:",
         pkg,
-        as.character(packageVersion(pkg)),
+        package_version_safe(pkg),
         "\n"
     )
 
@@ -133,20 +148,32 @@ install_cran_package <- function(pkg) {
 }
 
 
-install_bioc_package <- function(pkg) {
+# ============================================================
+# Bootstrap BiocManager and remotes
+# ============================================================
 
-    if (requireNamespace(pkg, quietly = TRUE)) {
+cat("\n")
+cat("============================================================\n")
+cat(" Installing package managers\n")
+cat("============================================================\n")
 
-        version <- tryCatch(
-            as.character(packageVersion(pkg)),
-            error = function(e) "unknown"
-        )
+install_cran("remotes")
+install_cran("BiocManager")
+
+
+# ============================================================
+# Helper: install Bioconductor package
+# ============================================================
+
+install_bioc <- function(pkg) {
+
+    if (package_ok(pkg)) {
 
         cat(
             sprintf(
-                "Bioc %-20s already installed [%s]\n",
+                "%-22s already installed [%s]\n",
                 pkg,
-                version
+                package_version_safe(pkg)
             )
         )
 
@@ -160,25 +187,19 @@ install_bioc_package <- function(pkg) {
 
     tryCatch(
         {
+
             BiocManager::install(
                 pkg,
                 ask = FALSE,
                 update = FALSE
             )
+
         },
         error = function(e) {
 
-            cat(
-                "\nFAILED installing Bioconductor package:",
-                pkg,
-                "\n"
-            )
-
-            cat(
-                "Error:",
-                conditionMessage(e),
-                "\n"
-            )
+            cat("\nBioconductor installation error\n")
+            cat("Package:", pkg, "\n")
+            cat("Error:", conditionMessage(e), "\n")
 
             stop(
                 paste(
@@ -190,126 +211,21 @@ install_bioc_package <- function(pkg) {
         }
     )
 
-    if (!requireNamespace(pkg, quietly = TRUE)) {
+    if (!package_ok(pkg)) {
 
         stop(
             paste(
-                "Bioconductor package installation completed but",
-                pkg,
-                "cannot be loaded."
+                "Bioconductor package is still unavailable:",
+                pkg
             ),
             call. = FALSE
         )
     }
 
     cat(
-        "Successfully installed:",
+        "Installed:",
         pkg,
-        as.character(packageVersion(pkg)),
-        "\n"
-    )
-
-    invisible(TRUE)
-}
-
-
-install_local_package <- function(pkg, file) {
-
-    if (requireNamespace(pkg, quietly = TRUE)) {
-
-        version <- tryCatch(
-            as.character(packageVersion(pkg)),
-            error = function(e) "unknown"
-        )
-
-        cat(
-            sprintf(
-                "LOCAL %-19s already installed [%s]\n",
-                pkg,
-                version
-            )
-        )
-
-        return(invisible(TRUE))
-    }
-
-    if (!file.exists(file)) {
-
-        stop(
-            paste(
-                "Required local R package does not exist:",
-                file
-            ),
-            call. = FALSE
-        )
-    }
-
-    file <- normalizePath(
-        file,
-        winslash = "/",
-        mustWork = TRUE
-    )
-
-    cat("\n")
-    cat("------------------------------------------------------------\n")
-    cat("Installing local package:", pkg, "\n")
-    cat("Source:", file, "\n")
-    cat("------------------------------------------------------------\n")
-
-    tryCatch(
-        {
-            install.packages(
-                file,
-                repos = NULL,
-                type = "source"
-            )
-        },
-        error = function(e) {
-
-            cat(
-                "\nFAILED installing local package:",
-                pkg,
-                "\n"
-            )
-
-            cat(
-                "Source:",
-                file,
-                "\n"
-            )
-
-            cat(
-                "Error:",
-                conditionMessage(e),
-                "\n"
-            )
-
-            stop(
-                paste(
-                    "Failed to install local package:",
-                    pkg
-                ),
-                call. = FALSE
-            )
-        }
-    )
-
-    if (!requireNamespace(pkg, quietly = TRUE)) {
-
-        stop(
-            paste(
-                "Local package installation completed but",
-                pkg,
-                "cannot be loaded."
-            ),
-            call. = FALSE
-        )
-    }
-
-    cat(
-        "Successfully installed:",
-        pkg,
-        as.character(packageVersion(pkg)),
+        package_version_safe(pkg),
         "\n"
     )
 
@@ -318,12 +234,12 @@ install_local_package <- function(pkg, file) {
 
 
 # ============================================================
-# Verify source tarballs exist
+# Verify local package source files
 # ============================================================
 
 cat("\n")
 cat("============================================================\n")
-cat("Checking local source packages\n")
+cat(" Checking local R source packages\n")
 cat("============================================================\n")
 
 
@@ -344,14 +260,14 @@ required_files <- c(
 )
 
 
-for (file in required_files) {
+for (f in required_files) {
 
-    if (!file.exists(file)) {
+    if (!file.exists(f)) {
 
         stop(
             paste(
-                "Required file is missing:",
-                file
+                "Required R package archive is missing:",
+                f
             ),
             call. = FALSE
         )
@@ -360,7 +276,7 @@ for (file in required_files) {
     cat(
         "Found:",
         normalizePath(
-            file,
+            f,
             winslash = "/",
             mustWork = TRUE
         ),
@@ -370,31 +286,12 @@ for (file in required_files) {
 
 
 # ============================================================
-# Bootstrap package managers
+# Bioconductor packages
 # ============================================================
 
 cat("\n")
 cat("============================================================\n")
-cat("Installing package managers\n")
-cat("============================================================\n")
-
-
-install_cran_package("remotes")
-
-install_cran_package("BiocManager")
-
-
-# ============================================================
-# Bioconductor dependencies
-#
-# NAguideR DESCRIPTION requires:
-#   impute
-#   pcaMethods
-# ============================================================
-
-cat("\n")
-cat("============================================================\n")
-cat("Installing Bioconductor dependencies\n")
+cat(" Installing Bioconductor dependencies\n")
 cat("============================================================\n")
 
 
@@ -406,51 +303,24 @@ bioc_packages <- c(
 
 for (pkg in bioc_packages) {
 
-    install_bioc_package(pkg)
-
+    install_bioc(pkg)
 }
 
 
 # ============================================================
-# CRAN dependencies
-#
-# Includes:
-#   NAguideR dependencies
-#   DreamAI dependencies
-#
-# We explicitly install them before install_github() so
-# remotes does not have to guess or upgrade everything.
+# CRAN packages
 # ============================================================
 
 cat("\n")
 cat("============================================================\n")
-cat("Installing CRAN dependencies\n")
+cat(" Installing CRAN dependencies\n")
 cat("============================================================\n")
 
 
 cran_packages <- c(
 
     # --------------------------------------------------------
-    # NAguideR UI / application
-    # --------------------------------------------------------
-
-    "shiny",
-    "shinyBS",
-    "shinyjs",
-    "shinyWidgets",
-    "DT",
-    "gdata",
-    "ggplot2",
-    "ggsci",
-    "openxlsx",
-    "data.table",
-    "tidyverse",
-    "ggExtra",
-    "cowplot",
-    "Amelia",
-
-    # --------------------------------------------------------
-    # NAguideR imputation dependencies
+    # NAguideR / imputation
     # --------------------------------------------------------
 
     "e1071",
@@ -462,107 +332,405 @@ cran_packages <- c(
     "missForest",
 
     # --------------------------------------------------------
-    # DreamAI dependencies
+    # GMSImpute
+    # IMPORTANT: reshape2 is required
+    # --------------------------------------------------------
+
+    "glmnet",
+    "ggplot2",
+    "reshape2",
+
+    # --------------------------------------------------------
+    # DreamAI
     # --------------------------------------------------------
 
     "randomForest",
-    "glmnet",
     "foreach",
     "itertools",
     "iterators",
     "Rcpp",
 
-    # These normally come with R, but check explicitly because
-    # DreamAI lists them as Depends.
-    "cluster",
-    "survival",
-    "Matrix"
+    # --------------------------------------------------------
+    # NAguideR / Shiny UI
+    # --------------------------------------------------------
+
+    "shiny",
+    "shinyBS",
+    "shinyjs",
+    "shinyWidgets",
+    "DT",
+    "gdata",
+    "ggsci",
+    "openxlsx",
+    "data.table",
+    "tidyverse",
+    "ggExtra",
+    "cowplot",
+    "Amelia"
 )
 
 
 for (pkg in unique(cran_packages)) {
 
-    install_cran_package(pkg)
+    install_cran(pkg)
+}
 
+
+# ============================================================
+# Verify GMSImpute dependencies BEFORE installation
+# ============================================================
+
+cat("\n")
+cat("============================================================\n")
+cat(" Checking GMSImpute dependencies\n")
+cat("============================================================\n")
+
+
+gms_dependencies <- c(
+    "glmnet",
+    "ggplot2",
+    "reshape2"
+)
+
+
+for (pkg in gms_dependencies) {
+
+    if (!package_ok(pkg)) {
+
+        stop(
+            paste(
+                "Missing required GMSImpute dependency:",
+                pkg
+            ),
+            call. = FALSE
+        )
+    }
+
+    cat(
+        sprintf(
+            "%-15s OK [%s]\n",
+            pkg,
+            package_version_safe(pkg)
+        )
+    )
+}
+
+
+# ============================================================
+# Helper: install local source package
+# ============================================================
+
+install_local_source <- function(pkg, archive) {
+
+    if (package_ok(pkg)) {
+
+        cat(
+            sprintf(
+                "%-22s already installed [%s]\n",
+                pkg,
+                package_version_safe(pkg)
+            )
+        )
+
+        return(invisible(TRUE))
+    }
+
+    if (!file.exists(archive)) {
+
+        stop(
+            paste(
+                "Source archive not found:",
+                archive
+            ),
+            call. = FALSE
+        )
+    }
+
+    archive <- normalizePath(
+        archive,
+        winslash = "/",
+        mustWork = TRUE
+    )
+
+    cat("\n")
+    cat("------------------------------------------------------------\n")
+    cat("Installing local package:", pkg, "\n")
+    cat("Archive:", archive, "\n")
+    cat("------------------------------------------------------------\n")
+
+    # --------------------------------------------------------
+    # install.packages() can sometimes emit warnings instead
+    # of a clean error. Capture those warnings so GitHub logs
+    # contain the useful information.
+    # --------------------------------------------------------
+
+    warnings_seen <- character()
+
+    result <- tryCatch(
+
+        withCallingHandlers(
+            {
+
+                install.packages(
+                    archive,
+                    repos = NULL,
+                    type = "source"
+                )
+
+                TRUE
+            },
+
+            warning = function(w) {
+
+                warning_text <- conditionMessage(w)
+
+                warnings_seen <<- c(
+                    warnings_seen,
+                    warning_text
+                )
+
+                cat(
+                    "\nINSTALL WARNING:",
+                    warning_text,
+                    "\n"
+                )
+
+                invokeRestart("muffleWarning")
+            }
+        ),
+
+        error = function(e) {
+
+            cat("\n")
+            cat("============================================================\n")
+            cat("LOCAL PACKAGE INSTALL ERROR\n")
+            cat("============================================================\n")
+
+            cat("Package:", pkg, "\n")
+            cat("Archive:", archive, "\n")
+            cat("Error:", conditionMessage(e), "\n")
+
+            FALSE
+        }
+    )
+
+
+    # --------------------------------------------------------
+    # Check whether R actually registered package
+    # --------------------------------------------------------
+
+    installed_names <- rownames(
+        installed.packages()
+    )
+
+    if (!(pkg %in% installed_names)) {
+
+        cat("\n")
+        cat("============================================================\n")
+        cat("PACKAGE WAS NOT INSTALLED\n")
+        cat("============================================================\n")
+
+        cat(
+            "Package:",
+            pkg,
+            "\n"
+        )
+
+        if (length(warnings_seen) > 0) {
+
+            cat("\nWarnings generated during installation:\n")
+
+            for (w in unique(warnings_seen)) {
+                cat(" -", w, "\n")
+            }
+        }
+
+        stop(
+            paste(
+                "Installation failed for local package:",
+                pkg
+            ),
+            call. = FALSE
+        )
+    }
+
+
+    # --------------------------------------------------------
+    # Test namespace explicitly
+    # --------------------------------------------------------
+
+    cat(
+        "\nTesting namespace for",
+        pkg,
+        "...\n"
+    )
+
+    namespace_result <- tryCatch(
+        {
+
+            loadNamespace(pkg)
+
+            TRUE
+
+        },
+        error = function(e) {
+
+            cat("\n")
+            cat("============================================================\n")
+            cat("PACKAGE NAMESPACE LOAD FAILED\n")
+            cat("============================================================\n")
+
+            cat("Package:", pkg, "\n")
+            cat("Version:", package_version_safe(pkg), "\n")
+            cat("Error:", conditionMessage(e), "\n")
+
+            cat("\nLibrary paths:\n")
+            print(.libPaths())
+
+            cat("\nPackage installation location:\n")
+
+            pkg_location <- tryCatch(
+                find.package(pkg),
+                error = function(e) NA_character_
+            )
+
+            print(pkg_location)
+
+            FALSE
+        }
+    )
+
+
+    if (!namespace_result) {
+
+        stop(
+            paste(
+                "Package installed but namespace cannot be loaded:",
+                pkg
+            ),
+            call. = FALSE
+        )
+    }
+
+
+    cat(
+        "Successfully installed and loaded:",
+        pkg,
+        package_version_safe(pkg),
+        "\n"
+    )
+
+    invisible(TRUE)
 }
 
 
 # ============================================================
 # Install SeqKnn
-#
-# NAguideR recommends the old source archive because SeqKnn
-# is no longer reliably installable by the normal package
-# installation route.
 # ============================================================
 
 cat("\n")
 cat("============================================================\n")
-cat("Installing SeqKnn\n")
+cat(" Installing SeqKnn\n")
 cat("============================================================\n")
 
 
-install_local_package(
+install_local_source(
     pkg = "SeqKnn",
-    file = seqknn_file
+    archive = seqknn_file
 )
 
 
 # ============================================================
-# Install modified GMSImpute
-#
-# NAguideR distributes a modified GMSImpute source archive.
-# Use that exact local package instead of another version.
+# Install GMSImpute
 # ============================================================
 
 cat("\n")
 cat("============================================================\n")
-cat("Installing GMSImpute\n")
+cat(" Installing GMSImpute\n")
 cat("============================================================\n")
 
 
-install_local_package(
+install_local_source(
     pkg = "GMSimpute",
-    file = gmsimpute_file
+    archive = gmsimpute_file
 )
 
 
 # ============================================================
-# Install DreamAI
+# EXTRA GMSImpute validation
+# ============================================================
+
+cat("\n")
+cat("============================================================\n")
+cat(" Validating GMSImpute\n")
+cat("============================================================\n")
+
+
+if (!package_ok("GMSimpute")) {
+
+    cat("\nGMSimpute dependencies:\n")
+
+    for (pkg in gms_dependencies) {
+
+        cat(
+            sprintf(
+                "%-15s %s\n",
+                pkg,
+                if (package_ok(pkg)) {
+                    paste(
+                        "OK",
+                        package_version_safe(pkg)
+                    )
+                } else {
+                    "MISSING"
+                }
+            )
+        )
+    }
+
+    stop(
+        "GMSimpute namespace cannot be loaded.",
+        call. = FALSE
+    )
+}
+
+
+cat(
+    "GMSImpute:",
+    package_version_safe("GMSimpute"),
+    "OK\n"
+)
+
+
+# ============================================================
+# DreamAI
 #
 # IMPORTANT:
+# R package is inside:
 #
-# DreamAI is NOT an R package at the repository root.
+#   WangLab-MSSM/DreamAI/Code
 #
-# Correct package location:
-#
-#   WangLab-MSSM/DreamAI
-#                      |
-#                      +-- Code/
-#                          DESCRIPTION
-#
-# Therefore subdir = "Code" is REQUIRED.
+# NOT at the GitHub repository root.
 # ============================================================
 
 cat("\n")
 cat("============================================================\n")
-cat("Installing DreamAI\n")
+cat(" Installing DreamAI\n")
 cat("============================================================\n")
 
 
-if (requireNamespace("DreamAI", quietly = TRUE)) {
+if (package_ok("DreamAI")) {
 
     cat(
         "DreamAI already installed:",
-        as.character(packageVersion("DreamAI")),
+        package_version_safe("DreamAI"),
         "\n"
     )
 
 } else {
 
     cat(
-        "Installing DreamAI from ",
-        "WangLab-MSSM/DreamAI, subdir=Code\n",
-        sep = ""
+        "Installing DreamAI from GitHub...\n"
     )
 
     tryCatch(
@@ -591,14 +759,6 @@ if (requireNamespace("DreamAI", quietly = TRUE)) {
                 "\n"
             )
 
-            cat(
-                "\nExpected GitHub package location:\n"
-            )
-
-            cat(
-                "WangLab-MSSM/DreamAI/Code\n"
-            )
-
             stop(
                 "DreamAI installation failed.",
                 call. = FALSE
@@ -608,12 +768,12 @@ if (requireNamespace("DreamAI", quietly = TRUE)) {
 }
 
 
-if (!requireNamespace("DreamAI", quietly = TRUE)) {
+if (!package_ok("DreamAI")) {
 
     stop(
         paste(
-            "DreamAI GitHub installation completed",
-            "but DreamAI cannot be loaded."
+            "DreamAI installation finished but",
+            "the DreamAI namespace cannot be loaded."
         ),
         call. = FALSE
     )
@@ -622,34 +782,26 @@ if (!requireNamespace("DreamAI", quietly = TRUE)) {
 
 cat(
     "DreamAI:",
-    as.character(packageVersion("DreamAI")),
+    package_version_safe("DreamAI"),
     "OK\n"
 )
 
 
 # ============================================================
 # Install NAguideR
-#
-# Dependencies are FALSE intentionally.
-#
-# We already installed its dependencies above, including
-# SeqKnn from the required local source package.
-#
-# This prevents remotes from trying to replace our special
-# local packages.
 # ============================================================
 
 cat("\n")
 cat("============================================================\n")
-cat("Installing NAguideR\n")
+cat(" Installing NAguideR\n")
 cat("============================================================\n")
 
 
-if (requireNamespace("NAguideR", quietly = TRUE)) {
+if (package_ok("NAguideR")) {
 
     cat(
         "NAguideR already installed:",
-        as.character(packageVersion("NAguideR")),
+        package_version_safe("NAguideR"),
         "\n"
     )
 
@@ -693,12 +845,12 @@ if (requireNamespace("NAguideR", quietly = TRUE)) {
 }
 
 
-if (!requireNamespace("NAguideR", quietly = TRUE)) {
+if (!package_ok("NAguideR")) {
 
     stop(
         paste(
-            "NAguideR installation completed",
-            "but NAguideR cannot be loaded."
+            "NAguideR installation finished but",
+            "the NAguideR namespace cannot be loaded."
         ),
         call. = FALSE
     )
@@ -707,27 +859,27 @@ if (!requireNamespace("NAguideR", quietly = TRUE)) {
 
 cat(
     "NAguideR:",
-    as.character(packageVersion("NAguideR")),
+    package_version_safe("NAguideR"),
     "OK\n"
 )
 
 
 # ============================================================
-# Final validation
+# Final package validation
 # ============================================================
 
 cat("\n")
 cat("============================================================\n")
-cat("FINAL PACKAGE VALIDATION\n")
+cat(" FINAL PACKAGE VALIDATION\n")
 cat("============================================================\n")
 
 
 required_packages <- c(
 
-    # Main package
+    # Main application
     "NAguideR",
 
-    # Core dependencies
+    # NAguideR methods
     "e1071",
     "impute",
     "SeqKnn",
@@ -739,26 +891,29 @@ required_packages <- c(
     "mice",
     "missForest",
 
-    # Special imputation packages
+    # Special packages
     "GMSimpute",
     "DreamAI",
 
-    # DreamAI dependencies
-    "randomForest",
+    # GMSImpute
     "glmnet",
+    "ggplot2",
+    "reshape2",
+
+    # DreamAI
+    "randomForest",
     "foreach",
     "itertools",
     "iterators",
     "Rcpp",
 
-    # NAguideR UI dependencies
+    # UI
     "shiny",
     "shinyBS",
     "shinyjs",
     "shinyWidgets",
     "DT",
     "gdata",
-    "ggplot2",
     "ggsci",
     "openxlsx",
     "data.table",
@@ -776,24 +931,16 @@ cat("\n")
 
 for (pkg in required_packages) {
 
-    installed <- requireNamespace(
-        pkg,
-        quietly = TRUE
-    )
+    ok <- package_ok(pkg)
 
-    if (installed) {
-
-        version <- tryCatch(
-            as.character(packageVersion(pkg)),
-            error = function(e) "unknown"
-        )
+    if (ok) {
 
         cat(
             sprintf(
-                "%-20s %-10s %s\n",
+                "%-20s %-8s %s\n",
                 pkg,
                 "OK",
-                version
+                package_version_safe(pkg)
             )
         )
 
@@ -801,7 +948,7 @@ for (pkg in required_packages) {
 
         cat(
             sprintf(
-                "%-20s %-10s\n",
+                "%-20s %-8s\n",
                 pkg,
                 "MISSING"
             )
@@ -816,22 +963,25 @@ for (pkg in required_packages) {
 
 
 # ============================================================
-# Fail the GitHub Action if anything is missing
+# Stop workflow if anything is missing
 # ============================================================
 
 if (length(failed_packages) > 0) {
 
     cat("\n")
     cat("============================================================\n")
-    cat("DEPENDENCY INSTALLATION FAILED\n")
+    cat(" DEPENDENCY INSTALLATION FAILED\n")
     cat("============================================================\n")
 
-    cat(
-        "Missing packages:\n"
-    )
+    cat("\nMissing packages:\n")
 
     for (pkg in failed_packages) {
-        cat("  -", pkg, "\n")
+
+        cat(
+            "  -",
+            pkg,
+            "\n"
+        )
     }
 
     stop(
@@ -848,16 +998,16 @@ if (length(failed_packages) > 0) {
 
 
 # ============================================================
-# Test that the important namespaces actually load
+# Test important namespaces
 # ============================================================
 
 cat("\n")
 cat("============================================================\n")
-cat("Testing important namespaces\n")
+cat(" TESTING IMPORTANT NAMESPACES\n")
 cat("============================================================\n")
 
 
-namespace_test <- c(
+namespace_packages <- c(
     "NAguideR",
     "SeqKnn",
     "GMSimpute",
@@ -866,41 +1016,49 @@ namespace_test <- c(
 )
 
 
-for (pkg in namespace_test) {
+for (pkg in namespace_packages) {
 
     cat(
-        "Loading namespace:",
-        pkg,
-        "... "
+        sprintf(
+            "%-20s ",
+            pkg
+        )
     )
 
-    tryCatch(
+    result <- tryCatch(
         {
 
             loadNamespace(pkg)
 
-            cat("OK\n")
+            TRUE
 
         },
         error = function(e) {
 
-            cat("FAILED\n")
+            cat("\n")
 
             cat(
-                "Error:",
+                "Namespace error:",
                 conditionMessage(e),
                 "\n"
             )
 
-            stop(
-                paste(
-                    "Namespace test failed:",
-                    pkg
-                ),
-                call. = FALSE
-            )
+            FALSE
         }
     )
+
+    if (!result) {
+
+        stop(
+            paste(
+                "Namespace validation failed:",
+                pkg
+            ),
+            call. = FALSE
+        )
+    }
+
+    cat("OK\n")
 }
 
 
@@ -910,47 +1068,50 @@ for (pkg in namespace_test) {
 
 cat("\n")
 cat("============================================================\n")
-cat("SESSION INFORMATION\n")
+cat(" SESSION INFORMATION\n")
 cat("============================================================\n")
 
-print(sessionInfo())
+print(
+    sessionInfo()
+)
 
 
 # ============================================================
-# Success
+# Final success
 # ============================================================
 
 cat("\n")
 cat("============================================================\n")
-cat("SUCCESS\n")
+cat(" SUCCESS\n")
 cat("============================================================\n")
 
 cat(
-    "All NAguideR dependencies installed successfully.\n"
+    "All NAguideR dependencies installed successfully.\n\n"
 )
 
 cat(
-    "NAguideR version:",
-    as.character(packageVersion("NAguideR")),
+    "NAguideR   :",
+    package_version_safe("NAguideR"),
     "\n"
 )
 
 cat(
-    "DreamAI version:",
-    as.character(packageVersion("DreamAI")),
+    "GMSImpute :",
+    package_version_safe("GMSimpute"),
     "\n"
 )
 
 cat(
-    "GMSImpute version:",
-    as.character(packageVersion("GMSimpute")),
+    "SeqKnn    :",
+    package_version_safe("SeqKnn"),
     "\n"
 )
 
 cat(
-    "SeqKnn version:",
-    as.character(packageVersion("SeqKnn")),
+    "DreamAI   :",
+    package_version_safe("DreamAI"),
     "\n"
 )
 
+cat("\n")
 cat("============================================================\n")
