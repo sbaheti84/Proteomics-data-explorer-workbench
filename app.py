@@ -153,7 +153,7 @@ APP_MODULES = {
         "category": "Proteomics",
     },
     "Total Proteome (Label-Free)": {
-        "module": "app_launcher_TP_LF",
+        "module": "app_launcher_TP_LF   ",
         "desc": "Perform label-free QC, normalization, and reporting.",
         "category": "Proteomics",
     },
