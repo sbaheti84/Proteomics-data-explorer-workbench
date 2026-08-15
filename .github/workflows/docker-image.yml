@@ -1,129 +1,442 @@
 name: Build and Publish Docker Image
 
 on:
+  # ---------------------------------------------------------
+  # Build whenever main is updated
+  # ---------------------------------------------------------
   push:
     branches:
       - main
+
+    # Also build/publish version tags such as:
+    # v1.0.0
+    # v1.1.0
     tags:
       - "v*"
 
+  # ---------------------------------------------------------
+  # Pull requests are BUILD ONLY.
+  # They are not published to GHCR.
+  # ---------------------------------------------------------
   pull_request:
     branches:
       - main
 
+  # ---------------------------------------------------------
+  # Allow manual execution from GitHub Actions
+  # ---------------------------------------------------------
   workflow_dispatch:
+
+
+# ============================================================
+# Permissions
+# ============================================================
+#
+# contents:read
+#   Required to checkout repository.
+#
+# packages:write
+#   Required to push image to GitHub Container Registry.
+#
+# ============================================================
 
 permissions:
   contents: read
   packages: write
 
+
+# ============================================================
+# Global environment
+# ============================================================
+
 env:
+
+  # GitHub Container Registry
   REGISTRY: ghcr.io
 
-  # Keep this LOWERCASE because Docker image names must be lowercase.
+  # IMPORTANT:
+  # Docker image names must be lowercase.
   IMAGE_NAME: sbaheti84/proteomics-data-explorer-workbench
+
+
+# ============================================================
+# Avoid wasting resources when multiple commits are pushed
+# quickly to the same branch.
+# ============================================================
+
+concurrency:
+  group: docker-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 
 jobs:
 
   docker:
+
     name: Build Docker Image
+
     runs-on: ubuntu-latest
+
+    timeout-minutes: 120
+
 
     steps:
 
-      # ---------------------------------------------------------
-      # Checkout repository
-      # ---------------------------------------------------------
+      # ======================================================
+      # Checkout
+      # ======================================================
+
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
 
-      # ---------------------------------------------------------
-      # Configure Docker Buildx
-      # ---------------------------------------------------------
+      # ======================================================
+      # Show repository contents
+      #
+      # Useful for debugging GitHub Action builds.
+      # ======================================================
+
+      - name: Show repository contents
+        shell: bash
+        run: |
+          echo "Repository:"
+          pwd
+
+          echo
+          echo "Top-level files:"
+          ls -lah
+
+          echo
+          echo "Git commit:"
+          git rev-parse HEAD
+
+
+      # ======================================================
+      # Verify Dockerfile
+      #
+      # This prevents the previous confusing error:
+      #
+      # failed to read dockerfile:
+      # open Dockerfile: no such file or directory
+      #
+      # ======================================================
+
+      - name: Verify Dockerfile
+        shell: bash
+        run: |
+
+          if [ ! -f "Dockerfile" ]; then
+
+            echo "============================================"
+            echo "ERROR: Dockerfile not found"
+            echo "============================================"
+            echo
+            echo "Expected file:"
+            echo "${GITHUB_WORKSPACE}/Dockerfile"
+            echo
+            echo "Repository contents:"
+            find . -maxdepth 2 -type f | sort
+
+            exit 1
+
+          fi
+
+          echo "Dockerfile found:"
+          ls -lh Dockerfile
+
+          echo
+          echo "First 30 lines:"
+          head -n 30 Dockerfile
+
+
+      # ======================================================
+      # Verify important application files
+      # ======================================================
+
+      - name: Verify application files
+        shell: bash
+        run: |
+
+          echo "Checking application files..."
+
+          REQUIRED_FILES=(
+            "requirements.txt"
+            "install_naguider_r_dependencies.R"
+            "naguider_impute.R"
+          )
+
+          for file in "${REQUIRED_FILES[@]}"; do
+
+            if [ ! -f "$file" ]; then
+              echo "ERROR: Required file missing: $file"
+              exit 1
+            fi
+
+            echo "FOUND: $file"
+
+          done
+
+
+      # ======================================================
+      # Verify local R packages
+      # ======================================================
+
+      - name: Verify R package archives
+        shell: bash
+        run: |
+
+          echo "Checking local R packages..."
+
+          REQUIRED_R_PACKAGES=(
+            "r_packages/GMSimpute_0.0.1.1.tar.gz"
+            "r_packages/SeqKnn_1.0.1.tar.gz"
+          )
+
+          for file in "${REQUIRED_R_PACKAGES[@]}"; do
+
+            if [ ! -f "$file" ]; then
+
+              echo
+              echo "============================================"
+              echo "ERROR: Required R source package missing"
+              echo "============================================"
+              echo
+              echo "$file"
+              echo
+              echo "Contents of r_packages:"
+              ls -lah r_packages 2>/dev/null || true
+
+              exit 1
+            fi
+
+            echo "FOUND: $file"
+
+          done
+
+          echo
+          echo "R package archives:"
+          ls -lh r_packages/
+
+
+      # ======================================================
+      # Setup Docker Buildx
+      # ======================================================
+
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
 
-      # ---------------------------------------------------------
+      # ======================================================
+      # Display Docker / Buildx versions
+      # ======================================================
+
+      - name: Show Docker environment
+        shell: bash
+        run: |
+
+          echo "Docker version:"
+          docker version
+
+          echo
+          echo "Docker Buildx:"
+          docker buildx version
+
+
+      # ======================================================
       # Login to GitHub Container Registry
       #
-      # Do NOT login for pull requests because PR builds should
-      # only test the image, not publish it.
-      # ---------------------------------------------------------
+      # DO NOT login for pull requests.
+      #
+      # Pull requests:
+      #     build only
+      #
+      # main / tags / manual:
+      #     build + publish
+      #
+      # ======================================================
+
       - name: Log in to GitHub Container Registry
         if: github.event_name != 'pull_request'
-        uses: docker/login-action@v3
+
+        uses: docker/login-action@v4
+
         with:
           registry: ${{ env.REGISTRY }}
+
           username: ${{ github.actor }}
+
           password: ${{ secrets.GITHUB_TOKEN }}
 
 
-      # ---------------------------------------------------------
-      # Generate useful Docker tags and labels
+      # ======================================================
+      # Generate Docker tags
       #
-      # Examples:
+      # main produces:
       #
-      # main:
-      #   ghcr.io/.../proteomics-data-explorer-workbench:latest
-      #   ghcr.io/.../proteomics-data-explorer-workbench:main
-      #   ghcr.io/.../proteomics-data-explorer-workbench:sha-abc1234
+      # ghcr.io/sbaheti84/
+      # proteomics-data-explorer-workbench:main
       #
-      # git tag v1.0.0:
-      #   ghcr.io/.../proteomics-data-explorer-workbench:1.0.0
-      #   ghcr.io/.../proteomics-data-explorer-workbench:1.0
-      # ---------------------------------------------------------
+      # ghcr.io/sbaheti84/
+      # proteomics-data-explorer-workbench:latest
+      #
+      # ghcr.io/sbaheti84/
+      # proteomics-data-explorer-workbench:sha-XXXXXXX
+      #
+      #
+      # v1.2.3 produces:
+      #
+      # :1.2.3
+      # :1.2
+      # :sha-XXXXXXX
+      #
+      # ======================================================
+
       - name: Extract Docker metadata
         id: meta
-        uses: docker/metadata-action@v5
+
+        uses: docker/metadata-action@v6
+
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
+          images: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
 
           tags: |
+
+            # Branch
             type=ref,event=branch
+
+            # Pull request
             type=ref,event=pr
+
+            # Git SHA
             type=sha,prefix=sha-
+
+            # Full semantic version
+            # v1.2.3 -> 1.2.3
             type=semver,pattern={{version}}
+
+            # Major + minor version
+            # v1.2.3 -> 1.2
             type=semver,pattern={{major}}.{{minor}}
+
+            # latest = main branch
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
 
 
-      # ---------------------------------------------------------
-      # Build image
+      # ======================================================
+      # Display generated tags
+      # ======================================================
+
+      - name: Show Docker metadata
+        shell: bash
+        run: |
+
+          echo "Docker image:"
+          echo "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+
+          echo
+          echo "Tags:"
+          echo "${{ steps.meta.outputs.tags }}"
+
+          echo
+          echo "Labels:"
+          echo "${{ steps.meta.outputs.labels }}"
+
+
+      # ======================================================
+      # Build / publish Docker image
       #
-      # PR:
-      #   Build only. Do NOT publish.
+      # Pull request:
+      #     Build only
       #
-      # main/tag:
-      #   Build AND publish to GHCR.
+      # main / version tag / workflow_dispatch:
+      #     Build + push to GHCR
       #
-      # For now use linux/amd64 because your Mayo/server
-      # environment is x86-64 and this is simpler for R packages.
-      # ---------------------------------------------------------
+      # linux/amd64:
+      #     Appropriate for standard x86-64 Linux servers.
+      #
+      # ======================================================
+
       - name: Build and publish Docker image
-        uses: docker/build-push-action@v6
+        id: build
+
+        uses: docker/build-push-action@v7
+
         with:
+
+          # Repository root
           context: .
+
+          # Dockerfile must be located at:
+          # repository-root/Dockerfile
           file: ./Dockerfile
 
+          # Keep this simple initially.
           platforms: linux/amd64
 
+          # Push everything except pull requests.
           push: ${{ github.event_name != 'pull_request' }}
 
+          # Tags generated above
           tags: ${{ steps.meta.outputs.tags }}
+
+          # OCI metadata
           labels: ${{ steps.meta.outputs.labels }}
 
+          # GitHub Actions BuildKit cache
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
 
-      # ---------------------------------------------------------
-      # Display resulting image name
-      # ---------------------------------------------------------
+      # ======================================================
+      # Build result
+      # ======================================================
+
+      - name: Show Docker build result
+        shell: bash
+        run: |
+
+          echo "============================================"
+          echo "Docker build completed successfully"
+          echo "============================================"
+
+          echo
+          echo "Image:"
+          echo "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+
+          echo
+          echo "Digest:"
+          echo "${{ steps.build.outputs.digest }}"
+
+          echo
+          echo "Tags:"
+          echo "${{ steps.meta.outputs.tags }}"
+
+
+      # ======================================================
+      # Published image information
+      # ======================================================
+
       - name: Show published image
         if: github.event_name != 'pull_request'
+
+        shell: bash
+
         run: |
-          echo "Docker image published:"
+
+          echo
+          echo "============================================"
+          echo "Docker image published to GHCR"
+          echo "============================================"
+          echo
+
           echo "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+
+          echo
+          echo "Available tags:"
+          echo "${{ steps.meta.outputs.tags }}"
+
+          echo
+          echo "Example:"
+          echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
