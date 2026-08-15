@@ -3,56 +3,51 @@ name: Build Windows App
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build-windows:
+    name: Build Windows App
     runs-on: windows-latest
-    timeout-minutes: 90   # Hard cap. Prevents a stuck install.packages() call from
-                           # burning the default 6-hour job timeout.
+    timeout-minutes: 120
+
     env:
-      # remotes::install_github() (used for DreamAI and NAguideR) hits the
-      # GitHub API several times per package. Anonymous requests are capped
-      # at 60/hour, which GitHub-hosted runners burn through fast since many
-      # jobs share the same IP ranges. This raises it to 5,000/hour using the
-      # job's own token — no extra secret setup needed, GITHUB_TOKEN is
-      # auto-provided by Actions.
       GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      RENV_CONFIG_AUTOLOADER_ENABLED: "false"
+      R_LIBS_USER: ${{ github.workspace }}/r_ci_library
 
     steps:
-
-      # ============================================================
-      # Checkout
-      # ============================================================
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
-
-      # ============================================================
-      # Python
-      # ============================================================
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.12.8"
-          cache: "pip"
-
-
-      # ============================================================
-      # R
-      # ============================================================
-      - name: Set up R
-        uses: r-lib/actions/setup-r@v2
-        with:
-          r-version: "4.5.1"
-          use-public-rspm: true
-
-
-      # ============================================================
-      # Verify files needed for NAguideR
-      # ============================================================
-      - name: Verify R source files
+      - name: Show repository contents
         shell: powershell
         run: |
+          Write-Host "========================================="
+          Write-Host "Repository"
+          Write-Host "========================================="
+
+          Write-Host "Current directory:"
+          Get-Location
+
+          Write-Host ""
+          Write-Host "Top-level files:"
+
+          Get-ChildItem -Force |
+            Select-Object Name, Mode, Length |
+            Format-Table -AutoSize
+
+      - name: Verify required files
+        shell: powershell
+        run: |
+          Write-Host "========================================="
+          Write-Host "Checking required files"
+          Write-Host "========================================="
+
           $requiredFiles = @(
+            "requirements.txt",
+            "build_windows.ps1",
             "naguider_impute.R",
             "install_naguider_r_dependencies.R",
             "r_packages\GMSimpute_0.0.1.1.tar.gz",
@@ -60,269 +55,601 @@ jobs:
           )
 
           foreach ($file in $requiredFiles) {
-            if (!(Test-Path $file)) {
-              throw "Required R file is missing: $file"
-            }
-            Write-Host "Found: $file"
+              if (!(Test-Path $file)) {
+                  Write-Host ""
+                  Write-Host "ERROR: Required file missing:"
+                  Write-Host $file
+                  throw "Required file is missing: $file"
+              }
+              Write-Host "FOUND: $file"
           }
 
+          Write-Host ""
+          Write-Host "r_packages contents:"
 
-      # ============================================================
-      # Show R / compiler information
-      #
-      # Diagnostic only. Compiler discovery is wrapped so a missing
-      # gcc/make on PATH logs a warning instead of failing the whole
-      # job on a non-zero exit code.
-      # ============================================================
-      - name: Show R environment
+          Get-ChildItem -Recurse "r_packages" |
+            Select-Object FullName, Length |
+            Format-Table -AutoSize
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12.8"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      - name: Verify Python
         shell: powershell
         run: |
-          Write-Host "R:"
-          Get-Command R
+          Write-Host "========================================="
+          Write-Host "Python"
+          Write-Host "========================================="
 
-          Write-Host "Rscript:"
-          Get-Command Rscript
+          python --version
+          python -m pip --version
+
+      - name: Set up R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: "4.5.1"
+          rtools-version: "45"
+          use-public-rspm: true
+
+      - name: Prepare R library
+        shell: powershell
+        run: |
+          Write-Host "========================================="
+          Write-Host "Preparing R library"
+          Write-Host "========================================="
+
+          Write-Host "R_LIBS_USER:"
+          Write-Host $env:R_LIBS_USER
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            -Path $env:R_LIBS_USER |
+            Out-Null
+
+          if (!(Test-Path $env:R_LIBS_USER)) {
+              throw "Could not create R_LIBS_USER"
+          }
+
+          Write-Host ""
+          Write-Host "Created:"
+          Get-Item $env:R_LIBS_USER
+
+      - name: Verify R and Rtools
+        shell: powershell
+        run: |
+          Write-Host "========================================="
+          Write-Host "R VERSION"
+          Write-Host "========================================="
 
           Rscript --version
 
-          Rscript -e "cat('R_HOME=', R.home(), '\n'); cat('Libraries:\n'); print(.libPaths())"
+          Write-Host ""
+          Write-Host "========================================="
+          Write-Host "R HOME"
+          Write-Host "========================================="
 
-          Write-Host "Compiler (diagnostic only, non-fatal):"
-          $gcc = Get-Command gcc.exe -ErrorAction SilentlyContinue
-          if ($gcc) { Write-Host "gcc found: $($gcc.Source)" } else { Write-Warning "gcc not found on PATH" }
+          Rscript --vanilla -e "cat(R.home(), '\n')"
+
+          Write-Host ""
+          Write-Host "========================================="
+          Write-Host "R LIBRARIES"
+          Write-Host "========================================="
+
+          Rscript --vanilla -e "print(.libPaths())"
+
+          Write-Host ""
+          Write-Host "========================================="
+          Write-Host "RTOOLS / COMPILER"
+          Write-Host "========================================="
 
           $make = Get-Command make.exe -ErrorAction SilentlyContinue
-          if ($make) { Write-Host "make found: $($make.Source)" } else { Write-Warning "make not found on PATH" }
+          if ($make) {
+              Write-Host "make:"
+              Write-Host $make.Source
+          } else {
+              Write-Warning "make.exe not found on PATH"
+          }
 
+          $gcc = Get-Command gcc.exe -ErrorAction SilentlyContinue
+          if ($gcc) {
+              Write-Host "gcc:"
+              Write-Host $gcc.Source
+          } else {
+              Write-Warning "gcc.exe not found on PATH"
+          }
 
-      # ============================================================
-      # Cache the R package library
-      #
-      # Keyed on the R version, the dependency-install script, and
-      # the two vendored tarballs. Bump any of those and the cache
-      # invalidates automatically.
-      # ============================================================
+          $gpp = Get-Command g++.exe -ErrorAction SilentlyContinue
+          if ($gpp) {
+              Write-Host "g++:"
+              Write-Host $gpp.Source
+          } else {
+              Write-Warning "g++.exe not found on PATH"
+          }
+
       - name: Cache R library
         id: cache-r-lib
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
-          path: |
-            ${{ env.R_LIBS_USER }}
+          path: ${{ env.R_LIBS_USER }}
           key: >-
-            windows-r-4.5.1-lib-
+            windows-r-4.5.1-v5-
             ${{ hashFiles('install_naguider_r_dependencies.R') }}-
             ${{ hashFiles('r_packages/**') }}
+          restore-keys: |
+            windows-r-4.5.1-v5-
 
-
-      # ============================================================
-      # Install R / NAguideR dependencies
-      #
-      # Single source of truth: this calls the same script used
-      # outside CI, instead of re-declaring the package list here.
-      # If you update install_naguider_r_dependencies.R, this build
-      # picks the change up automatically.
-      #
-      # NOTE: this intentionally does not use renv, even though the
-      # repo has a renv.lock, because of the custom tarball / GitHub
-      # sources below. That means package versions installed here
-      # can drift from what renv.lock pins for local dev. If that
-      # matters, pin the CRAN/Bioc versions explicitly to match
-      # renv.lock rather than letting install.packages() take
-      # whatever is current on build day.
-      # ============================================================
-      - name: Install NAguideR R dependencies
-        shell: Rscript {0}
-        run: |
-          options(repos = c(CRAN = "https://cloud.r-project.org"))
-          options(Ncpus = 2)
-          source("install_naguider_r_dependencies.R")
-
-
-      # ============================================================
-      # Install additional R packages used only by this app's UI
-      #
-      # These are NOT part of install_naguider_r_dependencies.R —
-      # kept separate on purpose so that script stays the single
-      # source of truth for the NAguideR-specific dependency set.
-      # ============================================================
-      - name: Install additional Shiny/UI R packages
-        shell: Rscript {0}
-        run: |
-          options(repos = c(CRAN = "https://cloud.r-project.org"))
-          options(Ncpus = 2)
-
-          ui_packages <- c(
-            "shiny",
-            "shinyBS",
-            "shinyjs",
-            "shinyWidgets",
-            "DT",
-            "gdata",
-            "ggplot2",
-            "ggsci",
-            "openxlsx",
-            "data.table",
-            "tidyverse",
-            "ggExtra",
-            "cowplot",
-            "Amelia"
-          )
-
-          for (pkg in ui_packages) {
-            if (!requireNamespace(pkg, quietly = TRUE)) {
-              cat("\nInstalling:", pkg, "\n")
-              install.packages(pkg, dependencies = TRUE)
-            }
-          }
-
-
-      # ============================================================
-      # Final validation in a clean R process
-      # ============================================================
-      - name: Verify R / NAguideR
+      - name: Show R cache status
         shell: powershell
         run: |
-          Rscript --version
+          Write-Host "========================================="
+          Write-Host "R cache"
+          Write-Host "========================================="
 
-          Rscript -e "
-          pkgs <- c(
-            'NAguideR', 'e1071', 'impute', 'SeqKnn', 'pcaMethods',
-            'norm', 'imputeLCMD', 'VIM', 'rrcovNA', 'mice',
-            'missForest', 'GMSimpute', 'DreamAI',
-            'shiny', 'DT', 'tidyverse'
-          );
+          Write-Host "Cache hit:"
+          Write-Host "${{ steps.cache-r-lib.outputs.cache-hit }}"
 
-          failed <- character();
-          for (p in pkgs) {
-            ok <- requireNamespace(p, quietly = TRUE);
-            cat(sprintf('%-15s %s\n', p, if (ok) 'OK' else 'MISSING'));
-            if (!ok) failed <- c(failed, p);
+          Write-Host ""
+          Write-Host "R library:"
+          Write-Host $env:R_LIBS_USER
+
+          if (Test-Path $env:R_LIBS_USER) {
+              Get-ChildItem $env:R_LIBS_USER |
+                Select-Object Name |
+                Format-Table -AutoSize
           }
 
-          if (length(failed) > 0)
-            stop(paste('Missing R packages:', paste(failed, collapse=', ')));
+      - name: Install NAguideR R dependencies
+        shell: powershell
+        run: |
+          Write-Host "========================================="
+          Write-Host "Installing R dependencies"
+          Write-Host "========================================="
+
+          Write-Host "R_LIBS_USER:"
+          Write-Host $env:R_LIBS_USER
+
+          Rscript --vanilla -e "`
+            options( `
+              repos = c( `
+                CRAN = 'https://cloud.r-project.org' `
+              ) `
+            ); `
+            options(Ncpus = 2); `
+            source('install_naguider_r_dependencies.R') `
           "
 
+      - name: Verify R and NAguideR
+        shell: powershell
+        run: |
+          Write-Host "========================================="
+          Write-Host "R PACKAGE VALIDATION"
+          Write-Host "========================================="
 
-      # ============================================================
-      # Stage R runtime for PyInstaller
-      # ============================================================
+          Rscript --vanilla -e "`
+          cat('R version:\n'); `
+          cat(R.version.string, '\n\n'); `
+          `
+          cat('Library paths:\n'); `
+          print(.libPaths()); `
+          cat('\n'); `
+          `
+          pkgs <- c( `
+            'NAguideR', `
+            'e1071', `
+            'impute', `
+            'SeqKnn', `
+            'pcaMethods', `
+            'norm', `
+            'imputeLCMD', `
+            'VIM', `
+            'rrcovNA', `
+            'mice', `
+            'missForest', `
+            'GMSimpute', `
+            'DreamAI', `
+            'glmnet', `
+            'ggplot2', `
+            'reshape2', `
+            'randomForest', `
+            'foreach', `
+            'itertools', `
+            'iterators', `
+            'Rcpp', `
+            'shiny', `
+            'shinyBS', `
+            'shinyjs', `
+            'shinyWidgets', `
+            'DT', `
+            'gdata', `
+            'ggsci', `
+            'openxlsx', `
+            'data.table', `
+            'tidyverse', `
+            'ggExtra', `
+            'cowplot', `
+            'Amelia' `
+          ); `
+          `
+          failed <- character(); `
+          `
+          cat('Package status:\n'); `
+          cat('---------------------------------------------\n'); `
+          `
+          for (p in pkgs) { `
+              installed <- p %in% rownames(installed.packages()); `
+              if (!installed) { `
+                  cat(sprintf('%-20s NOT INSTALLED\n', p)); `
+                  failed <- c(failed, p); `
+                  next; `
+              } `
+              ok <- tryCatch( `
+                  { `
+                      loadNamespace(p); `
+                      TRUE `
+                  }, `
+                  error = function(e) { `
+                      cat(sprintf('%-20s LOAD ERROR: %s\n', p, conditionMessage(e))); `
+                      FALSE `
+                  } `
+              ); `
+              if (ok) { `
+                  cat(sprintf('%-20s OK [%s]\n', p, as.character(packageVersion(p)))); `
+              } else { `
+                  failed <- c(failed, p); `
+              } `
+          } `
+          `
+          cat('---------------------------------------------\n'); `
+          `
+          if (length(failed) > 0) { `
+              cat('\nFAILED PACKAGES:\n'); `
+              for (p in failed) { `
+                  cat(' - ', p, '\n', sep=''); `
+              } `
+              stop( `
+                  paste( `
+                    'R validation failed:', `
+                    paste(failed, collapse=', ') `
+                  ) `
+              ); `
+          } `
+          `
+          cat('\nALL REQUIRED R PACKAGES OK\n'); `
+          "
+
+      - name: Test GMSImpute DreamAI and SeqKnn
+        shell: powershell
+        run: |
+          Write-Host "========================================="
+          Write-Host "SPECIAL PACKAGE TEST"
+          Write-Host "========================================="
+
+          Rscript --vanilla -e "`
+            for (p in c( `
+              'GMSimpute', `
+              'DreamAI', `
+              'SeqKnn', `
+              'NAguideR' `
+            )) { `
+              cat('\nTesting ', p, '...\n', sep=''); `
+              loadNamespace(p); `
+              cat( `
+                p, `
+                ' ', `
+                as.character(packageVersion(p)), `
+                ' OK\n', `
+                sep='' `
+              ); `
+            } `
+          "
+
       - name: Stage bundled R runtime
         shell: powershell
         run: |
+          Write-Host "========================================="
+          Write-Host "STAGING R RUNTIME"
+          Write-Host "========================================="
+
           $ROOT = (Get-Location).Path
 
-          $RHOME = (& Rscript -e "cat(R.home())").Trim()
-          $RLIB  = (& Rscript -e "cat(.libPaths()[1])").Trim()
+          $RHOME = (
+              & Rscript --vanilla -e "cat(R.home())"
+          ).Trim()
 
-          Write-Host "Repository root: $ROOT"
-          Write-Host "R_HOME: $RHOME"
-          Write-Host "R library: $RLIB"
+          $RLIB = (
+              & Rscript --vanilla -e "cat(.libPaths()[1])"
+          ).Trim()
 
-          if (!(Test-Path $RHOME)) { throw "R_HOME does not exist: $RHOME" }
-          if (!(Test-Path $RLIB))  { throw "R package library does not exist: $RLIB" }
+          Write-Host "Repository root:"
+          Write-Host $ROOT
 
-          Remove-Item -Recurse -Force "$ROOT\r_bundle" -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Force "$ROOT\r_bundle\R" | Out-Null
-          New-Item -ItemType Directory -Force "$ROOT\r_bundle\library" | Out-Null
+          Write-Host ""
+          Write-Host "R_HOME:"
+          Write-Host $RHOME
 
-          Write-Host "Copying R runtime..."
-          Copy-Item -Recurse -Force "$RHOME\*" "$ROOT\r_bundle\R\"
+          Write-Host ""
+          Write-Host "R package library:"
+          Write-Host $RLIB
 
-          Write-Host "Copying R package library..."
-          Copy-Item -Recurse -Force "$RLIB\*" "$ROOT\r_bundle\library\"
-
-          $rscriptFiles = Get-ChildItem -Recurse "$ROOT\r_bundle\R" -Filter "Rscript.exe"
-          if (!$rscriptFiles) { throw "Rscript.exe was not copied into the bundled R runtime." }
-
-          $requiredPackages = @("NAguideR", "SeqKnn", "GMSimpute", "DreamAI", "missForest")
-          foreach ($pkg in $requiredPackages) {
-            $pkgPath = Join-Path "$ROOT\r_bundle\library" $pkg
-            if (!(Test-Path $pkgPath)) { throw "Package was installed but was not staged: $pkg" }
-            Write-Host "Staged package OK: $pkg"
+          if (!(Test-Path $RHOME)) {
+              throw "R_HOME does not exist: $RHOME"
           }
 
+          if (!(Test-Path $RLIB)) {
+              throw "R package library does not exist: $RLIB"
+          }
 
-      # ============================================================
-      # Repository check
-      # ============================================================
-      - name: Show repository contents
+          Write-Host ""
+          Write-Host "Removing previous r_bundle..."
+
+          Remove-Item `
+            -Recurse `
+            -Force `
+            "$ROOT\r_bundle" `
+            -ErrorAction SilentlyContinue
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            "$ROOT\r_bundle\R" |
+            Out-Null
+
+          New-Item `
+            -ItemType Directory `
+            -Force `
+            "$ROOT\r_bundle\library" |
+            Out-Null
+
+          Write-Host ""
+          Write-Host "Copying R runtime..."
+
+          Copy-Item `
+            -Recurse `
+            -Force `
+            "$RHOME\*" `
+            "$ROOT\r_bundle\R\"
+
+          Write-Host ""
+          Write-Host "Copying R package library..."
+
+          Copy-Item `
+            -Recurse `
+            -Force `
+            "$RLIB\*" `
+            "$ROOT\r_bundle\library\"
+
+          $rscriptFiles = Get-ChildItem `
+              -Recurse `
+              "$ROOT\r_bundle\R" `
+              -Filter "Rscript.exe"
+
+          if (!$rscriptFiles) {
+              throw "Rscript.exe was not copied into r_bundle."
+          }
+
+          Write-Host ""
+          Write-Host "Bundled Rscript:"
+
+          $rscriptFiles |
+            Select-Object FullName |
+            Format-Table -AutoSize
+
+          $requiredPackages = @(
+              "NAguideR",
+              "SeqKnn",
+              "GMSimpute",
+              "DreamAI",
+              "missForest"
+          )
+
+          foreach ($pkg in $requiredPackages) {
+              $pkgPath = Join-Path `
+                  "$ROOT\r_bundle\library" `
+                  $pkg
+
+              if (!(Test-Path $pkgPath)) {
+                  throw "Package installed but was not staged: $pkg"
+              }
+
+              Write-Host "STAGED: $pkg"
+          }
+
+      - name: Show R bundle
         shell: powershell
         run: |
-          Get-ChildItem -Force | Select-Object Name, Mode, Length | Format-Table -AutoSize
+          Write-Host "========================================="
+          Write-Host "R BUNDLE"
+          Write-Host "========================================="
 
-          if (Test-Path "r_packages") {
-            Get-ChildItem -Recurse "r_packages" | Select-Object FullName, Length | Format-Table -AutoSize
-          } else {
-            throw "r_packages directory is missing."
+          Write-Host "R bundle size:"
+
+          $size = (
+              Get-ChildItem `
+                  -Recurse `
+                  r_bundle |
+              Measure-Object `
+                  -Property Length `
+                  -Sum
+          ).Sum
+
+          if ($size) {
+              $sizeGB = [math]::Round(
+                  $size / 1GB,
+                  2
+              )
+
+              Write-Host "$sizeGB GB"
           }
 
-          # KNOWN ISSUE TO CONFIRM BEFORE RELYING ON THIS BUILD:
-          # Repo contains app_launcher_FIIE.py, but build_windows.ps1
-          # hidden-imports "app_launcher_FILE" / "faq.faq_FILE".
-          # If the app dynamically loads this module by name at runtime,
-          # the mismatched spelling means it can be silently dropped
-          # from the frozen exe. Confirm which spelling is correct
-          # (rename the file or fix build_windows.ps1) before shipping.
-          if (Test-Path "app_launcher_FIIE.py") {
-            Write-Warning "app_launcher_FIIE.py exists but build_windows.ps1 hidden-imports 'app_launcher_FILE'. Verify this is intentional."
-          }
+          Write-Host ""
+          Write-Host "Bundled packages:"
 
+          Get-ChildItem `
+              "r_bundle\library" |
+              Select-Object Name |
+              Sort-Object Name |
+              Format-Table -AutoSize
 
-      # ============================================================
-      # Python dependencies
-      # ============================================================
       - name: Install Python dependencies
         shell: powershell
         run: |
-          python -m pip install --upgrade pip setuptools wheel
-          pip install -r requirements.txt
-          pip install streamlit-desktop-app pyinstaller
+          Write-Host "========================================="
+          Write-Host "PYTHON DEPENDENCIES"
+          Write-Host "========================================="
 
+          python -m pip install `
+              --upgrade `
+              pip `
+              setuptools `
+              wheel
 
-      # ============================================================
-      # Build
-      # ============================================================
+          python -m pip install `
+              -r requirements.txt
+
+          python -m pip install `
+              streamlit-desktop-app `
+              pyinstaller
+
+      - name: Verify Python build tools
+        shell: powershell
+        run: |
+          Write-Host "========================================="
+          Write-Host "PYTHON BUILD TOOLS"
+          Write-Host "========================================="
+
+          python --version
+          python -m PyInstaller --version
+          python -m pip show streamlit
+          python -m pip show streamlit-desktop-app
+          python -m pip show pyinstaller
+
+      - name: Final repository check
+        shell: powershell
+        run: |
+          Write-Host "========================================="
+          Write-Host "FINAL REPOSITORY CHECK"
+          Write-Host "========================================="
+
+          Get-ChildItem -Force |
+            Select-Object Name, Mode, Length |
+            Format-Table -AutoSize
+
+          Write-Host ""
+          Write-Host "build_windows.ps1:"
+
+          if (!(Test-Path "build_windows.ps1")) {
+              throw "build_windows.ps1 is missing"
+          }
+
+          if (Test-Path "app_launcher_FIIE.py") {
+              Write-Warning "app_launcher_FIIE.py exists. Previously build_windows.ps1 referenced app_launcher_FILE. Check that FIIE vs FILE is intentional."
+          }
+
       - name: Build Windows app
         shell: powershell
         run: |
+          Write-Host "========================================="
+          Write-Host "BUILDING WINDOWS APPLICATION"
+          Write-Host "========================================="
+
+          Set-ExecutionPolicy `
+              -ExecutionPolicy Bypass `
+              -Scope Process `
+              -Force
+
           .\build_windows.ps1
 
-
-      # ============================================================
-      # Verify build
-      # ============================================================
-      - name: Show build output
+      - name: Verify build output
         shell: powershell
         run: |
-          if (!(Test-Path "dist")) { throw "dist directory does not exist." }
-          Get-ChildItem -Recurse dist | Select-Object FullName, Length | Format-Table -AutoSize
+          Write-Host "========================================="
+          Write-Host "BUILD OUTPUT"
+          Write-Host "========================================="
 
+          if (!(Test-Path "dist")) {
+              throw "dist directory does not exist."
+          }
 
-      # ============================================================
-      # ZIP
-      # ============================================================
+          Get-ChildItem `
+              -Recurse `
+              dist |
+              Select-Object FullName, Length |
+              Format-Table -AutoSize
+
+          if (!(Test-Path "dist\ProteomicsWorkbench")) {
+              Write-Host ""
+              Write-Host "Contents of dist:"
+
+              Get-ChildItem `
+                  -Force `
+                  dist |
+                  Format-Table -AutoSize
+
+              throw "Expected application directory was not created: dist\ProteomicsWorkbench. The R-enabled application must be built using PyInstaller --onedir."
+          }
+
+      - name: Verify R inside Windows application
+        shell: powershell
+        run: |
+          Write-Host "========================================="
+          Write-Host "VERIFYING BUNDLED R"
+          Write-Host "========================================="
+
+          $APP_DIR = "dist\ProteomicsWorkbench"
+
+          $rscript = Get-ChildItem `
+              -Path $APP_DIR `
+              -Recurse `
+              -Filter "Rscript.exe" `
+              -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+
+          if (!$rscript) {
+              throw "Rscript.exe was not found inside the built application. The PyInstaller build did not include the R runtime."
+          }
+
+          Write-Host "Bundled Rscript found:"
+          Write-Host $rscript.FullName
+
       - name: Zip Windows app
         shell: powershell
         run: |
+          Write-Host "========================================="
+          Write-Host "CREATING ZIP"
+          Write-Host "========================================="
+
           $APP_DIR = "dist\ProteomicsWorkbench"
+          $ZIP = "ProteomicsWorkbench-Windows.zip"
 
           if (!(Test-Path $APP_DIR)) {
-            throw "Could not find: $APP_DIR. The R-enabled Windows application should be built using PyInstaller --onedir."
+              throw "Could not find application directory: $APP_DIR"
           }
 
-          Compress-Archive -Path "$APP_DIR\*" -DestinationPath "ProteomicsWorkbench-Windows.zip" -Force
-
-          if (!(Test-Path "ProteomicsWorkbench-Windows.zip")) {
-            throw "ZIP file was not created."
+          if (Test-Path $ZIP) {
+              Remove-Item -Force $ZIP
           }
 
-          Get-Item "ProteomicsWorkbench-Windows.zip" | Select-Object Name, Length | Format-Table -AutoSize
+          Compress-Archive `
+              -Path "$APP_DIR\*" `
+              -DestinationPath $ZIP `
+              -Force
 
+          if (!(Test-Path $ZIP)) {
+              throw "ZIP file was not created."
+          }
 
-      # ============================================================
-      # Upload
-      # ============================================================
+          Write-Host ""
+          Write-Host "Created:"
+
+          Get-Item $ZIP |
+            Select-Object Name, Length |
+            Format-Table -AutoSize
+
       - name: Upload Windows app
         uses: actions/upload-artifact@v6
         with:
