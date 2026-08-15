@@ -8,6 +8,14 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 90   # Hard cap. Prevents a stuck install.packages() call from
                            # burning the default 6-hour job timeout.
+    env:
+      # remotes::install_github() (used for DreamAI and NAguideR) hits the
+      # GitHub API several times per package. Anonymous requests are capped
+      # at 60/hour, which GitHub-hosted runners burn through fast since many
+      # jobs share the same IP ranges. This raises it to 5,000/hour using the
+      # job's own token — no extra secret setup needed, GITHUB_TOKEN is
+      # auto-provided by Actions.
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
 
