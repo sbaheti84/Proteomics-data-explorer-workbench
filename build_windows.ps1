@@ -61,7 +61,6 @@ streamlit-desktop-app build app.py `
     --paths "$(Join-Path $ROOT 'tp')" `
     --paths "$(Join-Path $ROOT 'faq')" `
     --add-data "$ROOT\app_launcher_*.py;." `
-    --add-data "$ROOT\total_proteome_lfq_naguider.py;." `
     --add-data "$ROOT\download_utility.py;." `
     --add-data "$ROOT\naguider_impute.R;." `
     --add-data "$ROOT\r_bundle\R;R" `
