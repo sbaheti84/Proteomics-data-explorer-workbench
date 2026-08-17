@@ -76,6 +76,11 @@ RUN apt-get update && \
         libncurses-dev \
         libglpk-dev \
         libnlopt-dev \
+        libgsl-dev \
+        libudunits2-dev \
+        libgdal-dev \
+        libgeos-dev \
+        libproj-dev \
     && rm -rf /var/lib/apt/lists/*
 
 
@@ -157,7 +162,7 @@ COPY install_naguider_r_dependencies.R /app/install_naguider_r_dependencies.R
 RUN echo "========================================" && \
     echo "Installing R dependencies" && \
     echo "========================================" && \
-    Rscript /app/install_naguider_r_dependencies.R
+    Rscript --vanilla /app/install_naguider_r_dependencies.R
 
 
 # ============================================================
