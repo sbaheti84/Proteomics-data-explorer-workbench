@@ -66,6 +66,7 @@ RUN apt-get update && \
         libxt-dev \
         libicu-dev \
         libblas-dev \
+        libuv1-dev \
         liblapack-dev \
         libbz2-dev \
         liblzma-dev \
