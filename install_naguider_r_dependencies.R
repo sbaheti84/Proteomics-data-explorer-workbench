@@ -704,13 +704,6 @@ cat(
 
 # ============================================================
 # DreamAI
-#
-# IMPORTANT:
-# R package is inside:
-#
-#   WangLab-MSSM/DreamAI/Code
-#
-# NOT at the GitHub repository root.
 # ============================================================
 
 cat("\n")
@@ -729,20 +722,55 @@ if (package_ok("DreamAI")) {
 
 } else {
 
+    cat("Installing DreamAI using git clone...\n")
+
+    dreamai_tmp <- tempfile("DreamAI_")
+
+    clone_status <- system2(
+        "git",
+        c(
+            "clone",
+            "--depth", "1",
+            "https://github.com/WangLab-MSSM/DreamAI.git",
+            dreamai_tmp
+        )
+    )
+
+    if (clone_status != 0) {
+        stop(
+            "Failed to clone DreamAI repository.",
+            call. = FALSE
+        )
+    }
+
+    dreamai_pkg <- file.path(
+        dreamai_tmp,
+        "Code"
+    )
+
+    if (!file.exists(file.path(dreamai_pkg, "DESCRIPTION"))) {
+        stop(
+            paste(
+                "DreamAI package DESCRIPTION not found:",
+                dreamai_pkg
+            ),
+            call. = FALSE
+        )
+    }
+
     cat(
-        "Installing DreamAI from GitHub...\n"
+        "DreamAI package source:",
+        dreamai_pkg,
+        "\n"
     )
 
     tryCatch(
         {
 
-            remotes::install_github(
-                repo = "WangLab-MSSM/DreamAI",
-                subdir = "Code",
-                dependencies = FALSE,
-                upgrade = "never",
-                force = TRUE,
-                quiet = FALSE
+            install.packages(
+                dreamai_pkg,
+                repos = NULL,
+                type = "source"
             )
 
         },
@@ -764,6 +792,12 @@ if (package_ok("DreamAI")) {
                 call. = FALSE
             )
         }
+    )
+
+    unlink(
+        dreamai_tmp,
+        recursive = TRUE,
+        force = TRUE
     )
 }
 
