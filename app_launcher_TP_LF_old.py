@@ -9,6 +9,10 @@ import os
 import io
 import re
 import uuid
+import shutil
+import subprocess
+import tempfile
+import sys
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -68,6 +72,121 @@ try_set_page_config(page_title="Total Proteomics LFQ | Mayo Clinic", layout="wid
 inject_custom_css()
 ss = st.session_state
 
+
+def _runtime_bundle_root_lfq() -> Path:
+    """Return the directory that contains bundled runtime resources."""
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    return Path(__file__).resolve().parent
+
+
+def get_bundled_r_environment() -> tuple[str, dict]:
+    """
+    Locate Rscript and construct the environment used by the LFQ R backend.
+
+    Search order:
+      1. RSCRIPT_PATH environment override.
+      2. R runtime bundled by PyInstaller under <bundle>/R.
+      3. R_HOME supplied by the host environment.
+      4. Rscript available on PATH.
+      5. Common macOS/Linux/Windows installation locations.
+
+    For a frozen Windows build, the function also points R at the bundled
+    package library under <bundle>/R_library.
+    """
+    bundle_root = _runtime_bundle_root_lfq()
+    bundled_library = bundle_root / "R_library"
+
+    candidates = []
+
+    explicit_rscript = os.environ.get("RSCRIPT_PATH")
+    if explicit_rscript:
+        candidates.append((Path(explicit_rscript), False))
+
+    # PyInstaller/standalone runtime layout.
+    candidates.extend([
+        (bundle_root / "R" / "bin" / "Rscript.exe", True),
+        (bundle_root / "R" / "bin" / "x64" / "Rscript.exe", True),
+        (bundle_root / "R" / "bin" / "Rscript", True),
+    ])
+
+    # Host-provided R_HOME.
+    host_r_home = os.environ.get("R_HOME")
+    if host_r_home:
+        host_r_home_path = Path(host_r_home)
+        candidates.extend([
+            (host_r_home_path / "bin" / "Rscript.exe", False),
+            (host_r_home_path / "bin" / "x64" / "Rscript.exe", False),
+            (host_r_home_path / "bin" / "Rscript", False),
+        ])
+
+    # Normal PATH lookup.
+    path_rscript = shutil.which("Rscript") or shutil.which("Rscript.exe")
+    if path_rscript:
+        candidates.append((Path(path_rscript), False))
+
+    # Common non-PATH locations.
+    candidates.extend([
+        (Path("/Library/Frameworks/R.framework/Resources/bin/Rscript"), False),
+        (Path("/opt/homebrew/bin/Rscript"), False),
+        (Path("/usr/local/bin/Rscript"), False),
+        (Path("/usr/bin/Rscript"), False),
+        (Path(r"C:\Program Files\R\R-4.5.1\bin\Rscript.exe"), False),
+        (Path(r"C:\Program Files\R\R-4.5.1\bin\x64\Rscript.exe"), False),
+    ])
+
+    rscript = None
+    using_bundled_r = False
+    for candidate, is_bundled in candidates:
+        if candidate and candidate.exists():
+            rscript = candidate.resolve()
+            using_bundled_r = is_bundled
+            break
+
+    if rscript is None:
+        raise RuntimeError(
+            "Rscript was not found. For the standalone Windows build, make sure the "
+            "PyInstaller bundle contains R/bin/Rscript.exe and R_library. For a normal "
+            "installation, install R or set RSCRIPT_PATH/R_HOME."
+        )
+
+    env = os.environ.copy()
+
+    # For the bundled runtime we know the R installation layout exactly.
+    if using_bundled_r:
+        if rscript.parent.name.lower() == "x64":
+            r_home = rscript.parent.parent.parent
+        else:
+            r_home = rscript.parent.parent
+
+        env["R_HOME"] = str(r_home)
+
+        r_bin = r_home / "bin"
+        r_x64 = r_bin / "x64"
+        path_parts = [str(r_x64), str(r_bin), env.get("PATH", "")]
+        env["PATH"] = os.pathsep.join([p for p in path_parts if p])
+
+        if bundled_library.exists():
+            # Keep the packaged project library first while R still retains its
+            # base/recommended library under R_HOME.
+            env["R_LIBS_USER"] = str(bundled_library)
+            env["R_LIBS"] = str(bundled_library)
+    else:
+        # Do not infer R_HOME from /usr/bin/Rscript or similar symlinks. If the
+        # host supplied R_HOME, preserve it; otherwise let R discover its own home.
+        if host_r_home:
+            env["R_HOME"] = str(Path(host_r_home).resolve())
+
+        # If a packaged library happens to be present, expose it without forcing
+        # a bundled R installation.
+        if bundled_library.exists():
+            env["R_LIBS_USER"] = str(bundled_library)
+            env["R_LIBS"] = str(bundled_library)
+
+        rscript_dir = str(rscript.parent)
+        env["PATH"] = os.pathsep.join([rscript_dir, env.get("PATH", "")])
+
+    return str(rscript), env
 
 def _get_downloads_dir():
     """Return a safe Downloads folder path for macOS/Windows/Linux."""
@@ -135,8 +254,16 @@ def _reset_all_data(clear_cache: bool = False):
 
     ss["raw_df"] = None
     ss["expr_raw"] = None
+    ss["expr_normalized"] = None
+    ss["expr_imputed"] = None
     ss["expr_pre_batch"] = None
     ss["expr_processed"] = None
+    ss["expr_final"] = None
+    ss["preprocessing_applied"] = False
+    ss["preprocessing_run_signature"] = None
+    ss["imputation_applied_method"] = "None"
+    ss["normalization_applied_method"] = "None"
+    ss["preprocessing_dirty"] = False
     ss["diff_results"] = None
     ss["filtered_df"] = None
     ss["filtered_ready"] = False
@@ -171,7 +298,25 @@ def init_session_state_defaults():
         "batch_correction_applied_method": "None",
         "batch_correction_run_signature": None,
         "batch_correction_last_error": None,
+        "expr_raw": None,
+        "expr_normalized": None,
+        "expr_imputed": None,
         "expr_pre_batch": None,
+        "expr_processed": None,
+        "expr_final": None,
+        "preprocessing_applied": False,
+        "preprocessing_run_signature": None,
+        "imputation_applied_method": "None",
+        "normalization_applied_method": "None",
+        "preprocessing_dirty": False,
+        "pre_treat_zero": True,
+        "pre_log2": True,
+        "pre_presence_filter": True,
+        "pre_presence_min_frac": 0.40,
+        "pre_presence_rule": "or",
+        "pre_normalization_method": "Median centering (log2)",
+        "pre_imputation_family": "All methods",
+        "pre_imputation_method": "K-nearest neighbor (KNN)",
         "show_overview": False,
         "show_suite": False,
         "show_global_select": False,
@@ -193,14 +338,21 @@ def clean_lfq_sample(col: str) -> str:
     s = re.sub(r"(?i)abundance\s*:\s*", "", s)
     s = s.replace(":", "").strip()
     return s.strip()
-def apply_batch_correction(df: pd.DataFrame, batch_list: list[list[str]], method: str) -> pd.DataFrame:
+def apply_batch_correction(
+    df: pd.DataFrame,
+    batch_list: list[list[str]],
+    method: str,
+    biological_groups: Optional[dict] = None,
+) -> pd.DataFrame:
     """
-    Applies the selected statistical batch correction algorithm.
-    Assumes df is already log2 transformed.
+    Apply technical batch correction to an already preprocessed log2 matrix.
+
+    For ComBat, biological group labels are passed as a categorical covariate so
+    the biological condition is preserved while estimating technical batch effects.
     """
     out = df.copy()
     ss["batch_correction_last_error"] = None
-    
+
     if method == "Median Centering":
         global_med = out.median(axis=1)
         for b_cols in batch_list:
@@ -208,7 +360,7 @@ def apply_batch_correction(df: pd.DataFrame, batch_list: list[list[str]], method
             if valid:
                 b_med = out[valid].median(axis=1)
                 out[valid] = out[valid].sub(b_med, axis=0).add(global_med, axis=0)
-                
+
     elif method == "Mean Centering":
         global_mean = out.mean(axis=1)
         for b_cols in batch_list:
@@ -216,58 +368,82 @@ def apply_batch_correction(df: pd.DataFrame, batch_list: list[list[str]], method
             if valid:
                 b_mean = out[valid].mean(axis=1)
                 out[valid] = out[valid].sub(b_mean, axis=0).add(global_mean, axis=0)
-                
+
     elif method == "Standardize (Mean + Variance)":
         global_mean = out.mean(axis=1)
-        global_std = out.std(axis=1).replace(0, 1e-9) 
-        
+        global_std = out.std(axis=1).replace(0, 1e-9)
         for b_cols in batch_list:
             valid = [c for c in b_cols if c in out.columns]
             if len(valid) > 1:
                 b_mean = out[valid].mean(axis=1)
                 b_std = out[valid].std(axis=1).replace(0, 1e-9)
-                out[valid] = out[valid].sub(b_mean, axis=0).div(b_std, axis=0).mul(global_std, axis=0).add(global_mean, axis=0)
+                out[valid] = (
+                    out[valid]
+                    .sub(b_mean, axis=0)
+                    .div(b_std, axis=0)
+                    .mul(global_std, axis=0)
+                    .add(global_mean, axis=0)
+                )
             elif len(valid) == 1:
                 b_mean = out[valid].mean(axis=1)
                 out[valid] = out[valid].sub(b_mean, axis=0).add(global_mean, axis=0)
-                
+
     elif method == "ComBat (Empirical Bayes)":
         if not HAS_COMBAT:
-            msg = "The 'neuroCombat' package is not installed. Please run `pip install neuroCombat` to use ComBat."
+            msg = "The 'neuroCombat' package is not installed. Run `pip install neuroCombat` to use ComBat."
             ss["batch_correction_last_error"] = msg
             st.error(msg)
             return out
-            
+
         sample_to_batch = {}
         for idx, b_cols in enumerate(batch_list):
             for c in b_cols:
                 if c in out.columns:
                     sample_to_batch[c] = idx + 1
-                    
+
         valid_cols = list(sample_to_batch.keys())
         if not valid_cols:
             return out
-            
+
         dat = out[valid_cols].copy()
-        
-        na_mask = dat.isna()
-        row_medians = dat.median(axis=1)
-        dat_imputed = dat.apply(lambda col: col.fillna(row_medians)).fillna(0)
-        
-        covars = pd.DataFrame({"batch": [sample_to_batch[c] for c in valid_cols]}, index=valid_cols)
-        
-        try:
-            combat_res = neuroCombat(dat=dat_imputed, covars=covars, batch_col="batch")
-            corrected_df = pd.DataFrame(combat_res["data"], index=dat.index, columns=valid_cols)
-            
-            corrected_df[na_mask] = np.nan
-            out[valid_cols] = corrected_df
-            
-        except Exception as e:
-            msg = f"ComBat correction failed: {e}. Check if your batches have too few samples or zero-variance rows."
+        if dat.isna().any().any():
+            msg = (
+                "ComBat requires a complete matrix in this workflow. Missing values remain after "
+                "imputation; choose an imputation method that completes the matrix before running ComBat."
+            )
             ss["batch_correction_last_error"] = msg
             st.error(msg)
+            return out
+
+        covars_dict = {"batch": [sample_to_batch[c] for c in valid_cols]}
+        categorical_cols = []
+        if biological_groups:
+            group_values = [biological_groups.get(c, "Unknown") for c in valid_cols]
+            if len(set(group_values)) > 1:
+                covars_dict["biological_group"] = group_values
+                categorical_cols = ["biological_group"]
+
+        covars = pd.DataFrame(covars_dict, index=valid_cols)
+
+        try:
+            combat_res = neuroCombat(
+                dat=dat,
+                covars=covars,
+                batch_col="batch",
+                categorical_cols=categorical_cols,
+            )
+            corrected_df = pd.DataFrame(combat_res["data"], index=dat.index, columns=valid_cols)
+            out[valid_cols] = corrected_df
+        except Exception as e:
+            msg = (
+                f"ComBat correction failed: {e}. Check batch sizes and whether biological group "
+                "is completely confounded with batch."
+            )
+            ss["batch_correction_last_error"] = msg
+            st.error(msg)
+
     return out
+
 def filter_by_presence_rule(
     df: pd.DataFrame,
     all_samples: list[str],
@@ -326,6 +502,320 @@ def replace_zeros_rowwise_min_fraction(
         X_new[good] = np.where(repl_mask[good], fill[good, None], X[good])
         out[cols] = X_new
     return out
+
+# -----------------------------------------------------------------------------
+# LFQ normalization and NAguideR-compatible R imputation bridge
+# -----------------------------------------------------------------------------
+NAGUIDER_METHODS = [
+    {"label": "Zero", "key": "zero", "family": "Single value", "package": None, "speed": "Fast"},
+    {"label": "Minimum", "key": "minimum", "family": "Single value", "package": None, "speed": "Fast"},
+    {"label": "Column median", "key": "colmedian", "family": "Single value", "package": "e1071", "speed": "Fast"},
+    {"label": "Row median", "key": "rowmedian", "family": "Single value", "package": "e1071", "speed": "Fast"},
+    {"label": "Deterministic minimum (MinDet)", "key": "mindet", "family": "Single value", "package": "imputeLCMD", "speed": "Fast"},
+    {"label": "Stochastic minimum (MinProb)", "key": "minprob", "family": "Single value", "package": "imputeLCMD", "speed": "Fast"},
+    {"label": "Perseus imputation (PI)", "key": "pi", "family": "Single value", "package": None, "speed": "Fast"},
+    {"label": "Singular value decomposition (SVD)", "key": "svdmethod", "family": "Global structure", "package": "pcaMethods", "speed": "Medium"},
+    {"label": "Maximum likelihood estimation (MLE)", "key": "mle", "family": "Global structure", "package": "norm", "speed": "Medium"},
+    {"label": "Sequential imputation (ImpSeq)", "key": "impseq", "family": "Global structure", "package": "rrcovNA", "speed": "Medium"},
+    {"label": "Robust sequential imputation (ImpSeqRob)", "key": "impseqrob", "family": "Global structure", "package": "rrcovNA", "speed": "Medium"},
+    {"label": "Bayesian PCA (BPCA)", "key": "bpca", "family": "Global structure", "package": "pcaMethods", "speed": "Slow"},
+    {"label": "K-nearest neighbor (KNN)", "key": "knnmethod", "family": "Local similarity", "package": "impute", "speed": "Medium"},
+    {"label": "Sequential KNN (Seq-KNN)", "key": "seqknn", "family": "Local similarity", "package": "SeqKnn", "speed": "Medium"},
+    {"label": "Quantile regression (QRILC)", "key": "qrilc", "family": "Local similarity", "package": "imputeLCMD", "speed": "Medium"},
+    {"label": "Local least squares (LLS)", "key": "lls", "family": "Local similarity", "package": "pcaMethods", "speed": "Medium"},
+    {"label": "Glmnet ridge regression (GRR)", "key": "grr", "family": "Local similarity", "package": "DreamAI", "speed": "Medium"},
+    {"label": "MICE Bayesian linear regression (mice-norm)", "key": "mice-norm", "family": "Local similarity", "package": "mice", "speed": "Slow"},
+    {"label": "Truncation KNN (trKNN)", "key": "trknn", "family": "Local similarity", "package": "NAguideR", "speed": "Slow"},
+    {"label": "Iterative robust model (IRM)", "key": "irm", "family": "Local similarity", "package": "VIM", "speed": "Slow"},
+    {"label": "Generalized Mass Spectrum (GMS)", "key": "gms", "family": "Local similarity", "package": "GMSimpute", "speed": "Slow"},
+    {"label": "MICE classification/regression trees (mice-cart)", "key": "mice-cart", "family": "Local similarity", "package": "mice", "speed": "Slow"},
+    {"label": "Random forest (RF)", "key": "rf", "family": "Local similarity", "package": "missForest", "speed": "Slow"},
+]
+NAGUIDER_BY_LABEL = {m["label"]: m for m in NAGUIDER_METHODS}
+
+# -----------------------------------------------------------------------------
+# TEMPORARY RCONNECT COMPATIBILITY MODE
+# -----------------------------------------------------------------------------
+# Keep the NAguideR method selector and R bridge in the application, but while
+# R execution is unavailable on Posit/RStudio Connect, use the historical LFQ
+# imputation rule: missing values = 1/5 of the smallest positive abundance for
+# that protein. Set this flag to False to restore the selected NAguideR method.
+TEMP_USE_LEGACY_ONE_FIFTH_IMPUTATION = True
+LEGACY_ONE_FIFTH_FRACTION = 0.20
+
+
+def normalize_lfq_log2(df: pd.DataFrame, method: str) -> pd.DataFrame:
+    """Normalize a log2 LFQ matrix while preserving missing values."""
+    out = df.copy().astype(float)
+    if not method or method == "None":
+        return out
+
+    if method == "Median centering (log2)":
+        centers = out.median(axis=0, skipna=True)
+        target = float(np.nanmedian(centers.to_numpy(dtype=float)))
+        return out.subtract(centers, axis=1).add(target)
+
+    if method == "Mean centering (log2)":
+        centers = out.mean(axis=0, skipna=True)
+        target = float(np.nanmean(centers.to_numpy(dtype=float)))
+        return out.subtract(centers, axis=1).add(target)
+
+    raise ValueError(f"Unsupported normalization method: {method}")
+
+
+def temporary_legacy_one_fifth_imputation_lfq(
+    raw_df: pd.DataFrame,
+    transformed_df: pd.DataFrame,
+    normalized_df: pd.DataFrame,
+    frac: float = LEGACY_ONE_FIFTH_FRACTION,
+    log2_enabled: bool = True,
+) -> pd.DataFrame:
+    """
+    Temporarily reproduce the historical LFQ imputation rule without R.
+
+    For each protein (row), every missing/non-positive value is replaced by
+    ``frac * smallest positive observed abundance``.  The replacement is
+    calculated on the original abundance scale.
+
+    When log2 preprocessing is enabled, the fill value is converted to log2 and
+    then placed on the *existing normalized scale* using the same per-sample
+    offset already applied to observed values.  This avoids the incorrect
+    operation of multiplying a log2 abundance by 0.2 and also avoids changing
+    the normalized observed values.
+    """
+    raw = raw_df.copy().astype(float)
+    transformed = transformed_df.copy().astype(float)
+    out = normalized_df.copy().astype(float)
+
+    # Historical rule: row-wise minimum strictly positive abundance / 5.
+    positive = raw.where(np.isfinite(raw) & (raw > 0))
+    row_min_positive = positive.min(axis=1, skipna=True)
+    fill_raw = row_min_positive * float(frac)
+
+    if log2_enabled:
+        fill_base = np.log2(fill_raw.where(fill_raw > 0))
+
+        # Normalization in this workflow is a per-column additive shift on the
+        # log2 scale. Recover that shift from observed values and apply it only
+        # to the newly imputed entries.
+        for col in out.columns:
+            observed = transformed[col].notna() & out[col].notna()
+            if observed.any():
+                offset = float((out.loc[observed, col] - transformed.loc[observed, col]).median())
+            else:
+                offset = 0.0
+
+            missing = out[col].isna() & fill_base.notna()
+            if missing.any():
+                out.loc[missing, col] = fill_base.loc[missing] + offset
+    else:
+        for col in out.columns:
+            missing = out[col].isna() & fill_raw.notna()
+            if missing.any():
+                out.loc[missing, col] = fill_raw.loc[missing]
+
+    return out
+
+
+def _find_rscript_lfq() -> Optional[str]:
+    """Return the Rscript executable used by the LFQ backend."""
+    try:
+        rscript, _ = get_bundled_r_environment()
+        return rscript
+    except Exception:
+        return None
+
+
+def _find_naguider_bridge_script_lfq() -> Optional[Path]:
+    """Locate naguider_impute.R in source, deployed, or frozen-app layouts."""
+    bundle_root = _runtime_bundle_root_lfq()
+    source_root = Path(__file__).resolve().parent
+
+    candidates = [
+        bundle_root / "naguider_impute.R",
+        bundle_root / "assets" / "r" / "naguider_impute.R",
+        source_root / "naguider_impute.R",
+        source_root / "assets" / "r" / "naguider_impute.R",
+        Path.cwd() / "naguider_impute.R",
+        Path.cwd() / "assets" / "r" / "naguider_impute.R",
+    ]
+
+    seen = set()
+    for candidate in candidates:
+        candidate = Path(candidate)
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        if candidate.exists():
+            return candidate.resolve()
+    return None
+
+
+def check_naguider_r_environment_lfq(
+    method_label: Optional[str] = None,
+) -> tuple[bool, str]:
+    """Check Rscript, the bridge script, and the R package required by a method."""
+    try:
+        rscript, r_env = get_bundled_r_environment()
+    except Exception as e:
+        return False, str(e)
+
+    bridge = _find_naguider_bridge_script_lfq()
+    if bridge is None:
+        return (
+            False,
+            "naguider_impute.R was not found. The standalone build must bundle it "
+            "at the application root (PyInstaller --add-data).",
+        )
+
+    method = NAGUIDER_BY_LABEL.get(method_label or "")
+    pkgs = []
+    if method and method.get("package"):
+        pkgs.append(method["package"])
+    if method and method.get("key") == "trknn" and "NAguideR" not in pkgs:
+        pkgs.append("NAguideR")
+
+    checks = [
+        'cat("R_VERSION=", as.character(getRversion()), "\\n", sep="")',
+        'cat("R_HOME=", R.home(), "\\n", sep="")',
+        'cat("R_LIBS=", paste(.libPaths(), collapse="|"), "\\n", sep="")',
+    ]
+    checks.extend(
+        [
+            f'if (!requireNamespace("{p}", quietly=TRUE)) stop("MISSING:{p}")'
+            for p in pkgs
+        ]
+    )
+    r_expr = "; ".join(checks)
+
+    try:
+        res = subprocess.run(
+            [rscript, "--vanilla", "-e", r_expr],
+            capture_output=True,
+            text=True,
+            timeout=90,
+            env=r_env,
+        )
+    except Exception as e:
+        return False, f"Could not start Rscript: {e}"
+
+    if res.returncode != 0:
+        detail = (res.stderr or res.stdout or "Unknown R error").strip()
+        return False, (
+            "R is available, but the selected NAguideR method is not ready: "
+            + detail[-2500:]
+        )
+
+    stdout = (res.stdout or "").strip().replace("\n", " | ")
+    pkg_text = ", ".join(pkgs) if pkgs else "base R only"
+    return True, (
+        f"R backend ready ({pkg_text}). Rscript: {rscript}. "
+        f"Bridge: {bridge}. {stdout}"
+    )
+
+
+def run_naguider_imputation_lfq(
+    df: pd.DataFrame,
+    method_label: str,
+    pi_width: float = 0.3,
+    pi_downshift: float = 1.8,
+    rf_ntree: int = 20,
+) -> pd.DataFrame:
+    """Run one of NAguideR's 23 imputation methods through an Rscript subprocess."""
+    if method_label == "None (leave missing values)":
+        return df.copy()
+
+    method = NAGUIDER_BY_LABEL.get(method_label)
+    if method is None:
+        raise ValueError(f"Unknown NAguideR method: {method_label}")
+
+    try:
+        rscript, r_env = get_bundled_r_environment()
+    except Exception as e:
+        raise RuntimeError(str(e)) from e
+
+    bridge = _find_naguider_bridge_script_lfq()
+    if bridge is None:
+        raise RuntimeError(
+            "naguider_impute.R was not found. In the standalone build, bundle it with "
+            "`--add-data \"$ROOT\\naguider_impute.R;.\"`."
+        )
+
+    work = df.copy().astype(float)
+
+    with tempfile.TemporaryDirectory(prefix="lfq_naguider_") as tmpdir:
+        in_path = Path(tmpdir) / "input.tsv"
+        out_path = Path(tmpdir) / "output.tsv"
+
+        work.to_csv(
+            in_path,
+            sep="\t",
+            index=True,
+            index_label="RowID",
+            na_rep="NA",
+        )
+
+        cmd = [
+            rscript,
+            "--vanilla",
+            str(bridge),
+            str(in_path),
+            str(out_path),
+            method["key"],
+            str(float(pi_width)),
+            str(float(pi_downshift)),
+            str(int(rf_ntree)),
+        ]
+
+        try:
+            res = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=3600,
+                env=r_env,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(
+                f"NAguideR method '{method_label}' exceeded the 60-minute timeout."
+            ) from e
+        except Exception as e:
+            raise RuntimeError(f"Could not launch the NAguideR R backend: {e}") from e
+
+        if res.returncode != 0:
+            detail = (res.stderr or res.stdout or "Unknown R error").strip()
+            raise RuntimeError(
+                f"NAguideR method '{method_label}' failed.\n{detail[-4000:]}"
+            )
+
+        if not out_path.exists():
+            raise RuntimeError(
+                "R completed without creating the imputed output matrix."
+            )
+
+        out = pd.read_csv(out_path, sep="\t", index_col=0)
+        out.index = out.index.astype(str)
+        expected_index = work.index.astype(str)
+        out = out.reindex(index=expected_index, columns=work.columns)
+        out.index = work.index
+        out = out.apply(pd.to_numeric, errors="coerce")
+
+    if out.shape != work.shape:
+        raise RuntimeError(
+            f"Imputed matrix shape changed from {work.shape} to {out.shape}."
+        )
+
+    return out
+
+def _group_map_pretty_lfq(pretty_labels: dict) -> dict:
+    """Map pretty sample names to biological group labels for ComBat preservation."""
+    mapping = {}
+    for label, cols in zip(ss.get("global_group_labels", []), ss.get("global_group_samples", [])):
+        for col in cols:
+            mapping[pretty_labels.get(col, col)] = label
+    return mapping
+
 # -----------------------------------------------------------------------------
 # Differential Engine 
 # -----------------------------------------------------------------------------
@@ -336,7 +826,7 @@ def compute_diffexp_tp_lf(
     control_label: str = "Control",
     test_label: str = "Test",
     test_type: str = "Student's t-test (Independent, Equal Variance)",
-    do_zero_impute: bool = True,
+    do_zero_impute: bool = False,
     zero_frac: float = 0.2,
     do_presence_filter: bool = True,
     presence_min_frac: float = 0.40,
@@ -378,7 +868,9 @@ def compute_diffexp_tp_lf(
     df[test_label] = df[test].mean(axis=1)
     
     pseudo = 0.0
-    df["log2FC"] = np.log2(df[test_label] + pseudo) - np.log2(df[control_label] + pseudo)
+    # Input abundances are already log2-transformed by the global preprocessing pipeline.
+    # Therefore log2 fold-change is the difference between group mean log2 abundances.
+    df["log2FC"] = df[test_label] - df[control_label]
     pvals = []
     is_paired = "Paired" in test_type
     for i in range(len(df)):
@@ -434,7 +926,7 @@ def compute_diffexp_anova_tp_lf(
     df: pd.DataFrame,
     group1_cols: list[str], group2_cols: list[str], group3_cols: list[str],
     group1_label: str = "Group1", group2_label: str = "Group2", group3_label: str = "Group3",
-    do_zero_impute: bool = True,
+    do_zero_impute: bool = False,
     zero_frac: float = 0.2,
     do_presence_filter: bool = True,
     presence_min_frac: float = 0.40,
@@ -1261,7 +1753,7 @@ def render_professional_tp_lf_start_panel(upload_disabled: bool = True):
                     <span class="tplf-step-heading">Review Matrix</span>
                 </div>
                 <div class="tplf-step-body">
-                    Confirm detected LFQ intensity columns, then proceed to group setup, QC, statistical analysis, and reporting.
+                    Confirm detected LFQ intensity columns, then proceed to group setup, normalization/imputation, QC, optional batch correction, statistics, and reporting.
                 </div>
             </div>
             """,
@@ -1558,10 +2050,10 @@ def render_navigation_buttons_lf():
             reset_overview_flags_lf()
 
     if c2.button(
-        ("▸ " if not ss["show_overview"] else "▾ ") + "Data Integrity Check & Sanity Profiling",
+        ("▸ " if not ss["show_overview"] else "▾ ") + "Preprocessing, QC & Batch Correction",
         use_container_width=True,
         key="btn_overview",
-        help="Review preprocessing steps and Quality Control (QC) visualizations."
+        help="Normalize, impute, review QC, and optionally correct technical batch effects."
     ):
         ss["show_overview"] = not ss["show_overview"]
         if ss["show_overview"]:
@@ -2211,272 +2703,12 @@ def main():
                 else:
                     ss["global_control_group_idx"] = 0
                     st.info("Assign samples to groups to select a global reference.")
-                # --- BATCH CORRECTION UI ---
                 st.divider()
-                st.markdown("#### Batch Effect Correction")
-                st.caption("Turn this on only when samples were processed in different technical batches/runs.")
-
-                batch_allowed_samples = ss.get("global_all_groups", [])
-                batch_allowed_samples = _sanitize(batch_allowed_samples, sample_cols)
-
-                if not batch_allowed_samples:
-                    st.info("Assign samples to biological groups first before enabling batch correction.")
-                    ss["global_batch_samples"] = []
-                    ss["global_batch_labels"] = []
-                    ss["global_n_batches"] = 1
-                    ss["batch_method_ui"] = "None"
-                    ss["enable_batch_correction"] = False
-                else:
-                    # Keep the batch-correction choice in a PERMANENT session-state
-                    # key. The widget itself uses a temporary key because Streamlit
-                    # removes widget keys when their panel is not rendered.
-                    ss.setdefault("enable_batch_correction", False)
-
-                    if "_enable_batch_correction_widget" not in ss:
-                        ss["_enable_batch_correction_widget"] = bool(
-                            ss.get("enable_batch_correction", False)
-                        )
-
-                    apply_batch = st.toggle(
-                        "Apply Batch Effect Correction",
-                        key="_enable_batch_correction_widget",
-                        help="Turn on to define technical batches and choose a correction method."
-                    )
-
-                    # Persist the choice even after leaving this panel.
-                    ss["enable_batch_correction"] = bool(apply_batch)
-
-                    if apply_batch:
-                        with st.container(border=True):
-                            st.markdown("##### Batch Setup")
-
-                            batch_methods = [
-                                "ComBat (Empirical Bayes)",
-                                "Median Centering",
-                                "Mean Centering",
-                                "Standardize (Mean + Variance)"
-                            ]
-
-                            # Restore the previous method when possible.
-                            previous_method = ss.get("batch_method_ui", "None")
-                            if "batch_method_ui_sel" not in ss:
-                                ss["batch_method_ui_sel"] = (
-                                    previous_method if previous_method in batch_methods
-                                    else batch_methods[0]
-                                )
-
-                            batch_method = st.selectbox(
-                                "Batch Correction Method",
-                                options=batch_methods,
-                                help=(
-                                    "ComBat is often useful for LFQ if batches have enough samples. "
-                                    "Median/Mean centering are simpler alternatives."
-                                ),
-                                key="batch_method_ui_sel"
-                            )
-                            ss["batch_method_ui"] = batch_method
-
-                            if "num_batches_ui" not in ss:
-                                previous_n = int(ss.get("global_n_batches", 2) or 2)
-                                ss["num_batches_ui"] = previous_n if previous_n in [2, 3, 4] else 2
-
-                            num_batches = st.radio(
-                                "Number of Batches",
-                                [2, 3, 4],
-                                horizontal=True,
-                                key="num_batches_ui"
-                            )
-                            ss["global_n_batches"] = num_batches
-
-                            batch_samples = []
-                            batch_labels = []
-                            selected_so_far = []
-
-                            # Permanent copy survives when Data Filtering is hidden.
-                            stored_batch_samples = ss.get("global_batch_samples", []) or []
-
-                            for b in range(num_batches):
-                                prev_key = f"batch_sel_{b}"
-
-                                # If the Streamlit widget key disappeared while another
-                                # workflow panel was open, restore from permanent batch state.
-                                if prev_key in ss:
-                                    prev_source = ss.get(prev_key, [])
-                                elif b < len(stored_batch_samples):
-                                    prev_source = stored_batch_samples[b]
-                                else:
-                                    prev_source = []
-
-                                prev_selected = _sanitize(
-                                    prev_source,
-                                    batch_allowed_samples
-                                )
-
-                                available_for_batch = [
-                                    c for c in batch_allowed_samples
-                                    if c not in selected_so_far or c in prev_selected
-                                ]
-                                prev_selected = _sanitize(
-                                    prev_selected,
-                                    available_for_batch
-                                )
-
-                                # Re-seed the Streamlit widget from permanent batch state.
-                                # Widget keys can disappear while this panel is hidden.
-                                ss[prev_key] = prev_selected
-
-                                b_cols = st.multiselect(
-                                    f"Batch {b + 1} Samples",
-                                    options=available_for_batch,
-                                    format_func=lambda x: pretty_labels.get(x, x),
-                                    key=prev_key
-                                )
-                                b_cols = _sanitize(b_cols, batch_allowed_samples)
-
-                                batch_samples.append(b_cols)
-                                batch_labels.append(f"Batch {b + 1}")
-                                selected_so_far = _uniq(selected_so_far + b_cols)
-
-                            assigned_samples = _uniq([
-                                c for cols in batch_samples for c in cols
-                            ])
-
-                            duplicated = [
-                                c for c in assigned_samples
-                                if sum(c in cols for cols in batch_samples) > 1
-                            ]
-                            unassigned_samples = [
-                                c for c in batch_allowed_samples
-                                if c not in assigned_samples
-                            ]
-                            nonempty_batches = [
-                                cols for cols in batch_samples if cols
-                            ]
-
-                            if duplicated:
-                                st.error(
-                                    "A sample cannot be assigned to more than one batch: "
-                                    + ", ".join([
-                                        pretty_labels.get(c, c) for c in duplicated
-                                    ])
-                                )
-
-                            if unassigned_samples:
-                                st.warning(
-                                    "These grouped samples are not assigned to any batch: "
-                                    + ", ".join([
-                                        pretty_labels.get(c, c) for c in unassigned_samples
-                                    ])
-                                )
-
-                            if len(nonempty_batches) < 2:
-                                st.warning(
-                                    "Assign samples to at least two non-empty batches for correction to run."
-                                )
-
-                            ss["global_batch_samples"] = batch_samples
-                            ss["global_batch_labels"] = batch_labels
-
-                            current_batch_signature = (
-                                batch_method,
-                                int(num_batches),
-                                tuple(tuple(cols) for cols in batch_samples),
-                            )
-
-                            if (
-                                ss.get("batch_correction_applied", False)
-                                and ss.get("batch_correction_run_signature") != current_batch_signature
-                            ):
-                                ss["batch_correction_applied"] = False
-                                ss["batch_correction_applied_method"] = "None"
-
-                            can_run_batch = (
-                                not duplicated
-                                and not unassigned_samples
-                                and len(nonempty_batches) >= 2
-                            )
-
-                            if st.button(
-                                "Run Batch Correction",
-                                type="primary",
-                                key="run_batch_correction_btn_lfq",
-                                disabled=not can_run_batch,
-                                help=(
-                                    "Apply the selected correction to the grouped LFQ samples. "
-                                    "The corrected matrix will be used for QC and downstream analysis."
-                                ),
-                            ):
-                                try:
-                                    expr_raw_batch = (
-                                        df[["RowID"] + batch_allowed_samples]
-                                        .groupby("RowID")
-                                        .mean()
-                                        .apply(pd.to_numeric, errors="coerce")
-                                    )
-                                    expr_raw_batch.rename(columns=pretty_labels, inplace=True)
-
-                                    expr_pre_batch = expr_raw_batch.copy()
-                                    pre_zero_batch = bool(ss.get("pre_treat_zero", True))
-
-                                    if pre_zero_batch:
-                                        expr_pre_batch = expr_pre_batch.replace(0, np.nan)
-
-                                    # Batch correction is performed on log2 abundance.
-                                    ss["pre_log2"] = True
-                                    mn = expr_pre_batch.min().min()
-                                    if pd.notna(mn) and mn <= 0:
-                                        expr_pre_batch = expr_pre_batch + abs(mn) + 1e-6
-                                    expr_pre_batch = np.log2(expr_pre_batch)
-
-                                    translated_batch_samples = [
-                                        [pretty_labels.get(c, c) for c in b_cols]
-                                        for b_cols in batch_samples
-                                    ]
-
-                                    corrected_batch = apply_batch_correction(
-                                        expr_pre_batch,
-                                        translated_batch_samples,
-                                        method=batch_method,
-                                    )
-
-                                    if ss.get("batch_correction_last_error"):
-                                        ss["batch_correction_applied"] = False
-                                    else:
-                                        ss["expr_raw"] = expr_raw_batch
-                                        ss["expr_pre_batch"] = expr_pre_batch
-                                        ss["expr_processed"] = corrected_batch
-                                        ss["batch_correction_applied"] = True
-                                        ss["batch_correction_applied_method"] = batch_method
-                                        ss["batch_correction_run_signature"] = current_batch_signature
-                                        ss["diff_results"] = None
-                                        ss["filtered_df"] = None
-                                        ss["filtered_ready"] = False
-
-                                        st.success(
-                                            f"{batch_method} applied successfully. "
-                                            "QC PCA will show before and after batch correction, "
-                                            "and downstream analysis will use corrected abundances."
-                                        )
-
-                                except Exception as e:
-                                    ss["batch_correction_applied"] = False
-                                    st.error(f"Batch correction failed: {e}")
-
-                            elif ss.get("batch_correction_applied", False):
-                                st.success(
-                                    f"{ss.get('batch_correction_applied_method', batch_method)} "
-                                    "applied successfully. QC PCA will show before and after "
-                                    "batch correction, and downstream analysis will use corrected abundances."
-                                )
-
-                    else:
-                        ss["global_batch_samples"] = []
-                        ss["global_batch_labels"] = []
-                        ss["global_n_batches"] = 1
-                        ss["batch_method_ui"] = "None"
-                        ss["batch_correction_applied"] = False
-                        ss["batch_correction_applied_method"] = "None"
-                        ss["batch_correction_run_signature"] = None
+                st.info(
+                    "Technical batch correction is configured after normalization, imputation, and QC in "
+                    "**Preprocessing, QC & Batch Correction**. This keeps biological group definition separate "
+                    "from technical correction."
+                )
 
         with right:
             with st.container(border=True):
@@ -2523,305 +2755,452 @@ def main():
                     else:
                         st.dataframe(assigned_df, use_container_width=True, hide_index=True)
     # =========================================================================
-    # PILLAR 2: DATA INTEGRITY CHECK & SANITY PROFILING
+    # PILLAR 2: PREPROCESSING, QC & OPTIONAL BATCH CORRECTION
     # =========================================================================
     if ss["show_overview"]:
-        
         if not ss["global_all_groups"]:
             st.warning("Please assign groups in Data Filtering & Group Specification first.")
             st.stop()
+
+        pretty_group_samples = [
+            [pretty_labels.get(c, c) for c in gcols]
+            for gcols in ss["global_group_samples"]
+        ]
+        all_pretty_samples = [pretty_labels.get(c, c) for c in ss["global_all_groups"]]
+
+        expr_raw_current = (
+            df[["RowID"] + ss["global_all_groups"]]
+            .groupby("RowID")
+            .mean()
+            .apply(pd.to_numeric, errors="coerce")
+        )
+        expr_raw_current.rename(columns=pretty_labels, inplace=True)
+        ss["expr_raw"] = expr_raw_current.copy()
+
         with st.container(border=True):
-            st.markdown("#### Global LFQ Matrix Preprocessing")
-            
-            st.markdown(
-                "<p class='subtitle-text'>Configure how raw intensities are cleaned and transformed "
-                "before generating Quality Control (QC) plots or passing data to the Statistical Suite.</p>",
-                unsafe_allow_html=True
+            st.markdown("#### Step 1 — Normalize and Impute LFQ Matrix")
+            st.caption(
+                "Preprocessing is performed once here and the resulting matrix is reused by QC, optional batch "
+                "correction, and differential analysis. No second hidden imputation is performed during statistics."
             )
-            
-            with st.expander("Preprocessing Parameter Definitions & Guide", expanded=False):
+
+            with st.expander("Preprocessing definitions and NAguideR integration", expanded=False):
                 st.markdown("""
-                **Transformations (Adjusting the Data Shape):**
-                * **Treat 0 as missing (NA):** In mass spectrometry, a true "0" usually means the protein/peptide was below the instrument's limit of detection. Treating 0s as true missing values (NA) prevents them from artificially dragging down group means and skewing variance calculations.
-                * **Log2 transform:** Converts multiplicative intensity differences into additive, linear scales. This is a strict prerequisite for most parametric statistical tests (like t-tests and ANOVA) and helps stabilize variance between highly abundant and low-abundance proteins.
-                * **Batch Correction:** If batches are defined, this aligns the distributions across batches to remove systematic technical variance (e.g., runs on different days). *Median Centering* is robust against extreme outliers. *Mean Centering* is standard. *Standardize* also scales the variance to match. *ComBat* uses Empirical Bayes but requires batches without missing values, so NaNs are temporarily imputed.
+                - **0 → NA:** zeros in LFQ intensity matrices usually represent non-detection rather than measured zero abundance.
+                - **Presence filtering:** removes very sparse proteins before imputation.
+                - **Log2:** stabilizes variance and makes differences in group means interpretable as log2 fold-changes.
+                - **Normalization:** median or mean centering aligns sample-level distributions on the log2 scale.
+                - **NAguideR imputation:** all 23 NAguideR methods are available through an Rscript backend.
+                - **Batch correction:** is deliberately performed only after preprocessing and QC.
                 """)
-            st.divider()
-            colA, colB = st.columns([0.5, 0.5])
-            with colA:
-                pre_zero = st.checkbox("Treat 0 as missing (NA)", value=ss.get("pre_treat_zero", True), key="pre_treat_zero")
-                pre_log2 = st.checkbox("Log2 transform", value=ss.get("pre_log2", True), key="pre_log2")
-            with colB:
-                configured_batch_method = (
-                    ss.get("batch_method_ui", "None")
-                    if ss.get("enable_batch_correction", False)
-                    else "None"
-                )
-                batch_applied = (
-                    ss.get("enable_batch_correction", False)
-                    and ss.get("batch_correction_applied", False)
-                    and isinstance(ss.get("expr_pre_batch"), pd.DataFrame)
-                    and isinstance(ss.get("expr_processed"), pd.DataFrame)
-                    and not ss["expr_processed"].empty
-                )
-                batch_method = (
-                    ss.get("batch_correction_applied_method", configured_batch_method)
-                    if batch_applied else "None"
-                )
-                has_batches = batch_applied
 
-                if batch_applied:
-                    st.success(
-                        f"{batch_method} applied. QC and downstream analysis are using corrected abundances."
+            pcol1, pcol2, pcol3 = st.columns(3, gap="large")
+            with pcol1:
+                pre_zero = st.checkbox(
+                    "Treat 0 as missing (NA)",
+                    value=bool(ss.get("pre_treat_zero", True)),
+                    key="pre_treat_zero",
+                )
+                pre_presence_filter = st.checkbox(
+                    "Filter sparse proteins before imputation",
+                    value=bool(ss.get("pre_presence_filter", True)),
+                    key="pre_presence_filter",
+                )
+                if pre_presence_filter:
+                    presence_min_frac = st.slider(
+                        "Presence threshold",
+                        0.05, 1.00,
+                        float(ss.get("pre_presence_min_frac", 0.40)),
+                        0.05,
+                        key="pre_presence_min_frac",
                     )
-                elif ss.get("enable_batch_correction", False) and configured_batch_method != "None":
-                    st.warning(
-                        "Batch correction is configured but has not been run. "
-                        "Return to Data Filtering & Group Specification and click **Run Batch Correction**."
+                    rule_labels = {
+                        "OR: total samples OR one group": "or",
+                        "Total samples only": "all_only",
+                        "At least one group only": "group_only",
+                        "AND: total samples AND one group": "and",
+                    }
+                    current_rule_key = ss.get("pre_presence_rule", "or")
+                    default_rule_label = next((k for k, v in rule_labels.items() if v == current_rule_key), list(rule_labels)[0])
+                    presence_rule_label = st.selectbox(
+                        "Presence rule",
+                        list(rule_labels.keys()),
+                        index=list(rule_labels.keys()).index(default_rule_label),
+                        key="pre_presence_rule_ui",
                     )
+                    presence_rule_key = rule_labels[presence_rule_label]
+                    ss["pre_presence_rule"] = presence_rule_key
                 else:
-                    st.info("Batch correction is off.")
+                    presence_min_frac = float(ss.get("pre_presence_min_frac", 0.40))
+                    presence_rule_key = ss.get("pre_presence_rule", "or")
 
-            with st.spinner("Processing Matrix..."):
-                if batch_applied:
-                    expr_raw = ss["expr_raw"].copy()
-                    expr_pre_batch = ss["expr_pre_batch"].copy()
-                    expr_proc = ss["expr_processed"].copy()
-                else:
-                    expr_raw = (
-                        df[["RowID"] + ss["global_all_groups"]]
-                        .groupby("RowID")
-                        .mean()
-                        .apply(pd.to_numeric, errors="coerce")
+            with pcol2:
+                pre_log2 = st.checkbox(
+                    "Log2 transform",
+                    value=bool(ss.get("pre_log2", True)),
+                    key="pre_log2",
+                    help="Keep this enabled for differential analysis and batch correction.",
+                )
+                normalization_options = ["None", "Median centering (log2)", "Mean centering (log2)"]
+                previous_norm = ss.get("pre_normalization_method", "Median centering (log2)")
+                if previous_norm not in normalization_options:
+                    previous_norm = "Median centering (log2)"
+                normalization_method = st.selectbox(
+                    "Normalization method",
+                    normalization_options,
+                    index=normalization_options.index(previous_norm),
+                    key="pre_normalization_method",
+                    disabled=not pre_log2,
+                )
+                if not pre_log2:
+                    normalization_method = "None"
+                    st.warning("Normalization and downstream differential analysis are designed for log2 LFQ values.")
+
+            with pcol3:
+                family_options = ["All methods", "Single value", "Global structure", "Local similarity"]
+                previous_family = ss.get("pre_imputation_family", "All methods")
+                if previous_family not in family_options:
+                    previous_family = "All methods"
+                imputation_family = st.selectbox(
+                    "NAguideR method family",
+                    family_options,
+                    index=family_options.index(previous_family),
+                    key="pre_imputation_family",
+                )
+                filtered_methods = [
+                    m["label"] for m in NAGUIDER_METHODS
+                    if imputation_family == "All methods" or m["family"] == imputation_family
+                ]
+                imputation_options = ["None (leave missing values)"] + filtered_methods
+                previous_imp = ss.get("pre_imputation_method", "K-nearest neighbor (KNN)")
+                if previous_imp not in imputation_options:
+                    previous_imp = imputation_options[1] if len(imputation_options) > 1 else imputation_options[0]
+                imputation_method = st.selectbox(
+                    "Missing-value imputation",
+                    imputation_options,
+                    index=imputation_options.index(previous_imp),
+                    key="pre_imputation_method",
+                )
+                if imputation_method != "None (leave missing values)":
+                    mmeta = NAGUIDER_BY_LABEL[imputation_method]
+                    st.caption(
+                        f"Family: {mmeta['family']} · Speed: {mmeta['speed']} · "
+                        f"R package: {mmeta['package'] or 'base R / NAguideR logic'}"
                     )
-                    expr_raw.rename(columns=pretty_labels, inplace=True)
-                    expr_proc = expr_raw.copy()
+                    if TEMP_USE_LEGACY_ONE_FIFTH_IMPUTATION:
+                        st.info(
+                            "Temporary RConnect mode: the selected NAguideR method is kept in the UI, "
+                            "but execution currently uses the historical 1/5 row-minimum imputation. "
+                            "No R backend is required for preprocessing."
+                        )
 
+            pi_width = 0.3
+            pi_downshift = 1.8
+            rf_ntree = 20
+            if imputation_method == "Perseus imputation (PI)":
+                acol1, acol2 = st.columns(2)
+                with acol1:
+                    pi_width = st.number_input("PI width", min_value=0.01, max_value=2.0, value=0.3, step=0.05)
+                with acol2:
+                    pi_downshift = st.number_input("PI downshift", min_value=0.0, max_value=5.0, value=1.8, step=0.1)
+            elif imputation_method == "Random forest (RF)":
+                rf_ntree = st.number_input("RF number of trees", min_value=10, max_value=1000, value=20, step=10)
+
+            setup_col, run_col = st.columns([0.35, 0.65])
+            with setup_col:
+                if st.button("Check R / NAguideR Setup", use_container_width=True, key="check_naguider_r_lfq"):
+                    ok, msg = check_naguider_r_environment_lfq(
+                        None if imputation_method == "None (leave missing values)" else imputation_method
+                    )
+                    (st.success if ok else st.error)(msg)
+            with run_col:
+                run_preprocessing = st.button(
+                    "Run Normalization + Imputation",
+                    type="primary",
+                    use_container_width=True,
+                    key="run_preprocessing_lfq",
+                )
+
+            preprocessing_signature = (
+                tuple(ss.get("global_all_groups", [])),
+                bool(pre_zero), bool(pre_presence_filter), float(presence_min_frac), str(presence_rule_key),
+                bool(pre_log2), str(normalization_method), str(imputation_method),
+                float(pi_width), float(pi_downshift), int(rf_ntree),
+            )
+
+            if run_preprocessing:
+                try:
+                    work = expr_raw_current.copy()
                     if pre_zero:
-                        expr_proc = expr_proc.replace(0, np.nan)
+                        work = work.replace(0, np.nan)
+
+                    if pre_presence_filter:
+                        before_n = work.shape[0]
+                        work = filter_by_presence_rule(
+                            df=work,
+                            all_samples=all_pretty_samples,
+                            group_samples=pretty_group_samples,
+                            min_frac=presence_min_frac,
+                            presence_rule=presence_rule_key,
+                        )
+                        removed_n = before_n - work.shape[0]
+                    else:
+                        removed_n = 0
+
+                    # Keep a copy on the original abundance scale so the temporary
+                    # legacy imputation can reproduce the historical 1/5 rule correctly.
+                    raw_for_imputation = work.copy()
 
                     if pre_log2:
-                        mn = expr_proc.min().min()
-                        if pd.notna(mn) and mn <= 0:
-                            expr_proc = expr_proc + abs(mn) + 1e-6
-                        expr_proc = np.log2(expr_proc)
+                        nonpositive = int(((work <= 0) & work.notna()).sum().sum())
+                        if nonpositive:
+                            st.warning(f"{nonpositive:,} non-positive observed values were converted to NA before log2 transformation.")
+                        work = work.where(work > 0)
+                        work = np.log2(work)
 
-                    expr_pre_batch = expr_proc.copy()
-                    ss["expr_raw"] = expr_raw
-                    ss["expr_pre_batch"] = expr_pre_batch
-                    ss["expr_processed"] = expr_proc
+                    transformed = work.copy()
+                    normalized = normalize_lfq_log2(work, normalization_method if pre_log2 else "None")
+                    missing_before = int(normalized.isna().sum().sum())
 
-            st.success(f"LFQ Matrix processed! Tracking {expr_proc.shape[0]} unique protein features.")
-        
-        st.divider()    
-        st.markdown("#### Quality Control Plots")
-        
+                    if imputation_method == "None (leave missing values)":
+                        imputed = normalized.copy()
+                        applied_imputation_method = "None (leave missing values)"
+                    elif TEMP_USE_LEGACY_ONE_FIFTH_IMPUTATION:
+                        with st.spinner("Running temporary legacy 1/5 minimum imputation ..."):
+                            imputed = temporary_legacy_one_fifth_imputation_lfq(
+                                raw_df=raw_for_imputation,
+                                transformed_df=transformed,
+                                normalized_df=normalized,
+                                frac=LEGACY_ONE_FIFTH_FRACTION,
+                                log2_enabled=bool(pre_log2),
+                            )
+                        applied_imputation_method = (
+                            f"Legacy 1/5 row minimum (temporary; selected: {imputation_method})"
+                        )
+                    else:
+                        with st.spinner(f"Running NAguideR method: {imputation_method} ..."):
+                            imputed = run_naguider_imputation_lfq(
+                                normalized,
+                                method_label=imputation_method,
+                                pi_width=pi_width,
+                                pi_downshift=pi_downshift,
+                                rf_ntree=int(rf_ntree),
+                            )
+                        applied_imputation_method = imputation_method
+                    missing_after = int(imputed.isna().sum().sum())
+
+                    ss["expr_normalized"] = normalized.copy()
+                    ss["expr_imputed"] = imputed.copy()
+                    ss["expr_pre_batch"] = imputed.copy()
+                    ss["expr_processed"] = imputed.copy()
+                    ss["expr_final"] = imputed.copy()
+                    ss["preprocessing_applied"] = True
+                    ss["preprocessing_run_signature"] = preprocessing_signature
+                    ss["imputation_applied_method"] = applied_imputation_method
+                    ss["normalization_applied_method"] = normalization_method if pre_log2 else "None"
+                    ss["preprocessing_dirty"] = False
+                    ss["batch_correction_applied"] = False
+                    ss["batch_correction_applied_method"] = "None"
+                    ss["batch_correction_run_signature"] = None
+                    ss["diff_results"] = None
+                    ss["filtered_df"] = None
+                    ss["filtered_ready"] = False
+
+                    st.success(
+                        f"Preprocessing complete: {imputed.shape[0]:,} proteins retained; "
+                        f"{removed_n:,} sparse proteins removed; missing values {missing_before:,} → {missing_after:,}."
+                    )
+                except Exception as e:
+                    st.error(f"Preprocessing failed: {e}")
+
+            if ss.get("preprocessing_applied", False):
+                if ss.get("preprocessing_run_signature") != preprocessing_signature:
+                    ss["preprocessing_dirty"] = True
+                    st.warning("Preprocessing settings have changed. Click **Run Normalization + Imputation** to update the processed matrix before statistics.")
+                else:
+                    ss["preprocessing_dirty"] = False
+                    st.success(
+                        f"Current matrix: {ss.get('normalization_applied_method', 'None')} + "
+                        f"{ss.get('imputation_applied_method', 'None')}"
+                    )
+
+        # ------------------------------------------------------------------
+        # QC after normalization/imputation, with raw and before/after views.
+        # ------------------------------------------------------------------
+        st.divider()
+        st.markdown("#### Step 2 — Quality Control")
         design_rows = []
         for i, cols in enumerate(ss["global_group_samples"]):
-            for c in cols: design_rows.append({"Sample": pretty_labels[c], "Group": ss["global_group_labels"][i]})
+            for c in cols:
+                design_rows.append({"Sample": pretty_labels[c], "Group": ss["global_group_labels"][i]})
         design_df = pd.DataFrame(design_rows)
-        qc_target = expr_proc
+
+        qc_sources = {"Raw selected abundances": expr_raw_current}
+        if isinstance(ss.get("expr_normalized"), pd.DataFrame):
+            qc_sources["Normalized (before imputation)"] = ss["expr_normalized"]
+        if isinstance(ss.get("expr_imputed"), pd.DataFrame):
+            qc_sources["Imputed (before batch correction)"] = ss["expr_imputed"]
+        if ss.get("batch_correction_applied", False) and isinstance(ss.get("expr_processed"), pd.DataFrame):
+            qc_sources["After batch correction"] = ss["expr_processed"]
+
         left_qc, right_qc = st.columns([0.35, 0.65], gap="large")
-        
         with left_qc:
             with st.container(border=True):
-                
-                if pre_log2:
-                    if has_batches and ss.get("expr_pre_batch") is not None:
-                        view_data = st.radio(
-                            "Data Source:",
-                            [
-                                "After Batch Correction",
-                                "Before Batch Correction",
-                                "Raw (Un-transformed)"
-                            ],
-                            key="qc_data_source"
-                        )
-                        if view_data == "Before Batch Correction":
-                            qc_target = ss["expr_pre_batch"]
-                        elif view_data == "Raw (Un-transformed)":
-                            qc_target = expr_raw
-                        else:
-                            qc_target = expr_proc
-                    else:
-                        view_data = st.radio(
-                            "Data Source:",
-                            ["Processed", "Raw (Un-transformed)"],
-                            key="qc_data_source"
-                        )
-                        if view_data == "Raw (Un-transformed)":
-                            qc_target = expr_raw
-                        else:
-                            qc_target = expr_proc
-                qc_mode = st.radio(
-                    "Select QC Plot:", 
-                    ["PCA", "Density", "Correlation Heatmap", "QC Heatmap", "Boxplot", "Missing Values"],
-                    key="qc_plot_type"
+                source_names = list(qc_sources.keys())
+                current_source = ss.get("qc_data_source_lfq", source_names[-1])
+                if current_source not in source_names:
+                    current_source = source_names[-1]
+                    ss["qc_data_source_lfq"] = current_source
+                qc_source_name = st.selectbox(
+                    "Data Source",
+                    source_names,
+                    index=source_names.index(current_source),
+                    key="qc_data_source_lfq",
                 )
-                
+                qc_target = qc_sources[qc_source_name]
+
+                qc_mode = st.radio(
+                    "Select QC Plot",
+                    ["PCA", "Density", "Correlation Heatmap", "QC Heatmap", "Boxplot", "Missing Values", "Dendrogram"],
+                    key="qc_plot_type",
+                )
+
+                topn = 50
                 if qc_mode == "PCA":
                     st.divider()
                     st.markdown("**PCA Display Options**")
-                    
-                    data_for_pca = qc_target.copy().dropna(how="all")
-                    n_comps = min(10, data_for_pca.shape[0], data_for_pca.shape[1])
-                    n_comps = max(2, n_comps)
+                    n_comps = max(2, min(10, qc_target.shape[0], qc_target.shape[1]))
                     pc_cols = [f"PC{i+1}" for i in range(n_comps)]
-                    
                     col_x, col_y = st.columns(2)
                     with col_x:
-                        ss["pca_x"] = st.selectbox("X-axis Component", options=pc_cols, index=0, key="pca_x_ui")
+                        ss["pca_x"] = st.selectbox("X-axis Component", pc_cols, index=0, key="pca_x_ui")
                     with col_y:
-                        ss["pca_y"] = st.selectbox("Y-axis Component", options=pc_cols, index=1 if len(pc_cols)>1 else 0, key="pca_y_ui")
-                        
+                        ss["pca_y"] = st.selectbox("Y-axis Component", pc_cols, index=1 if len(pc_cols) > 1 else 0, key="pca_y_ui")
                     colA, colB = st.columns(2)
                     with colA:
                         ss["pca_hide_outliers"] = st.checkbox("Hide outliers", value=False, key="pca_hide_outliers_ui")
                         ss["pca_draw_ellipses"] = st.checkbox("Draw ellipses", value=True, key="pca_draw_ellipses_ui")
                     with colB:
                         ss["pca_label_outliers"] = st.checkbox("Label outliers", value=True, key="pca_label_outliers_ui")
-                        
-                    ss["pca_zoom_q"] = st.slider("Zoom (quantile)", 0.90, 1.0, 1.0, 0.01, key="pca_zoom_q_ui", help="Axis limits use these quantiles (visual zoom only).")
-                    
-                    st.markdown("**Group Colors**")
+                    ss["pca_zoom_q"] = st.slider("Zoom (quantile)", 0.90, 1.0, 1.0, 0.01, key="pca_zoom_q_ui")
+
                     unique_groups = design_df["Group"].unique()
-                    default_colors = sns.color_palette("Set2", n_colors=len(unique_groups)).as_hex()
-                    
+                    default_colors = sns.color_palette("Set2", n_colors=max(1, len(unique_groups))).as_hex()
                     pca_palette = {}
-                    cols = st.columns(len(unique_groups))
-                    for idx, grp in enumerate(unique_groups):
-                        with cols[idx % len(cols)]:
-                            pca_palette[grp] = st.color_picker(grp, default_colors[idx], key=f"pca_color_{grp}_ui")
+                    if len(unique_groups):
+                        st.markdown("**Group Colors**")
+                        color_cols = st.columns(len(unique_groups))
+                        for idx, grp in enumerate(unique_groups):
+                            with color_cols[idx]:
+                                pca_palette[grp] = st.color_picker(grp, default_colors[idx], key=f"pca_color_{grp}_ui")
                     ss["pca_palette"] = pca_palette
+
                 elif qc_mode == "QC Heatmap":
-                    st.divider()
-                    st.markdown("**Heatmap Options**")
-                    topn = st.slider("Top N variable proteins", 10, 100, 50, key="qc_topn_proc")
-                    
-                    st.markdown("**Group Colors**")
+                    topn = st.slider("Top N variable proteins", 10, 200, 50, key="qc_topn_proc")
                     unique_groups = design_df["Group"].unique()
-                    default_colors = sns.color_palette("Set2", n_colors=len(unique_groups)).as_hex()
-                    
+                    default_colors = sns.color_palette("Set2", n_colors=max(1, len(unique_groups))).as_hex()
                     qc_hm_palette = {}
                     for idx, grp in enumerate(unique_groups):
                         qc_hm_palette[grp] = st.color_picker(
-                            f"Color for {grp}", 
-                            default_colors[idx], 
-                            key=f"qc_hm_color_{grp}"
+                            f"Color for {grp}", default_colors[idx], key=f"qc_hm_color_{grp}"
                         )
                     ss["qc_hm_palette"] = qc_hm_palette
+
         with right_qc:
+            qc_target = qc_sources[qc_source_name]
             if qc_mode == "PCA":
-                short_groups = [
-                    [pretty_labels[c] for c in gcols]
-                    for gcols in ss["global_group_samples"]
-                ]
-
-                # Keep the original single-PCA behavior.
-                # When batch correction has been run, the Data Source selector
-                # above controls whether qc_target is the matrix before or after
-                # batch correction. Rendering only one PCA avoids duplicate
-                # download-button keys created inside qc_utility.create_pca_plot().
-                pca_title = "PCA of Samples"
-
-                if batch_applied and pre_log2:
-                    selected_qc_source = ss.get(
-                        "qc_data_source",
-                        "After Batch Correction"
+                pca_input = qc_target.copy().replace([np.inf, -np.inf], np.nan).dropna(axis=0, how="all")
+                # PCA needs a complete matrix. Fill only for the QC calculation; the stored matrix is unchanged.
+                pca_input = pca_input.apply(lambda r: r.fillna(r.median()), axis=1).dropna(axis=0, how="any")
+                if pca_input.shape[0] < 2 or pca_input.shape[1] < 2:
+                    st.warning("Not enough complete information to calculate PCA for this data source.")
+                else:
+                    create_pca_plot(
+                        df=pca_input,
+                        group_samples=pretty_group_samples,
+                        group_labels=ss["global_group_labels"],
+                        title=f"PCA — {qc_source_name}",
+                        pc_x=ss.get("pca_x", "PC1"),
+                        pc_y=ss.get("pca_y", "PC2"),
+                        hide_outliers=ss.get("pca_hide_outliers", False),
+                        label_outliers=ss.get("pca_label_outliers", True),
+                        draw_ellipses=ss.get("pca_draw_ellipses", False),
+                        zoom_q=ss.get("pca_zoom_q", 1.0),
+                        palette=ss.get("pca_palette", None),
                     )
 
-                    if selected_qc_source == "Before Batch Correction":
-                        pca_title = "PCA Before Batch Correction"
-                    elif selected_qc_source == "After Batch Correction":
-                        pca_title = "PCA After Batch Correction"
-                    elif selected_qc_source == "Raw (Un-transformed)":
-                        pca_title = "PCA of Raw LFQ Abundances"
-
-                    st.caption(
-                        "Use **Data Source** on the left to switch between "
-                        "Before Batch Correction and After Batch Correction."
-                    )
-
-                create_pca_plot(
-                    df=qc_target,
-                    group_samples=short_groups,
-                    group_labels=ss["global_group_labels"],
-                    title=pca_title,
-                    pc_x=ss.get("pca_x", "PC1"),
-                    pc_y=ss.get("pca_y", "PC2"),
-                    hide_outliers=ss.get("pca_hide_outliers", False),
-                    label_outliers=ss.get("pca_label_outliers", True),
-                    draw_ellipses=ss.get("pca_draw_ellipses", False),
-                    zoom_q=ss.get("pca_zoom_q", 1.0),
-                    palette=ss.get("pca_palette", None)
-                )
             elif qc_mode == "Density":
                 fig, ax = plt.subplots(figsize=(7, 5))
                 for sample in qc_target.columns:
-                    sns.kdeplot(qc_target[sample].dropna(), ax=ax, label=sample, lw=1.5, alpha=0.6)
-                ax.set_title("Sample LFQ Density")
+                    vals = qc_target[sample].replace([np.inf, -np.inf], np.nan).dropna()
+                    if len(vals) >= 2:
+                        sns.kdeplot(vals, ax=ax, label=sample, lw=1.5, alpha=0.6)
+                ax.set_title(f"Sample LFQ Density — {qc_source_name}")
                 ax.legend(bbox_to_anchor=(1.05, 1), loc="upper left", fontsize=8)
                 st.pyplot(fig)
-                
-                if qc_target is expr_raw:
-                    ss["report_density_raw_fig"] = fig
-                else:
-                    ss["report_density_proc_fig"] = fig
-                    
+                ss["report_density_proc_fig"] = fig
                 add_plot_download_buttons(fig, "density_plot")
+
             elif qc_mode == "Correlation Heatmap":
                 fig, ax = plt.subplots(figsize=(7, 6))
                 sns.heatmap(qc_target.corr(), cmap="vlag", ax=ax, cbar_kws={"shrink": 0.5})
+                ax.set_title(qc_source_name)
                 st.pyplot(fig)
-                
-                ss["report_corr_fig"] = fig  
+                ss["report_corr_fig"] = fig
                 add_plot_download_buttons(fig, "correlation_heatmap")
+
             elif qc_mode == "QC Heatmap":
                 var = qc_target.var(axis=1, skipna=True)
                 top_idx = var.nlargest(topn).index
                 hm = qc_target.loc[top_idx].copy().replace([np.inf, -np.inf], np.nan).dropna(axis=0, how="all")
-                z = hm.sub(hm.mean(axis=1), axis=0).div(hm.std(axis=1), axis=0).apply(lambda r: r.fillna(r.median()), axis=1).fillna(0.0)
+                z = hm.sub(hm.mean(axis=1), axis=0).div(hm.std(axis=1), axis=0)
+                z = z.apply(lambda r: r.fillna(r.median()), axis=1).fillna(0.0)
                 if not np.isfinite(z.to_numpy()).all():
                     st.error("QC heatmap contains non-finite values.")
                 else:
                     sample_to_group = design_df.set_index("Sample")["Group"]
                     unique_groups = design_df["Group"].unique()
-                    
-                    fallback_colors = {g: c for g, c in zip(unique_groups, sns.color_palette("Set2", len(unique_groups)).as_hex())}
+                    fallback_colors = {
+                        g: c for g, c in zip(unique_groups, sns.color_palette("Set2", len(unique_groups)).as_hex())
+                    }
                     group_palette = ss.get("qc_hm_palette", fallback_colors)
                     col_colors = pd.Series(z.columns).map(sample_to_group).map(group_palette).values
                     fig = sns.clustermap(
-                        z, cmap="vlag", col_colors=col_colors, figsize=(10, 10), 
-                        xticklabels=True, yticklabels=True, tree_kws=dict(linewidths=0.5)
+                        z, cmap="vlag", col_colors=col_colors, figsize=(10, 10),
+                        xticklabels=True, yticklabels=True, tree_kws=dict(linewidths=0.5),
                     )
                     plt.setp(fig.ax_heatmap.get_yticklabels(), rotation=0, fontsize=8)
-                    plt.setp(fig.ax_heatmap.get_xticklabels(), rotation=45, horizontalalignment='right')
-                    
-                    handles = [mpatches.Patch(color=group_palette[g], label=g) for g in unique_groups if g in group_palette]
-                    fig.ax_col_dendrogram.legend(handles=handles, title="Group", loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=True)
+                    plt.setp(fig.ax_heatmap.get_xticklabels(), rotation=45, horizontalalignment="right")
+                    handles = [
+                        mpatches.Patch(color=group_palette[g], label=g)
+                        for g in unique_groups if g in group_palette
+                    ]
+                    fig.ax_col_dendrogram.legend(
+                        handles=handles, title="Group", loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=True
+                    )
                     st.pyplot(fig.fig)
-                    
-                    ss["report_qc_heatmap_fig"] = fig.fig  
+                    ss["report_qc_heatmap_fig"] = fig.fig
                     add_plot_download_buttons(fig.fig, "qc_heatmap")
+
             elif qc_mode == "Boxplot":
                 fig, ax = plt.subplots(figsize=(10, 4))
                 sns.boxplot(data=qc_target, ax=ax)
+                ax.set_title(qc_source_name)
                 ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right")
                 st.pyplot(fig)
-                
                 ss["report_qc_boxplot_fig"] = fig
                 add_plot_download_buttons(fig, "qc_boxplot")
-                
+
             elif qc_mode == "Missing Values":
                 miss = qc_target.isna().mean() * 100
                 fig, ax = plt.subplots(figsize=(8, 4))
                 sns.barplot(x=miss.index, y=miss.values, ax=ax)
-                ax.set_title("% Missing Values")
+                ax.set_title(f"% Missing Values — {qc_source_name}")
                 plt.xticks(rotation=45, ha="right")
                 st.pyplot(fig)
-                
                 ss["report_qc_missing_fig"] = fig
                 add_plot_download_buttons(fig, "missing_values")
+
             elif qc_mode == "Dendrogram":
                 X = qc_target.T.copy().replace([np.inf, -np.inf], np.nan).dropna(axis=1, how="all")
                 X = X.loc[:, X.std(axis=0) > 0].apply(lambda c: c.fillna(c.median()), axis=0).fillna(0.0)
@@ -2831,17 +3210,178 @@ def main():
                     Z = linkage(X.to_numpy(), method="ward")
                     fig, ax = plt.subplots(figsize=(8, 4))
                     dendrogram(Z, labels=X.index.tolist(), ax=ax)
+                    ax.set_title(qc_source_name)
                     plt.xticks(rotation=45, ha="right")
                     st.pyplot(fig)
-                    
                     ss["report_dendrogram_fig"] = fig
                     add_plot_download_buttons(fig, "dendrogram")
+
+        # ------------------------------------------------------------------
+        # Batch correction comes after normalization/imputation and initial QC.
+        # ------------------------------------------------------------------
+        st.divider()
+        st.markdown("#### Step 3 — Optional Technical Batch Correction")
+        st.caption(
+            "Use this only for known technical batches/runs. Review the QC above first. "
+            "ComBat preserves the biological group as a categorical covariate."
+        )
+
+        if not ss.get("preprocessing_applied", False) or not isinstance(ss.get("expr_imputed"), pd.DataFrame):
+            st.info("Run normalization + imputation first. Batch correction is intentionally unavailable before preprocessing.")
+        elif not ss.get("pre_log2", True):
+            st.warning("Batch correction in this workflow requires log2-transformed abundances.")
+        else:
+            if "_enable_batch_correction_widget" not in ss:
+                ss["_enable_batch_correction_widget"] = bool(ss.get("enable_batch_correction", False))
+            apply_batch = st.toggle(
+                "Apply Batch Effect Correction",
+                key="_enable_batch_correction_widget",
+                help="Define technical batches only after reviewing normalized/imputed QC.",
+            )
+            ss["enable_batch_correction"] = bool(apply_batch)
+
+            if not apply_batch:
+                ss["batch_correction_applied"] = False
+                ss["batch_correction_applied_method"] = "None"
+                ss["expr_pre_batch"] = ss["expr_imputed"].copy()
+                ss["expr_processed"] = ss["expr_imputed"].copy()
+                ss["expr_final"] = ss["expr_imputed"].copy()
+                st.info("Batch correction is off. Differential analysis will use the normalized/imputed matrix.")
+            else:
+                bcol1, bcol2 = st.columns([0.35, 0.65], gap="large")
+                with bcol1:
+                    batch_methods = [
+                        "ComBat (Empirical Bayes)",
+                        "Median Centering",
+                        "Mean Centering",
+                        "Standardize (Mean + Variance)",
+                    ]
+                    previous_method = ss.get("batch_method_ui", "ComBat (Empirical Bayes)")
+                    if previous_method not in batch_methods:
+                        previous_method = batch_methods[0]
+                    batch_method = st.selectbox(
+                        "Batch Correction Method",
+                        batch_methods,
+                        index=batch_methods.index(previous_method),
+                        key="batch_method_ui_sel",
+                    )
+                    ss["batch_method_ui"] = batch_method
+                    previous_n = int(ss.get("global_n_batches", 2) or 2)
+                    if previous_n not in [2, 3, 4]:
+                        previous_n = 2
+                    num_batches = st.radio(
+                        "Number of Batches", [2, 3, 4], index=[2, 3, 4].index(previous_n), horizontal=True,
+                        key="num_batches_ui",
+                    )
+                    ss["global_n_batches"] = num_batches
+                    if batch_method == "ComBat (Empirical Bayes)":
+                        st.info("Biological group labels are included in ComBat and protected from batch removal.")
+
+                with bcol2:
+                    batch_allowed_samples = list(ss.get("global_all_groups", []))
+                    stored_batch_samples = ss.get("global_batch_samples", []) or []
+                    batch_samples = []
+                    selected_so_far = []
+                    for b in range(num_batches):
+                        key = f"batch_sel_{b}"
+                        previous = ss.get(key, stored_batch_samples[b] if b < len(stored_batch_samples) else [])
+                        previous = _sanitize_lf(previous, batch_allowed_samples)
+                        available = [c for c in batch_allowed_samples if c not in selected_so_far or c in previous]
+                        previous = _sanitize_lf(previous, available)
+                        ss[key] = previous
+                        b_cols = st.multiselect(
+                            f"Batch {b + 1} Samples",
+                            available,
+                            format_func=lambda x: pretty_labels.get(x, x),
+                            key=key,
+                        )
+                        b_cols = _sanitize_lf(b_cols, batch_allowed_samples)
+                        batch_samples.append(b_cols)
+                        selected_so_far = _uniq_lf(selected_so_far + b_cols)
+
+                    assigned = _uniq_lf([c for cols in batch_samples for c in cols])
+                    unassigned = [c for c in batch_allowed_samples if c not in assigned]
+                    nonempty = [cols for cols in batch_samples if cols]
+                    if unassigned:
+                        st.warning("Unassigned samples: " + ", ".join(pretty_labels.get(c, c) for c in unassigned))
+                    if len(nonempty) < 2:
+                        st.warning("At least two non-empty technical batches are required.")
+
+                    ss["global_batch_samples"] = batch_samples
+                    ss["global_batch_labels"] = [f"Batch {i+1}" for i in range(num_batches)]
+
+                    translated_batches = [
+                        [pretty_labels.get(c, c) for c in cols]
+                        for cols in batch_samples
+                    ]
+                    batch_signature = (
+                        ss.get("preprocessing_run_signature"), batch_method, int(num_batches),
+                        tuple(tuple(cols) for cols in batch_samples),
+                    )
+
+                    # Never keep using a correction generated from old batch assignments/methods.
+                    if (
+                        ss.get("batch_correction_applied", False)
+                        and ss.get("batch_correction_run_signature") != batch_signature
+                    ):
+                        ss["batch_correction_applied"] = False
+                        ss["batch_correction_applied_method"] = "None"
+                        ss["batch_correction_run_signature"] = None
+                        ss["expr_pre_batch"] = ss["expr_imputed"].copy()
+                        ss["expr_processed"] = ss["expr_imputed"].copy()
+                        ss["expr_final"] = ss["expr_imputed"].copy()
+                        ss["diff_results"] = None
+                        st.warning("Batch settings changed. The previous correction was removed; run batch correction again.")
+
+                    can_run_batch = not unassigned and len(nonempty) >= 2
+                    if st.button(
+                        "Run Batch Correction",
+                        type="primary",
+                        disabled=not can_run_batch,
+                        use_container_width=True,
+                        key="run_batch_correction_btn_lfq",
+                    ):
+                        corrected = apply_batch_correction(
+                            ss["expr_imputed"],
+                            translated_batches,
+                            method=batch_method,
+                            biological_groups=_group_map_pretty_lfq(pretty_labels),
+                        )
+                        if not ss.get("batch_correction_last_error"):
+                            ss["expr_pre_batch"] = ss["expr_imputed"].copy()
+                            ss["expr_processed"] = corrected.copy()
+                            ss["expr_final"] = corrected.copy()
+                            ss["batch_correction_applied"] = True
+                            ss["batch_correction_applied_method"] = batch_method
+                            ss["batch_correction_run_signature"] = batch_signature
+                            ss["diff_results"] = None
+                            st.success(
+                                f"{batch_method} applied. Select **After batch correction** in the QC Data Source above "
+                                "to compare it with the pre-batch matrix."
+                            )
+
+                if ss.get("batch_correction_applied", False):
+                    st.success(f"Current final matrix includes {ss.get('batch_correction_applied_method', 'batch correction')}.")
+
     # =========================================================================
     # PILLAR 3: STATISTICAL ANALYSIS SUITE
     # =========================================================================
     if ss["show_suite"]:
-        if ss.get("expr_processed") is None or ss["expr_processed"].empty:
-            st.warning("Please verify your matrix in 'Data Integrity Check & Sanity Profiling' first.")
+        if not ss.get("preprocessing_applied", False) or ss.get("expr_processed") is None or ss["expr_processed"].empty:
+            st.warning("Run normalization + imputation in 'Preprocessing, QC & Batch Correction' first.")
+            st.stop()
+
+        applied_signature = ss.get("preprocessing_run_signature")
+        current_sample_signature = tuple(ss.get("global_all_groups", []))
+        if not applied_signature or tuple(applied_signature[0]) != current_sample_signature:
+            st.error("The selected samples/groups changed after preprocessing. Re-run normalization + imputation before statistics.")
+            st.stop()
+        if ss.get("preprocessing_dirty", False):
+            st.error("Preprocessing settings changed after the last run. Re-run normalization + imputation before statistics.")
+            st.stop()
+
+        if not ss.get("pre_log2", True):
+            st.error("Differential analysis requires the log2 preprocessing option to be enabled.")
             st.stop()
         tabs = st.tabs(["Differential Analysis", "Results Visualization"])
         with tabs[0]:
@@ -2871,44 +3411,20 @@ def main():
                 
                 with st.expander("Parameter Definitions & Guide", expanded=False):
                     st.markdown("""
-                    **Preprocessing (Handling Missing Data & Noise):**
-                    * **Replace 0/NA intensities (Zero-Imputation):** Log-fold calculations fail on true zeros. If enabled, the app calculates the minimum positive intensity for a given protein across all your samples, and replaces missing/zero values with 20% (1/5th) of that minimum value. 
-                    * **Filter by presence (Drop Sparse Rows):** Removes proteins that are barely detected across your dataset to improve statistical power.
-                    * **Presence threshold:** The minimum fraction of samples that must contain a valid intensity.
-                    * **Presence rule:** Determines how the threshold above is applied (e.g., 'At least one group only' preserves on/off markers).
-                    **Statistical Testing:**
-                    * **Experimental design:** Select **Pairwise** to compare exactly two groups against each other, or **Three-group ANOVA** to test for any significant variance across three distinct groups simultaneously.
-                    * **Statistical test (Pairwise only):** Choose between parametric (e.g., Student's t, Welch's t) or non-parametric tests (e.g., Mann-Whitney U, Wilcoxon).
+                    **Preprocessing is locked before statistics.**
+                    - Sparse-protein filtering, normalization, and missing-value imputation are performed in the preprocessing/QC section.
+                    - Differential analysis does **not** re-impute or re-normalize the data.
+                    - Pairwise tests operate on the final log2 abundance matrix, so log2 fold-change is the difference between group mean log2 abundances.
                     """)
                 can_pairwise = len(active) >= 2
-                can_anova    = (len(active) == 3 and ss["global_n_groups"] == 3)
+                can_anova = (len(active) == 3 and ss["global_n_groups"] == 3)
                 with st.form("run_diff_form"):
-                    st.markdown("### Preprocessing (before statistics)")
-                    do_zero_impute = st.checkbox(
-                        "Replace 0/NA intensities before differential",
-                        value=True,
-                        help="Row-wise: for each row, 0/NA → (minimum positive intensity in that row) / 5"
+                    st.markdown("### Final Preprocessed Matrix")
+                    st.info(
+                        f"Normalization: **{ss.get('normalization_applied_method', 'None')}** · "
+                        f"Imputation: **{ss.get('imputation_applied_method', 'None')}** · "
+                        f"Batch correction: **{ss.get('batch_correction_applied_method', 'None')}**"
                     )
-                    
-                    do_presence_filter = st.checkbox("Filter by presence (drop sparse rows)", value=True)
-                    presence_min_frac = st.slider("Presence threshold (fraction)", 0.05, 1.00, 0.40, 0.05)
-                    
-                    presence_rule_ui = st.radio(
-                        "Presence rule",
-                        options=[
-                            "Total samples only",
-                            "At least one group only",
-                            "OR: Total samples OR one group",
-                            "AND: Total samples AND one group",
-                        ],
-                        index=2
-                    )
-                    presence_rule_key = {
-                        "Total samples only": "all_only",
-                        "At least one group only": "group_only",
-                        "OR: Total samples OR one group": "or",
-                        "AND: Total samples AND one group": "and",
-                    }[presence_rule_ui]
                     st.divider()
                     st.markdown("### Comparison")
                     comparison_choices = []
@@ -2973,9 +3489,9 @@ def main():
                             diff_df = compute_diffexp_tp_lf(
                                 df=analysis_df, control_cols=control_cols, test_cols=test_cols,
                                 control_label=control_lab, test_label=test_lab, test_type=specific_test,
-                                do_zero_impute=do_zero_impute, zero_frac=0.2, 
-                                do_presence_filter=do_presence_filter, presence_min_frac=presence_min_frac,
-                                presence_rule=presence_rule_key, min_n_per_group=2,
+                                do_zero_impute=False, zero_frac=0.2,
+                                do_presence_filter=False, presence_min_frac=0.0,
+                                presence_rule="all_only", min_n_per_group=2,
                                 batch_samples=ss.get("global_batch_samples"),
                                 batch_method=batch_method
                             )
@@ -2984,9 +3500,9 @@ def main():
                                 df=analysis_df, 
                                 group1_cols=groups[0], group2_cols=groups[1], group3_cols=groups[2],
                                 group1_label=labels[0], group2_label=labels[1], group3_label=labels[2],
-                                do_zero_impute=do_zero_impute, zero_frac=0.2, 
-                                do_presence_filter=do_presence_filter, presence_min_frac=presence_min_frac,
-                                presence_rule=presence_rule_key,
+                                do_zero_impute=False, zero_frac=0.2,
+                                do_presence_filter=False, presence_min_frac=0.0,
+                                presence_rule="all_only",
                                 batch_samples=ss.get("global_batch_samples"),
                                 batch_method=batch_method
                             )
