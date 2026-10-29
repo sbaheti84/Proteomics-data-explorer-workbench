@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write   # needed so the workflow can create a Release
 
 jobs:
   build-windows:
@@ -470,4 +470,37 @@ jobs:
           name: ProteomicsWorkbench-Windows
           path: ProteomicsWorkbench-Windows.zip
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 90
+
+
+      # ======================================================
+      # Publish to GitHub Releases
+      #
+      # Artifacts expire and need a GitHub login to download.
+      # A Release is permanent and shows on the repo home page.
+      # ======================================================
+
+      - name: Publish to GitHub Releases
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ZIP = "ProteomicsWorkbench-Windows.zip"
+          $size = (Get-Item $ZIP).Length
+
+          # GitHub Release files must be under 2 GiB each
+          if ($size -ge 2GB) {
+            throw "ZIP is $([math]::Round($size/1GB,2)) GB. GitHub Releases allow max 2 GB per file."
+          }
+
+          $TAG = "v1.0.${{ github.run_number }}"
+
+          gh release create $TAG $ZIP `
+            --repo "${{ github.repository }}" `
+            --target "${{ github.sha }}" `
+            --title "Proteomics Workbench $TAG (Windows)" `
+            --notes "Windows build from commit ${{ github.sha }}. Download the ZIP, unzip it, then run ProteomicsWorkbench.exe inside the folder. Keep all files together."
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release creation failed with exit code $LASTEXITCODE"
+          }

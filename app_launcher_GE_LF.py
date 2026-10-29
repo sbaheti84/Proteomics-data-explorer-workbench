@@ -255,6 +255,7 @@ ss.setdefault("batch_num_selected", 2)
 ss.setdefault("batch_config", {})
 ss.setdefault("batch_correction_run_signature", None)
 ss.setdefault("batch_correction_applied_method", "None")
+ss.setdefault("batch_combat_info", None)
 
 # One-time session defaults
 ss.setdefault("merged_ready", False)
@@ -310,7 +311,14 @@ ss.setdefault("cluster_palette", {})
 # =============================================================================
 # BATCH CORRECTION LOGIC
 # =============================================================================
-def apply_batch_correction(df: pd.DataFrame, batch_list: list[list[str]], method: str) -> pd.DataFrame:
+def apply_batch_correction(
+    df: pd.DataFrame,
+    batch_list: list[list[str]],
+    method: str,
+    group_map: dict[str, str] | None = None,
+    batch_names: list[str] | None = None,
+    strict: bool = False,
+) -> pd.DataFrame:
     out = df.copy()
     
     if method == "Median Centering":
@@ -347,34 +355,67 @@ def apply_batch_correction(df: pd.DataFrame, batch_list: list[list[str]], method
         if not HAS_COMBAT:
             raise ImportError("The 'neuroCombat' package is not installed. Please run `pip install neuroCombat` to use this feature.")
             
-        sample_to_batch = {}
+        # Rebuild named batches, keeping the caller's batch order.
+        named_batches = {}
         for idx, b_cols in enumerate(batch_list):
-            for c in b_cols:
-                if c in out.columns:
-                    sample_to_batch[c] = idx + 1
-                    
-        valid_cols = list(sample_to_batch.keys())
+            b_name = (
+                batch_names[idx]
+                if batch_names is not None and idx < len(batch_names)
+                else f"Batch {idx + 1}"
+            )
+            valid = [c for c in b_cols if c in out.columns]
+            if valid:
+                named_batches[b_name] = valid
+
+        valid_cols = [c for cols in named_batches.values() for c in cols]
         if not valid_cols:
             return out
-            
-        dat = out[valid_cols].copy()
-        
-        na_mask = dat.isna()
-        
-        row_medians = dat.median(axis=1)
-        dat_imputed = dat.apply(lambda col: col.fillna(row_medians)).fillna(0)
-        
-        covars = pd.DataFrame({"batch": [sample_to_batch[c] for c in valid_cols]}, index=valid_cols)
-        
+
+        if len(named_batches) < 2:
+            raise RuntimeError("ComBat requires at least 2 non-empty batches.")
+
+        # The biological group must be modelled, otherwise ComBat removes the
+        # real group differences along with the batch offsets.
+        if not group_map:
+            raise RuntimeError(
+                "ComBat needs the biological group of every batched sample. "
+                "Assign samples to Group 1/2/3 before running batch correction."
+            )
+
+        missing_group = [c for c in valid_cols if c not in group_map]
+        if missing_group:
+            raise RuntimeError(
+                "These batched samples have no biological group assigned: "
+                + ", ".join(missing_group)
+            )
+
+        # This helper works on log2 values, while the shared ComBat routine
+        # takes linear abundances and logs them itself. Hand it linear data
+        # and ask for the log2 result back, so the scale is unchanged here.
+        lin = np.exp2(out[valid_cols])
+
         try:
-            combat_res = neuroCombat(dat=dat_imputed, covars=covars, batch_col="batch")
-            corrected_df = pd.DataFrame(combat_res["data"], index=dat.index, columns=valid_cols)
-            
-            corrected_df[na_mask] = np.nan
-            out[valid_cols] = corrected_df
-            
+            corrected_log, info = apply_combat_batch_correction(
+                lin,
+                named_batches,
+                valid_cols,
+                group_map={c: group_map[c] for c in valid_cols},
+                return_linear=False,
+                strict=strict,
+            )
+        except ImportError:
+            raise
+        except ValueError as v_err:
+            # Confounded or unusable design; the message explains the layout.
+            raise RuntimeError(str(v_err))
         except Exception as e:
-            raise RuntimeError(f"ComBat correction failed: {e}. Ensure batches have enough samples and non-zero variances.")
+            raise RuntimeError(
+                f"ComBat correction failed: {e}. "
+                "Ensure batches have enough samples and non-zero variances."
+            )
+
+        out[valid_cols] = corrected_log[valid_cols]
+        out.attrs["combat_info"] = info
 
     return out
 
@@ -982,6 +1023,7 @@ def _reset_all_data(clear_cache: bool = False):
     ss["batch_num_selected"] = 2
     ss["batch_correction_run_signature"] = None
     ss["batch_correction_applied_method"] = "None"
+    ss["batch_combat_info"] = None
 
     # Clear temporary Streamlit widget keys used by the batch panel.
     for _k in list(ss.keys()):
@@ -1694,6 +1736,7 @@ def main():
                     ss["batch_config"] = {}
                     ss["batch_correction_run_signature"] = None
                     ss["batch_correction_applied_method"] = "None"
+                    ss["batch_combat_info"] = None
                     st.success("Successfully built pGlyco label-free matrix!")
                 except Exception as e:
                     st.error(f"Processing failed: {e}")
@@ -1718,6 +1761,7 @@ def main():
                             ss["batch_config"] = {}
                             ss["batch_correction_run_signature"] = None
                             ss["batch_correction_applied_method"] = "None"
+                            ss["batch_combat_info"] = None
                             st.success(f"Successfully joined {len(msfragger_uploads)} files into {len(merged)} unique MSFragger glycoforms!")
                 except Exception as e:
                     st.error(f"MSFragger LFQ Processing failed: {e}")
@@ -2220,6 +2264,7 @@ def main():
                                 ss["batch_corrected"] = False
                                 ss["batch_dict"] = {}
                                 ss["batch_correction_applied_method"] = "None"
+                                ss["batch_combat_info"] = None
                                 ss["diffexp_df"] = None
                                 ss["filtered_df"] = None
                                 ss["diff_done"] = False
@@ -2257,10 +2302,31 @@ def main():
                                         nonempty_batches.values()
                                     )
 
+                                    # ComBat must know the biological group of
+                                    # every sample, or it strips the real group
+                                    # differences together with the batch effect.
+                                    group_map = {
+                                        col: lbl
+                                        for lbl, cols in zip(
+                                            ss.get("global_group_labels", []) or [],
+                                            ss.get("global_group_samples", []) or [],
+                                        )
+                                        for col in (cols or [])
+                                    }
+
                                     corrected_log = apply_batch_correction(
                                         tmp_log,
                                         batch_list,
-                                        batch_method
+                                        batch_method,
+                                        group_map=group_map,
+                                        batch_names=list(
+                                            nonempty_batches.keys()
+                                        ),
+                                        strict=False
+                                    )
+
+                                    ss["batch_combat_info"] = (
+                                        corrected_log.attrs.get("combat_info")
                                     )
 
                                     corrected_raw = (
@@ -2303,6 +2369,17 @@ def main():
                                         "and downstream analysis will use corrected abundances."
                                     )
 
+                                    _cb_info = ss.get("batch_combat_info") or {}
+                                    for _w in _cb_info.get("warnings", []):
+                                        st.warning(_w)
+                                    if _cb_info.get("confounding_report"):
+                                        with st.expander(
+                                            "Batch / group design check"
+                                        ):
+                                            st.text(
+                                                _cb_info["confounding_report"]
+                                            )
+
                                 except ImportError as i_err:
                                     st.error(str(i_err))
                                 except RuntimeError as r_err:
@@ -2319,6 +2396,17 @@ def main():
                                     "batch correction, and downstream analysis will use "
                                     "corrected abundances."
                                 )
+
+                                _cb_info = ss.get("batch_combat_info") or {}
+                                for _w in _cb_info.get("warnings", []):
+                                    st.warning(_w)
+                                if _cb_info.get("confounding_report"):
+                                    with st.expander(
+                                        "Batch / group design check"
+                                    ):
+                                        st.text(
+                                            _cb_info["confounding_report"]
+                                        )
 
                     else:
                         # Turning correction OFF restores original abundances.
@@ -2341,6 +2429,7 @@ def main():
                         ss["batch_corrected"] = False
                         ss["batch_correction_run_signature"] = None
                         ss["batch_correction_applied_method"] = "None"
+                        ss["batch_combat_info"] = None
 
         with right:
             with st.container(border=True):
