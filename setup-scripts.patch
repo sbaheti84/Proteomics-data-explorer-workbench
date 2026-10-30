@@ -1,0 +1,1025 @@
+diff --git a/.dockerignore b/.dockerignore
+index 6f6076a..7727fab 100644
+--- a/.dockerignore
++++ b/.dockerignore
+@@ -27,4 +27,9 @@ r_bundle
+ node_modules
+ 
+ .idea
+-.vscode
+\ No newline at end of file
++.vscode
++# Local source install output. Must never reach the image: the app uses
++# <app folder>/R_library if it exists, and a host-built library would replace
++# the one the Dockerfile installs.
++R_library
++setup-r.log
+diff --git a/.gitattributes b/.gitattributes
+new file mode 100644
+index 0000000..e5a4454
+--- /dev/null
++++ b/.gitattributes
+@@ -0,0 +1,3 @@
++# Keep line endings right for each platform, whatever git's autocrlf setting.
++*.sh   text eol=lf
++*.bat  text eol=crlf
+diff --git a/.gitignore b/.gitignore
+index 3ae36a2..511a91c 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -26,3 +26,8 @@ dist/
+ *.app/
+ *.exe
+ 
++
++# Local source install (setup.sh / setup.ps1)
++R_library/
++setup-r.log
++r_bundle/
+diff --git a/README.md b/README.md
+index 5281749..9562ff9 100644
+--- a/README.md
++++ b/README.md
+@@ -1,2 +1,117 @@
+-# Proteomics_workbench
+-# Proteomics-data-explorer-workbench
++# Proteomics Data Explorer Workbench
++
++A Streamlit workbench for proteomics data, with five apps:
++
++- **GlycoExplorer (TMT)** and **GlycoExplorer (Label-Free)**: glycoproteomics QC, statistics and plots
++- **Total Proteome (TMT)** and **Total Proteome (Label-Free)**: protein-level QC, normalization, batch correction, statistics and reports
++- **Glyco-Proteome Integrator**: compares glycosite changes with protein changes
++
++Example input files are in `assets/example/`.
++
++## Three ways to use it
++
++| Way | Best for | How |
++|---|---|---|
++| Desktop app | Most users on Windows or macOS | Download the ZIP from [Releases](https://github.com/sbaheti84/Proteomics-data-explorer-workbench/releases) |
++| From source | Developers, Linux users, anyone who wants the latest code | `git clone`, then the setup script (below) |
++| Docker | Servers and shared installs | `docker run -p 8501:8501 ghcr.io/sbaheti84/proteomics-data-explorer-workbench:latest` |
++
++---
++
++## Install from source
++
++### What you need first
++
++| Tool | Version | Needed for |
++|---|---|---|
++| Git | any | Downloading the code (and one R package) |
++| Python | **3.12** (3.11 also works; **3.13 and newer do not**) | The whole app |
++| R | **4.5.x** recommended | Only NAguideR imputation in **Total Proteome (Label-Free)**. Skip it with `--skip-r` / `-SkipR` if you do not need that |
++| C/C++ compiler | see below | One R package (DreamAI) must be compiled |
++
++Compiler per system:
++
++- **Windows:** [Rtools45](https://cran.r-project.org/bin/windows/Rtools/rtools45/rtools.html) (keep the default folder `C:\rtools45`)
++- **macOS:** Apple's command line tools: run `xcode-select --install`
++- **Linux (Ubuntu/Debian):** `./setup.sh --system-deps` installs everything needed
++
++Disk space: about 1 GB for Python packages, plus about 1 GB for R packages.
++
++### macOS and Linux
++
++```bash
++git clone https://github.com/sbaheti84/Proteomics-data-explorer-workbench.git
++cd Proteomics-data-explorer-workbench
++./setup.sh
++./run.sh
++```
++
++On Ubuntu/Debian, run `./setup.sh --system-deps` the first time. It installs the compilers and system libraries the R packages need (it asks for your password).
++
++### Windows
++
++```bat
++git clone https://github.com/sbaheti84/Proteomics-data-explorer-workbench.git
++cd Proteomics-data-explorer-workbench
++setup.bat
++run.bat
++```
++
++You can also double-click `setup.bat` and then `run.bat` in File Explorer.
++
++Missing Python, R or Rtools? Run `setup.bat -InstallPrereqs` to install them with winget (Windows may ask for permission).
++
++### What happens
++
++`setup` does four things. It is safe to run again; finished steps are skipped.
++
++1. Finds Python and R, and checks their versions.
++2. Creates a Python environment in `.venv/` and installs `requirements.txt` into it.
++3. Installs the R packages (NAguideR, SeqKnn, GMSimpute, DreamAI and their dependencies) into `R_library/` inside the project folder. Your normal R setup is not changed, and the app finds `R_library/` by itself.
++4. Checks that the Python and R packages load.
++
++The first run takes about 5 to 40 minutes, mostly for R packages. Linux takes longest.
++
++`run` starts the app and opens it in your browser. If the browser does not open, go to <http://localhost:8501>. To stop the app, press `Ctrl+C` in the terminal (or close the `run.bat` window).
++
++### Options
++
++| macOS / Linux | Windows | What it does |
++|---|---|---|
++| `--skip-r` | `-SkipR` | Python only. Everything works except NAguideR imputation |
++| `--system-deps` | — | Ubuntu/Debian: install compilers and system libraries |
++| — | `-InstallPrereqs` | Install missing Python 3.12, R 4.5 and Rtools45 with winget |
++| `--python PATH` | `-Python PATH` | Use this Python |
++| `--rscript PATH` | `-Rscript PATH` | Use this R |
++| `--recreate-venv` | `-RecreateVenv` | Rebuild the Python environment from scratch |
++
++To pass options to Streamlit, add them after `run`, for example `./run.sh --server.port=8502`.
++
++### Updating
++
++```bash
++git pull
++./setup.sh        # Windows: setup.bat
++```
++
++### Uninstalling
++
++Delete the project folder. Everything the setup installs lives inside it (`.venv/` and `R_library/`).
++
++### Troubleshooting
++
++- **"Python 3.12 was not found" but I have Python 3.13.** The pinned packages in `requirements.txt` do not support 3.13 yet. Install 3.12 next to it (python.org, or `brew install python@3.12`), then run setup again.
++- **"Permission denied" when running `./setup.sh`.** Run `chmod +x setup.sh run.sh` once, or use `bash setup.sh`.
++- **R packages fail to compile on Linux.** Run `./setup.sh --system-deps`. The first error is near the end of `setup-r.log`.
++- **You changed your R version.** Packages built for one R version may not load in another. Delete `R_library/` and run setup again.
++- **Windows: pip fails with a "path too long" error.** Move the project to a short path such as `C:\pdew`, then run `setup.bat -RecreateVenv`.
++- **Port 8501 is already in use.** Run `./run.sh --server.port=8502` (Windows: `run.bat --server.port=8502`).
++- **NAguideR methods say R is not ready.** Start the app with `run.sh` / `run.bat`, not with `streamlit run app.py`. The run script tells the app which R built `R_library/`.
++
++---
++
++## For maintainers
++
++- `install_naguider_r_dependencies.R` is shared by `setup.sh`, `setup.ps1`, the GitHub Actions builds and the Dockerfile. It reads two optional environment variables, `CRAN_REPO` and `R_NCPUS`. When they are not set, it behaves exactly as before.
++- Desktop builds: run the **Build Windows App** and **Build macOS App** workflows in GitHub Actions. They publish to Releases.
++- `R_library/` is ignored by git and Docker. Do not let it into the Docker image: the app uses `<app folder>/R_library` whenever it exists.
+diff --git a/install_naguider_r_dependencies.R b/install_naguider_r_dependencies.R
+index 7b4808b..1cdf1a9 100755
+--- a/install_naguider_r_dependencies.R
++++ b/install_naguider_r_dependencies.R
+@@ -23,14 +23,37 @@
+ # Global configuration
+ # ============================================================
+ 
++# CRAN_REPO and R_NCPUS can be set by setup.sh / setup.ps1.
++# When they are not set (GitHub Actions, Docker) the values are unchanged.
++cran_repo <- Sys.getenv("CRAN_REPO", "https://cloud.r-project.org")
++n_cpus <- suppressWarnings(as.integer(Sys.getenv("R_NCPUS", "2")))
++if (is.na(n_cpus) || n_cpus < 1) n_cpus <- 2L
++
+ options(
+     repos = c(
+-        CRAN = "https://cloud.r-project.org"
++        CRAN = cran_repo
+     ),
+     timeout = 1800,
+-    Ncpus = 2
++    Ncpus = n_cpus
+ )
+ 
++# Posit Package Manager only serves ready-built Linux packages when the
++# user agent says which R version is asking (documented P3M setting).
++if (grepl("__linux__", cran_repo, fixed = TRUE)) {
++    options(
++        HTTPUserAgent = sprintf(
++            "R/%s R (%s)",
++            getRversion(),
++            paste(
++                getRversion(),
++                R.version["platform"],
++                R.version["arch"],
++                R.version["os"]
++            )
++        )
++    )
++}
++
+ cat("\n")
+ cat("============================================================\n")
+ cat(" NAguideR R Dependency Installation\n")
+diff --git a/run.bat b/run.bat
+new file mode 100644
+index 0000000..6a7aa95
+--- /dev/null
++++ b/run.bat
+@@ -0,0 +1,5 @@
++@echo off
++rem Start Proteomics Data Explorer Workbench (Windows). Run setup.bat once first.
++rem Close this window (or press Ctrl+C) to stop the app.
++powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0run.ps1" %*
++if errorlevel 1 pause
+diff --git a/run.ps1 b/run.ps1
+new file mode 100644
+index 0000000..6179873
+--- /dev/null
++++ b/run.ps1
+@@ -0,0 +1,33 @@
++# run.ps1 - start Proteomics Data Explorer Workbench (Windows).
++# Run setup.bat once before using this. Easiest: double-click run.bat.
++#
++# Extra options are passed to Streamlit, for example:
++#   .\run.bat --server.port=8502          use another port
++#   .\run.bat --server.headless=true      do not open a browser
++#
++# No param() block on purpose: Streamlit options start with "--", and a param
++# block would make PowerShell try to read them as its own parameters.
++
++$ErrorActionPreference = "Stop"
++
++$ROOT = Split-Path -Parent $MyInvocation.MyCommand.Path
++Set-Location $ROOT   # Streamlit reads .streamlit\config.toml from the current folder
++
++$VPY = Join-Path $ROOT ".venv\Scripts\python.exe"
++if (-not (Test-Path $VPY)) {
++    Write-Host "The Python environment is missing. Run setup.bat first." -ForegroundColor Red
++    exit 1
++}
++
++# Use the R that built R_library\ (recorded by setup.ps1), unless overridden.
++$rFile = Join-Path $ROOT "R_library\.rscript_path"
++if (-not $env:RSCRIPT_PATH -and (Test-Path $rFile)) {
++    $env:RSCRIPT_PATH = (Get-Content -Raw $rFile).Trim()
++}
++
++$env:STREAMLIT_BROWSER_GATHER_USAGE_STATS = "false"
++
++# Streamlit logs to stderr; do not let PowerShell 5.1 treat that as an error.
++$ErrorActionPreference = "Continue"
++& $VPY -m streamlit run app.py @args
++exit $LASTEXITCODE
+diff --git a/run.sh b/run.sh
+new file mode 100755
+index 0000000..69fa815
+--- /dev/null
++++ b/run.sh
+@@ -0,0 +1,26 @@
++#!/usr/bin/env bash
++# run.sh - start Proteomics Data Explorer Workbench (macOS / Linux).
++# Run ./setup.sh once before using this.
++#
++# Extra options are passed to Streamlit, for example:
++#   ./run.sh --server.port 8502            use another port
++#   ./run.sh --server.headless true        do not open a browser
++set -euo pipefail
++
++ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++cd "$ROOT"   # Streamlit reads .streamlit/config.toml from the current folder
++
++VPY="$ROOT/.venv/bin/python"
++if [ ! -x "$VPY" ]; then
++  echo "The Python environment is missing. Run ./setup.sh first." >&2
++  exit 1
++fi
++
++# Use the R that built R_library/ (recorded by setup.sh), unless overridden.
++if [ -z "${RSCRIPT_PATH:-}" ] && [ -f "$ROOT/R_library/.rscript_path" ]; then
++  RSCRIPT_PATH="$(cat "$ROOT/R_library/.rscript_path")"
++  export RSCRIPT_PATH
++fi
++
++export STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
++exec "$VPY" -m streamlit run app.py "$@"
+diff --git a/setup.bat b/setup.bat
+new file mode 100644
+index 0000000..c44df41
+--- /dev/null
++++ b/setup.bat
+@@ -0,0 +1,10 @@
++@echo off
++rem One-time setup for Proteomics Data Explorer Workbench (Windows).
++rem Double-click this file, or run it in a terminal. Options, e.g.:
++rem   setup.bat -InstallPrereqs     also install Python, R and Rtools with winget
++rem   setup.bat -SkipR              Python only (no NAguideR imputation)
++powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup.ps1" %*
++set "SETUP_EXIT=%ERRORLEVEL%"
++echo.
++pause
++exit /b %SETUP_EXIT%
+diff --git a/setup.ps1 b/setup.ps1
+new file mode 100644
+index 0000000..3544fd1
+--- /dev/null
++++ b/setup.ps1
+@@ -0,0 +1,387 @@
++<#
++.SYNOPSIS
++  One-time setup to run Proteomics Data Explorer Workbench from source on Windows.
++
++.DESCRIPTION
++  1. Finds Python 3.12 (3.11 also works), R (4.5.x recommended) and Rtools.
++  2. Creates a Python environment in .venv and installs requirements.txt.
++  3. Installs the R packages (NAguideR, SeqKnn, GMSimpute, DreamAI and their
++     dependencies) into .\R_library. This library lives inside this folder, so
++     your normal R setup is not changed. The app finds it by itself.
++  4. Checks that the Python and R packages load.
++
++  Safe to run again: packages that are already installed are skipped.
++
++  Easiest way to run it: double-click setup.bat, or in a terminal:
++    powershell -ExecutionPolicy Bypass -File .\setup.ps1
++
++.PARAMETER InstallPrereqs
++  Use winget to install whatever is missing: Python 3.12, R 4.5 and Rtools45.
++
++.PARAMETER SkipR
++  Set up Python only. Everything works except NAguideR imputation in the
++  Total Proteomics label-free app.
++
++.PARAMETER Python
++  Path to python.exe to use instead of searching.
++
++.PARAMETER Rscript
++  Path to Rscript.exe to use instead of searching.
++
++.PARAMETER RecreateVenv
++  Delete .venv and build it again from scratch.
++#>
++[CmdletBinding()]
++param(
++    [switch]$InstallPrereqs,
++    [switch]$SkipR,
++    [string]$Python = "",
++    [string]$Rscript = "",
++    [switch]$RecreateVenv
++)
++
++$ErrorActionPreference = "Stop"
++$ProgressPreference = "SilentlyContinue"
++
++$ROOT = Split-Path -Parent $MyInvocation.MyCommand.Path
++Set-Location $ROOT
++[Environment]::CurrentDirectory = $ROOT   # R uses relative paths (r_packages\...)
++
++$VENV_DIR  = Join-Path $ROOT ".venv"
++$VPY       = Join-Path $VENV_DIR "Scripts\python.exe"
++$R_LIB_DIR = Join-Path $ROOT "R_library"   # the app looks for <app folder>\R_library
++$TESTED_R  = "4.5"                         # R version used by the official builds
++$WINGET_R_VERSION = "4.5.3"
++
++# -----------------------------------------------------------------------------
++# Helpers
++# -----------------------------------------------------------------------------
++function Write-Step($msg) { Write-Host ""; Write-Host "==> $msg" -ForegroundColor Cyan }
++function Write-Ok($msg)   { Write-Host "  OK  $msg" -ForegroundColor Green }
++function Write-Warn($msg) { Write-Host "  WARNING: $msg" -ForegroundColor Yellow }
++function Fail($msg) {
++    Write-Host ""
++    Write-Host "ERROR: $msg" -ForegroundColor Red
++    exit 1
++}
++
++# Run a program and show its output. Returns the exit code.
++# Windows PowerShell 5.1 turns anything a program writes to stderr into an
++# error when ErrorActionPreference is Stop (pip and R write progress there),
++# so relax it around native calls.
++function Invoke-Native([string]$Exe, [string[]]$Arguments) {
++    $old = $ErrorActionPreference
++    $ErrorActionPreference = "Continue"
++    try {
++        $global:LASTEXITCODE = 0
++        & $Exe @Arguments | Out-Host
++        return $global:LASTEXITCODE
++    } finally {
++        $ErrorActionPreference = $old
++    }
++}
++
++# Run a program and return its trimmed stdout, or $null if it failed.
++function Get-NativeOutput([string]$Exe, [string[]]$Arguments) {
++    $old = $ErrorActionPreference
++    $ErrorActionPreference = "Continue"
++    try {
++        $global:LASTEXITCODE = -1
++        $out = & $Exe @Arguments 2>$null
++        if ($global:LASTEXITCODE -ne 0) { return $null }
++        return (($out | Out-String).Trim())
++    } catch {
++        return $null
++    } finally {
++        $ErrorActionPreference = $old
++    }
++}
++
++function Test-Winget { return [bool](Get-Command winget.exe -ErrorAction SilentlyContinue) }
++
++function Install-WithWinget([string]$Id, [string]$Version = "", [string[]]$Extra = @()) {
++    if (-not (Test-Winget)) {
++        Fail "winget is not available on this computer. Install the missing program by hand (links above) and run setup again."
++    }
++    $wingetArgs = @("install", "-e", "--id", $Id, "--accept-package-agreements", "--accept-source-agreements") + $Extra
++    if ($Version) { $wingetArgs += @("--version", $Version) }
++    Write-Host "  winget $($wingetArgs -join ' ')"
++    return (Invoke-Native "winget.exe" $wingetArgs)
++}
++
++# Note on quoting: Windows PowerShell 5.1 drops double quotes inside arguments
++# passed to programs, so the Python/R snippets below only use single quotes.
++$PY_VERSION_CODE = "import sys; print('%d.%d' % sys.version_info[:2])"
++$PY_EXE_CODE     = "import sys; print(sys.executable)"
++
++function Get-PyVersion([string]$Exe) { return (Get-NativeOutput $Exe @("-c", $PY_VERSION_CODE)) }
++# 3.13+ is not supported: requirements.txt pins pipreqs==0.5.0, which needs Python < 3.13.
++function Test-PySupported([string]$Ver) { return (@("3.11", "3.12") -contains $Ver) }
++
++function Find-Python {
++    # 1. The py launcher knows every python.org install.
++    $launchers = @(
++        (Get-Command py.exe -ErrorAction SilentlyContinue | ForEach-Object { $_.Source }),
++        "$env:LOCALAPPDATA\Programs\Python\Launcher\py.exe",
++        "$env:WINDIR\py.exe"
++    ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
++
++    foreach ($launcher in $launchers) {
++        foreach ($v in @("3.12", "3.11")) {
++            $exe = Get-NativeOutput $launcher @("-$v", "-c", $PY_EXE_CODE)
++            if ($exe -and (Test-Path $exe)) { return $exe }
++        }
++    }
++
++    # 2. Known install folders and PATH. The "python.exe" Microsoft Store stub
++    #    fails the version check, so it is skipped automatically.
++    $candidates = @()
++    foreach ($v in @("312", "311")) {
++        $candidates += "$env:LOCALAPPDATA\Programs\Python\Python$v\python.exe"
++        $candidates += "$env:ProgramFiles\Python$v\python.exe"
++    }
++    $candidates += (Get-Command python.exe -All -ErrorAction SilentlyContinue | ForEach-Object { $_.Source })
++
++    foreach ($c in $candidates) {
++        if ($c -and (Test-Path $c)) {
++            $ver = Get-PyVersion $c
++            if ($ver -and (Test-PySupported $ver)) { return $c }
++        }
++    }
++    return $null
++}
++
++function Find-Rscript {
++    $found = @()
++
++    if ($env:RSCRIPT_PATH -and (Test-Path $env:RSCRIPT_PATH)) { return $env:RSCRIPT_PATH }
++
++    # Every R in the standard install folders, newest first.
++    foreach ($base in @("$env:ProgramFiles\R", "$env:LOCALAPPDATA\Programs\R")) {
++        if (Test-Path $base) {
++            Get-ChildItem -Path $base -Directory -Filter "R-*" -ErrorAction SilentlyContinue | ForEach-Object {
++                $exe = Join-Path $_.FullName "bin\Rscript.exe"
++                if (Test-Path $exe) {
++                    $verText = $_.Name.Substring(2)
++                    $ver = $null
++                    if ([version]::TryParse($verText, [ref]$ver)) {
++                        $found += [pscustomobject]@{ Path = $exe; Version = $ver }
++                    }
++                }
++            }
++        }
++    }
++
++    # Prefer the newest 4.5.x (what the official builds use), then the newest R.
++    $preferred = $found | Where-Object { "$($_.Version.Major).$($_.Version.Minor)" -eq $TESTED_R } |
++        Sort-Object Version -Descending | Select-Object -First 1
++    if ($preferred) { return $preferred.Path }
++    $newest = $found | Sort-Object Version -Descending | Select-Object -First 1
++    if ($newest) { return $newest.Path }
++
++    $onPath = Get-Command Rscript.exe -ErrorAction SilentlyContinue
++    if ($onPath) { return $onPath.Source }
++    return $null
++}
++
++function Test-Rtools {
++    foreach ($name in @("RTOOLS45_HOME", "RTOOLS46_HOME", "RTOOLS47_HOME")) {
++        $p = [Environment]::GetEnvironmentVariable($name)
++        if ($p -and (Test-Path (Join-Path $p "usr\bin\make.exe"))) { return $true }
++    }
++    foreach ($p in @("C:\rtools45", "C:\rtools46", "C:\rtools47")) {
++        if (Test-Path (Join-Path $p "usr\bin\make.exe")) { return $true }
++    }
++    return $false
++}
++
++Write-Host "Proteomics Data Explorer Workbench - setup" -ForegroundColor White
++Write-Host "Folder: $ROOT"
++
++# -----------------------------------------------------------------------------
++# 1. Python
++# -----------------------------------------------------------------------------
++Write-Step "Checking Python"
++
++if ($Python) {
++    if (-not (Test-Path $Python)) { Fail "Python not found: $Python" }
++    $pyVer = Get-PyVersion $Python
++    if (-not $pyVer) { Fail "Could not run $Python" }
++    if (-not (Test-PySupported $pyVer)) {
++        Fail "$Python is Python $pyVer. The app needs Python 3.12 (3.11 also works)."
++    }
++} else {
++    $Python = Find-Python
++    if (-not $Python -and $InstallPrereqs) {
++        Write-Host "  Python 3.12 not found. Installing it with winget..."
++        $code = Install-WithWinget "Python.Python.3.12" "" @("--scope", "user")
++        if ($code -ne 0) { Fail "winget could not install Python 3.12 (exit code $code)." }
++        $Python = Find-Python
++    }
++    if (-not $Python) {
++        Fail ("Python 3.12 was not found (3.11 also works).`n" +
++              "Install Python 3.12 from https://www.python.org/downloads/windows/ , or run:`n" +
++              "    setup.bat -InstallPrereqs`n" +
++              "Then run setup again. Python somewhere unusual? setup.bat -Python C:\path\to\python.exe")
++    }
++    $pyVer = Get-PyVersion $Python
++}
++Write-Ok "Python $pyVer ($Python)"
++if ($pyVer -ne "3.12") { Write-Warn "Python 3.12 is what the official builds use. $pyVer works, but 3.12 is the safest choice." }
++
++# -----------------------------------------------------------------------------
++# 2. Python environment + packages
++# -----------------------------------------------------------------------------
++Write-Step "Setting up the Python environment (.venv)"
++
++if ((Test-Path $VENV_DIR) -and -not $RecreateVenv) {
++    $venvVer = $null
++    if (Test-Path $VPY) { $venvVer = Get-PyVersion $VPY }
++    if (-not $venvVer -or -not (Test-PySupported $venvVer)) {
++        Write-Warn "Existing .venv is broken or uses an unsupported Python. Rebuilding it."
++        $RecreateVenv = $true
++    }
++}
++if ($RecreateVenv -and (Test-Path $VENV_DIR)) {
++    Remove-Item -Recurse -Force $VENV_DIR
++}
++
++if (-not (Test-Path $VPY)) {
++    $code = Invoke-Native $Python @("-m", "venv", $VENV_DIR)
++    if ($code -ne 0 -or -not (Test-Path $VPY)) { Fail "Could not create the Python environment in $VENV_DIR" }
++    Write-Ok "Created .venv"
++} else {
++    Write-Ok "Using existing .venv (Python $(Get-PyVersion $VPY))"
++}
++
++$env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
++$code = Invoke-Native $VPY @("-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel")
++if ($code -ne 0) { Fail "Upgrading pip failed (exit code $code)." }
++$code = Invoke-Native $VPY @("-m", "pip", "install", "-r", (Join-Path $ROOT "requirements.txt"))
++if ($code -ne 0) {
++    Fail ("Installing Python packages failed. Scroll up for the first error from pip.`n" +
++          "If it mentions a path that is too long, move this folder somewhere short (e.g. C:\pdew) and run setup again.")
++}
++
++$checkCode = @'
++import contextlib, importlib, io
++mods = ['streamlit', 'pandas', 'numpy', 'scipy', 'sklearn', 'statsmodels',
++        'plotly', 'matplotlib', 'seaborn', 'openpyxl', 'pyteomics', 'st_aggrid',
++        'statannotations', 'neuroCombat', 'upsetplot', 'fpdf', 'adjustText', 'PIL']
++bad = []
++# Hide Streamlit's harmless "missing ScriptRunContext" log line.
++with contextlib.redirect_stderr(io.StringIO()):
++    for m in mods:
++        try:
++            importlib.import_module(m)
++        except Exception as e:
++            bad.append(m + ': ' + str(e))
++if bad:
++    print('  Failed imports:')
++    for b in bad:
++        print('   - ' + b)
++    raise SystemExit(1)
++import streamlit
++print('  All %d key Python packages import (streamlit %s).' % (len(mods), streamlit.__version__))
++'@
++$checkFile = Join-Path $env:TEMP "pdew_import_check.py"
++Set-Content -Path $checkFile -Value $checkCode -Encoding ASCII
++$code = Invoke-Native $VPY @($checkFile)
++Remove-Item -Force $checkFile -ErrorAction SilentlyContinue
++if ($code -ne 0) { Fail "Some Python packages did not import (see above)." }
++Write-Ok "Python packages installed"
++
++# -----------------------------------------------------------------------------
++# 3. R + R packages
++# -----------------------------------------------------------------------------
++if ($SkipR) {
++    Write-Step "Skipping R (-SkipR)"
++    Write-Warn "NAguideR imputation in the Total Proteomics label-free app will not work until you run setup without -SkipR."
++} else {
++    Write-Step "Checking R"
++
++    if (-not $Rscript) { $Rscript = Find-Rscript }
++    if (-not $Rscript -and $InstallPrereqs) {
++        Write-Host "  R not found. Installing R $WINGET_R_VERSION with winget (Windows may ask for permission)..."
++        $code = Install-WithWinget "RProject.R" $WINGET_R_VERSION
++        if ($code -ne 0) {
++            Write-Warn "R $WINGET_R_VERSION is not available in winget. Installing the newest R instead."
++            $code = Install-WithWinget "RProject.R"
++            if ($code -ne 0) { Fail "winget could not install R (exit code $code)." }
++        }
++        $Rscript = Find-Rscript
++    }
++    if (-not $Rscript) {
++        Fail ("R was not found. Install R 4.5 from https://cran.r-project.org/bin/windows/base/old/ (4.5.3), or run:`n" +
++              "    setup.bat -InstallPrereqs`n" +
++              "R somewhere unusual? setup.bat -Rscript 'C:\path\to\Rscript.exe'`n" +
++              "To set up without R (no NAguideR imputation): setup.bat -SkipR")
++    }
++    if (-not (Test-Path $Rscript)) { Fail "Rscript not found: $Rscript" }
++
++    $rVer = Get-NativeOutput $Rscript @("--vanilla", "-e", "cat(paste(R.version[['major']], R.version[['minor']], sep='.'))")
++    if (-not $rVer) { Fail "Could not run $Rscript" }
++    Write-Ok "R $rVer ($Rscript)"
++    $rParts = $rVer.Split(".")
++    $rMajorMinor = "$($rParts[0]).$($rParts[1])"
++    if ([version]"$rMajorMinor.0" -lt [version]"4.3.0") { Fail "R $rVer is too old. Install R $TESTED_R.x." }
++    if ($rMajorMinor -ne $TESTED_R) {
++        Write-Warn "The official builds use R $TESTED_R.x. R $rVer may work, but if a package fails, install R $TESTED_R.x."
++    }
++
++    # DreamAI has C++ code, so the first install needs Rtools.
++    if (-not (Test-Path (Join-Path $R_LIB_DIR "DreamAI"))) {
++        if (-not (Test-Rtools) -and $InstallPrereqs) {
++            Write-Host "  Rtools not found. Installing Rtools45 with winget..."
++            $code = Install-WithWinget "RProject.Rtools"
++            if ($code -ne 0) { Fail "winget could not install Rtools (exit code $code)." }
++        }
++        if (-not (Test-Rtools)) {
++            Fail ("Rtools45 (the compiler R uses on Windows) was not found. One R package (DreamAI) has to be compiled.`n" +
++                  "Install it from https://cran.r-project.org/bin/windows/Rtools/rtools45/rtools.html (keep the default folder C:\rtools45),`n" +
++                  "or run: setup.bat -InstallPrereqs")
++        }
++        Write-Ok "Rtools found"
++    }
++
++    if (-not (Get-Command git.exe -ErrorAction SilentlyContinue)) {
++        Fail "git was not found. It is needed to download the DreamAI R package. Install Git for Windows: https://git-scm.com/download/win"
++    }
++
++    Write-Step "Installing R packages into R_library\ (first run: about 5-20 minutes)"
++    New-Item -ItemType Directory -Force -Path $R_LIB_DIR | Out-Null
++
++    # The same library settings the app uses at run time, so what is installed
++    # here is exactly what the app sees. --vanilla keeps the repo's renv
++    # .Rprofile out of the way.
++    $saved = @{ R_LIBS = $env:R_LIBS; R_LIBS_USER = $env:R_LIBS_USER; R_NCPUS = $env:R_NCPUS }
++    $env:R_LIBS = $R_LIB_DIR
++    $env:R_LIBS_USER = $R_LIB_DIR
++    if (-not $env:R_NCPUS) { $env:R_NCPUS = "$([Environment]::ProcessorCount)" }
++    try {
++        $code = Invoke-Native $Rscript @("--vanilla", (Join-Path $ROOT "install_naguider_r_dependencies.R"))
++    } finally {
++        $env:R_LIBS = $saved.R_LIBS
++        $env:R_LIBS_USER = $saved.R_LIBS_USER
++        $env:R_NCPUS = $saved.R_NCPUS
++    }
++    if ($code -ne 0) {
++        Fail ("R package installation failed (exit code $code). The error is in the last lines above.`n" +
++              "Common causes: no internet access to CRAN/GitHub, or Rtools missing. Re-running setup continues where it stopped.")
++    }
++
++    # Remember which R built this library. run.bat passes it to the app so a
++    # different R cannot pick up packages built for another version.
++    Set-Content -Path (Join-Path $R_LIB_DIR ".rscript_path") -Value $Rscript -Encoding UTF8
++    Write-Ok "R packages installed in R_library\"
++}
++
++# -----------------------------------------------------------------------------
++# Done
++# -----------------------------------------------------------------------------
++Write-Step "Setup complete"
++Write-Host "Start the app by double-clicking run.bat, or in a terminal:"
++Write-Host ""
++Write-Host "    .\run.bat"
++Write-Host ""
++Write-Host "It opens in your browser. If it does not, go to http://localhost:8501"
+diff --git a/setup.sh b/setup.sh
+new file mode 100755
+index 0000000..9e1fca4
+--- /dev/null
++++ b/setup.sh
+@@ -0,0 +1,322 @@
++#!/usr/bin/env bash
++# =============================================================================
++# setup.sh - one-time setup to run Proteomics Data Explorer Workbench from
++# source on macOS or Linux. (Windows: run setup.bat instead.)
++#
++#   git clone https://github.com/sbaheti84/Proteomics-data-explorer-workbench.git
++#   cd Proteomics-data-explorer-workbench
++#   ./setup.sh
++#   ./run.sh
++#
++# What it does
++#   1. Finds Python 3.12 (3.11 also works) and R (4.5.x recommended).
++#   2. Creates a Python environment in .venv/ and installs requirements.txt.
++#   3. Installs the R packages (NAguideR, SeqKnn, GMSimpute, DreamAI and their
++#      dependencies) into ./R_library. This library lives inside this folder,
++#      so your normal R setup is not changed. The app finds it by itself.
++#   4. Checks that the Python and R packages load.
++#
++# It is safe to run again. Packages that are already installed are skipped.
++# Run ./setup.sh --help for options.
++# =============================================================================
++set -euo pipefail
++
++ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++cd "$ROOT"
++
++VENV_DIR="$ROOT/.venv"
++R_LIB_DIR="$ROOT/R_library"   # the app looks for <app folder>/R_library
++R_LOG="$ROOT/setup-r.log"
++TESTED_R="4.5"                # R version used by the Windows/macOS/Docker builds
++
++SKIP_R=0
++SYSTEM_DEPS=0
++RECREATE_VENV=0
++PYTHON_BIN=""
++RSCRIPT_BIN="${RSCRIPT_PATH:-}"
++
++# -----------------------------------------------------------------------------
++# Output helpers
++# -----------------------------------------------------------------------------
++if [ -t 1 ]; then
++  BOLD=$'\033[1m'; RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; RESET=$'\033[0m'
++else
++  BOLD=""; RED=""; GREEN=""; YELLOW=""; RESET=""
++fi
++step() { printf '\n%s==> %s%s\n' "$BOLD" "$*" "$RESET"; }
++ok()   { printf '%s  OK%s  %s\n' "$GREEN" "$RESET" "$*"; }
++warn() { printf '%s  WARNING:%s %s\n' "$YELLOW" "$RESET" "$*" >&2; }
++die()  { printf '\n%sERROR:%s %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
++
++usage() {
++  cat <<'EOF'
++Usage: ./setup.sh [options]
++
++Options
++  --skip-r          Set up Python only. Everything works except NAguideR
++                    imputation in the Total Proteomics label-free app.
++  --system-deps     Debian/Ubuntu only: apt-get install the compilers and
++                    libraries that R packages need (asks for your password).
++  --python PATH     Use this Python instead of searching for one.
++  --rscript PATH    Use this Rscript instead of searching for one.
++  --recreate-venv   Delete .venv and build it again from scratch.
++  -h, --help        Show this help.
++
++Environment variables
++  CRAN_REPO   CRAN mirror for R packages. On Ubuntu/Debian the default is
++              Posit Package Manager, which has ready-built Linux packages
++              (much faster than compiling).
++  R_NCPUS     How many R packages to build in parallel (default: CPU count).
++EOF
++}
++
++while [ $# -gt 0 ]; do
++  case "$1" in
++    --skip-r)        SKIP_R=1 ;;
++    --system-deps)   SYSTEM_DEPS=1 ;;
++    --recreate-venv) RECREATE_VENV=1 ;;
++    --python)        [ $# -ge 2 ] || die "--python needs a path"; PYTHON_BIN="$2"; shift ;;
++    --rscript)       [ $# -ge 2 ] || die "--rscript needs a path"; RSCRIPT_BIN="$2"; shift ;;
++    -h|--help)       usage; exit 0 ;;
++    *)               die "Unknown option: $1 (see ./setup.sh --help)" ;;
++  esac
++  shift
++done
++
++case "$(uname -s)" in
++  Darwin) PLATFORM="macos" ;;
++  Linux)  PLATFORM="linux" ;;
++  *)      die "This script is for macOS and Linux. On Windows, run setup.bat." ;;
++esac
++
++printf '%sProteomics Data Explorer Workbench - setup%s\n' "$BOLD" "$RESET"
++echo "Folder:   $ROOT"
++echo "Platform: $PLATFORM ($(uname -m))"
++
++# -----------------------------------------------------------------------------
++# 0. System libraries (optional, Debian/Ubuntu)
++#    Same list as the Dockerfile, which is known to build every R package.
++# -----------------------------------------------------------------------------
++APT_PACKAGES=(
++  build-essential gcc g++ gfortran make git curl ca-certificates pkg-config cmake
++  python3-venv
++  libcurl4-openssl-dev libssl-dev libxml2-dev libgit2-dev libfontconfig1-dev
++  libfreetype6-dev libpng-dev libjpeg-dev libtiff-dev libharfbuzz-dev
++  libfribidi-dev libcairo2-dev libxt-dev libicu-dev libblas-dev liblapack-dev
++  libuv1-dev libbz2-dev liblzma-dev libpcre2-dev libreadline-dev zlib1g-dev
++  libzstd-dev libncurses-dev libglpk-dev libnlopt-dev libgsl-dev libudunits2-dev
++  libgdal-dev libgeos-dev libproj-dev
++)
++
++if [ "$SYSTEM_DEPS" -eq 1 ]; then
++  step "Installing system libraries (apt-get)"
++  if [ "$PLATFORM" != "linux" ] || ! command -v apt-get >/dev/null 2>&1; then
++    die "--system-deps only works on Debian/Ubuntu (apt-get). Install the equivalent packages with your package manager."
++  fi
++  SUDO=""
++  [ "$(id -u)" -ne 0 ] && SUDO="sudo"
++  $SUDO apt-get update
++  $SUDO apt-get install -y --no-install-recommends "${APT_PACKAGES[@]}"
++  ok "System libraries installed"
++fi
++
++# -----------------------------------------------------------------------------
++# 1. Python
++# -----------------------------------------------------------------------------
++step "Checking Python"
++
++py_version() { "$1" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null; }
++# 3.13+ is not supported: requirements.txt pins pipreqs==0.5.0, which needs Python < 3.13.
++py_supported() { case "$1" in 3.11|3.12) return 0 ;; *) return 1 ;; esac; }
++
++if [ -n "$PYTHON_BIN" ]; then
++  command -v "$PYTHON_BIN" >/dev/null 2>&1 || die "Python not found: $PYTHON_BIN"
++  PY_VER="$(py_version "$PYTHON_BIN")" || die "Could not run $PYTHON_BIN"
++  py_supported "$PY_VER" \
++    || die "$PYTHON_BIN is Python $PY_VER. The app needs Python 3.12 (3.11 also works)."
++else
++  for candidate in python3.12 python3.11 python3 python; do
++    if command -v "$candidate" >/dev/null 2>&1; then
++      v="$(py_version "$candidate" || true)"
++      if [ -n "$v" ] && py_supported "$v"; then
++        PYTHON_BIN="$(command -v "$candidate")"
++        PY_VER="$v"
++        break
++      fi
++    fi
++  done
++fi
++
++if [ -z "$PYTHON_BIN" ]; then
++  if [ "$PLATFORM" = "macos" ]; then
++    hint="Install it from https://www.python.org/downloads/ (3.12) or with Homebrew: brew install python@3.12"
++  else
++    hint="Install it with your package manager, e.g. Ubuntu/Debian: sudo apt install python3.12 python3.12-venv"
++  fi
++  die "Python 3.12 was not found (3.11 also works). $hint
++Then run ./setup.sh again. If Python is installed somewhere unusual: ./setup.sh --python /path/to/python3.12"
++fi
++ok "Python $PY_VER ($PYTHON_BIN)"
++[ "$PY_VER" = "3.12" ] || warn "Python 3.12 is what the official builds use. $PY_VER works, but 3.12 is the safest choice."
++
++# -----------------------------------------------------------------------------
++# 2. Python environment + packages
++# -----------------------------------------------------------------------------
++step "Setting up the Python environment (.venv)"
++
++VPY="$VENV_DIR/bin/python"
++
++if [ -d "$VENV_DIR" ] && [ "$RECREATE_VENV" -eq 0 ]; then
++  venv_ver="$(py_version "$VPY" || true)"
++  if [ -z "$venv_ver" ] || ! py_supported "$venv_ver"; then
++    warn "Existing .venv is broken or uses an unsupported Python (${venv_ver:-unknown}). Rebuilding it."
++    RECREATE_VENV=1
++  fi
++fi
++if [ "$RECREATE_VENV" -eq 1 ] && [ -d "$VENV_DIR" ]; then
++  rm -rf "$VENV_DIR"
++fi
++
++if [ ! -x "$VPY" ]; then
++  if ! "$PYTHON_BIN" -m venv "$VENV_DIR"; then
++    rm -rf "$VENV_DIR"
++    die "Could not create the Python environment.
++On Ubuntu/Debian this usually means the venv module is missing: sudo apt install python${PY_VER}-venv"
++  fi
++  ok "Created .venv"
++else
++  ok "Using existing .venv (Python $(py_version "$VPY"))"
++fi
++
++export PIP_DISABLE_PIP_VERSION_CHECK=1
++"$VPY" -m pip install --upgrade pip setuptools wheel
++"$VPY" -m pip install -r "$ROOT/requirements.txt" \
++  || die "Installing Python packages failed. Scroll up for the first error from pip."
++
++"$VPY" - <<'PYCHECK' || die "Some Python packages did not import (see above)."
++import contextlib, importlib, io
++mods = ["streamlit", "pandas", "numpy", "scipy", "sklearn", "statsmodels",
++        "plotly", "matplotlib", "seaborn", "openpyxl", "pyteomics", "st_aggrid",
++        "statannotations", "neuroCombat", "upsetplot", "fpdf", "adjustText", "PIL"]
++bad = []
++# Hide Streamlit's harmless "missing ScriptRunContext" log line.
++with contextlib.redirect_stderr(io.StringIO()):
++    for m in mods:
++        try:
++            importlib.import_module(m)
++        except Exception as e:  # report every failure, not just the first
++            bad.append(f"{m}: {e}")
++if bad:
++    print("  Failed imports:\n   - " + "\n   - ".join(bad))
++    raise SystemExit(1)
++import streamlit
++print(f"  All {len(mods)} key Python packages import (streamlit {streamlit.__version__}).")
++PYCHECK
++ok "Python packages installed"
++
++# -----------------------------------------------------------------------------
++# 3. R + R packages
++# -----------------------------------------------------------------------------
++if [ "$SKIP_R" -eq 1 ]; then
++  step "Skipping R (--skip-r)"
++  warn "NAguideR imputation in the Total Proteomics label-free app will not work until you run ./setup.sh without --skip-r."
++else
++  step "Checking R"
++
++  if [ -z "$RSCRIPT_BIN" ]; then
++    for candidate in \
++        "$(command -v Rscript 2>/dev/null || true)" \
++        /Library/Frameworks/R.framework/Resources/bin/Rscript \
++        /opt/homebrew/bin/Rscript \
++        /usr/local/bin/Rscript \
++        /usr/bin/Rscript; do
++      if [ -n "$candidate" ] && [ -x "$candidate" ]; then
++        RSCRIPT_BIN="$candidate"
++        break
++      fi
++    done
++  fi
++
++  if [ -z "$RSCRIPT_BIN" ]; then
++    if [ "$PLATFORM" = "macos" ]; then
++      if [ "$(uname -m)" = "arm64" ]; then pkg="big-sur-arm64/base/R-4.5.3-arm64.pkg"; else pkg="big-sur-x86_64/base/R-4.5.3-x86_64.pkg"; fi
++      hint="Install R 4.5 from CRAN: https://cran.r-project.org/bin/macosx/$pkg"
++    else
++      hint="Install R 4.5 from CRAN: https://cloud.r-project.org/bin/linux/
++(Quick option on Ubuntu/Debian: sudo apt install r-base r-base-dev, but Ubuntu's own R is older than 4.5.)"
++    fi
++    die "R was not found. $hint
++Then run ./setup.sh again. If R is installed somewhere unusual: ./setup.sh --rscript /path/to/Rscript
++To set up without R (no NAguideR imputation): ./setup.sh --skip-r"
++  fi
++  [ -x "$RSCRIPT_BIN" ] || die "Rscript not found or not executable: $RSCRIPT_BIN"
++
++  # shellcheck disable=SC2016  # $ here is R code, not shell
++  R_VER="$("$RSCRIPT_BIN" --vanilla -e 'cat(R.version$major, ".", R.version$minor, sep="")' 2>/dev/null)" \
++    || die "Could not run $RSCRIPT_BIN"
++  R_MAJOR_MINOR="$(echo "$R_VER" | cut -d. -f1,2)"
++  ok "R $R_VER ($RSCRIPT_BIN)"
++  case "$R_MAJOR_MINOR" in
++    "$TESTED_R") ;;
++    3.*|4.[0-2]) die "R $R_VER is too old. Install R $TESTED_R.x from CRAN." ;;
++    *) warn "The official builds use R $TESTED_R.x. R $R_VER may work, but if a package fails, install R $TESTED_R.x." ;;
++  esac
++
++  # First run only: some packages must be compiled. DreamAI (GitHub) has C++
++  # code everywhere; on Linux, Bioconductor's impute also has Fortran code.
++  if [ ! -d "$R_LIB_DIR/DreamAI" ]; then
++    if [ "$PLATFORM" = "macos" ]; then
++      xcode-select -p >/dev/null 2>&1 \
++        || die "Apple's command line tools (C/C++ compiler) are missing. One R package (DreamAI) has to be compiled.
++Run:  xcode-select --install   then run ./setup.sh again."
++    else
++      missing=""
++      for tool in gcc g++ gfortran make; do command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"; done
++      [ -z "$missing" ] || die "Missing build tools:$missing. Some R packages have to be compiled.
++Ubuntu/Debian: run ./setup.sh --system-deps   (or: sudo apt install build-essential gfortran)"
++    fi
++  fi
++
++  # CRAN mirror. Linux gets ready-built packages from Posit Package Manager when
++  # the distribution is supported; otherwise everything is compiled from source.
++  if [ -z "${CRAN_REPO:-}" ] && [ "$PLATFORM" = "linux" ] && [ -r /etc/os-release ]; then
++    codename="$(. /etc/os-release && echo "${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}")"
++    case "$codename" in
++      focal|jammy|noble|bullseye|bookworm)
++        CRAN_REPO="https://packagemanager.posit.co/cran/__linux__/$codename/latest" ;;
++    esac
++  fi
++  CRAN_REPO="${CRAN_REPO:-https://cloud.r-project.org}"
++  R_NCPUS="${R_NCPUS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)}"
++
++  step "Installing R packages into R_library/ (first run: about 5-40 minutes)"
++  echo "  CRAN mirror: $CRAN_REPO"
++  echo "  Full log:    $R_LOG"
++  mkdir -p "$R_LIB_DIR"
++
++  # The same library settings the app uses at run time, so what is installed
++  # here is exactly what the app sees. --vanilla keeps the repo's renv
++  # .Rprofile out of the way.
++  if ! R_LIBS="$R_LIB_DIR" R_LIBS_USER="$R_LIB_DIR" \
++       CRAN_REPO="$CRAN_REPO" R_NCPUS="$R_NCPUS" \
++       "$RSCRIPT_BIN" --vanilla "$ROOT/install_naguider_r_dependencies.R" 2>&1 | tee "$R_LOG"; then
++    die "R package installation failed. The error is near the end of $R_LOG.
++Common causes: no internet access to CRAN/GitHub, or missing system libraries
++(Linux: ./setup.sh --system-deps). Re-running ./setup.sh continues where it stopped."
++  fi
++
++  # Remember which R built this library. run.sh passes it to the app so a
++  # different R on PATH cannot pick up packages built for another version.
++  printf '%s\n' "$RSCRIPT_BIN" > "$R_LIB_DIR/.rscript_path"
++  ok "R packages installed in R_library/"
++fi
++
++# -----------------------------------------------------------------------------
++# Done
++# -----------------------------------------------------------------------------
++step "Setup complete"
++echo "Start the app with:"
++echo
++echo "    ./run.sh"
++echo
++echo "It opens in your browser. If it does not, go to http://localhost:8501"

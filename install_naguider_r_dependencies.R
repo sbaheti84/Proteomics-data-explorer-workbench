@@ -23,13 +23,36 @@
 # Global configuration
 # ============================================================
 
+# CRAN_REPO and R_NCPUS can be set by setup.sh / setup.ps1.
+# When they are not set (GitHub Actions, Docker) the values are unchanged.
+cran_repo <- Sys.getenv("CRAN_REPO", "https://cloud.r-project.org")
+n_cpus <- suppressWarnings(as.integer(Sys.getenv("R_NCPUS", "2")))
+if (is.na(n_cpus) || n_cpus < 1) n_cpus <- 2L
+
 options(
     repos = c(
-        CRAN = "https://cloud.r-project.org"
+        CRAN = cran_repo
     ),
     timeout = 1800,
-    Ncpus = 2
+    Ncpus = n_cpus
 )
+
+# Posit Package Manager only serves ready-built Linux packages when the
+# user agent says which R version is asking (documented P3M setting).
+if (grepl("__linux__", cran_repo, fixed = TRUE)) {
+    options(
+        HTTPUserAgent = sprintf(
+            "R/%s R (%s)",
+            getRversion(),
+            paste(
+                getRversion(),
+                R.version["platform"],
+                R.version["arch"],
+                R.version["os"]
+            )
+        )
+    )
+}
 
 cat("\n")
 cat("============================================================\n")
