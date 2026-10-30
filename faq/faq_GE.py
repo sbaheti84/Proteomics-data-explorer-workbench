@@ -318,28 +318,49 @@ def faq_section():
                 ),
             },
             {
-                "Category": "QC",
-                "Question": "What does the glycan classification summary show?",
+                "Category": "Data Overview",
+                "Question": "Where is the glycan classification summary?",
                 "Answer": (
-                    "The glycan classification summary groups features by glycan class and helps identify whether specific "
-                    "glycan classes dominate the dataset or differ across groups."
+                    "It describes what was identified, not data quality, so it now sits next to the merged matrix: "
+                    "open the **Glycan class composition** tab under *Integrated Glycopeptide Abundance Matrix*. "
+                    "To see which glycan classes or traits (sialylation, fucosylation) change between groups, run the "
+                    "statistics and choose **Glycan class breakdown** in Results Visualizations."
                 ),
             },
             {
                 "Category": "Differential Analysis",
                 "Question": "Which statistical test should I use?",
                 "Answer": (
-                    "For two groups, the app supports Student's t-test, Welch's t-test, paired t-test, Mann-Whitney U, "
-                    "and Wilcoxon signed-rank. Welch's t-test is often safer when variances differ. "
-                    "For three groups, the app uses ANOVA."
+                    "For two groups: limma moderated t-test, Student's t-test, Welch's t-test, paired t-test, "
+                    "Mann-Whitney U and Wilcoxon signed-rank. For three groups: one-way ANOVA or the limma moderated "
+                    "F-test.\n\n"
+                    "With the 3-6 replicates typical of TMT experiments, **limma** is usually the best choice: it "
+                    "borrows variance information from all glycoforms, which makes it more reliable and more powerful "
+                    "than an ordinary t-test. Use the paired t-test only for matched samples. Rank-based tests "
+                    "(Mann-Whitney, Wilcoxon) need larger groups to reach small p-values."
+                ),
+            },
+            {
+                "Category": "Differential Analysis",
+                "Question": "How does the limma option work, and why can its log2FC differ from the t-test?",
+                "Answer": (
+                    "limma fits a linear model to the **log2** abundance of every glycoform (zeros count as missing), "
+                    "then shrinks each glycoform's variance towards the typical variance of all glycoforms "
+                    "(empirical Bayes). This gives the moderated t- and F-statistics used in most proteomics papers. "
+                    "The implementation is a Python port of R limma's lmFit, contrasts.fit and eBayes, and gives the "
+                    "same numbers as R limma.\n\n"
+                    "limma's log2FC is mean(log2 test) minus mean(log2 reference). The other tests run on raw "
+                    "abundances and report log2 of the ratio of mean abundances, so the two fold changes can differ, "
+                    "most for glycoforms with very skewed values."
                 ),
             },
             {
                 "Category": "Differential Analysis",
                 "Question": "What happens when I select 3 groups?",
                 "Answer": (
-                    "The app performs three-group ANOVA. ANOVA detects whether any group differs, but it does not provide "
-                    "one simple pairwise log2FC direction. Volcano and waterfall plots are mainly for two-group comparisons, "
+                    "The app offers one-way ANOVA or the limma moderated F-test. Both detect whether any group differs. "
+                    "The limma F-test also reports each group's log2FC and q-value against the reference group, but there "
+                    "is no single pairwise log2FC direction. Volcano and waterfall plots are mainly for two-group comparisons, "
                     "so ANOVA mode focuses on box plots, heatmaps, gene-level box plots, and lollipop plots."
                 ),
             },

@@ -701,7 +701,9 @@ def generate_final_pdf():
     diff_summary = _build_diff_summary(diff_df)
 
     is_anova = isinstance(diff_df, pd.DataFrame) and "log2FC" not in diff_df.columns
-    stat_test = "Three-group ANOVA" if is_anova else "Pairwise comparison"
+    # Name the exact test when the app recorded it (GlycoExplorer TMT does);
+    # fall back to the generic description otherwise.
+    stat_test = ss.get("stat_method_label") or ("Three-group ANOVA" if is_anova else "Pairwise comparison")
     batch_applied, batch_status, _ = _get_batch_status(ss)
 
     # -------------------------------------------------------------------------

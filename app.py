@@ -137,7 +137,7 @@ APPS = [
         "omics": "glyco",
         "quant": "TMT",
         "icon": ":material/bubble_chart:",
-        "desc": "QC, normalization, differential analysis and plots for TMT glycoproteomics.",
+        "desc": "QC, batch correction, statistics (t-tests, ANOVA, limma) and plots for TMT glycoproteomics.",
         "inputs": "pGlyco + Proteome Discoverer exports, or MSFragger psm.tsv + peptide.tsv",
     },
     {
