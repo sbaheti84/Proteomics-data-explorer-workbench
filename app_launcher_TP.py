@@ -2048,8 +2048,7 @@ def _set_active_panel(active_key: str):
 
 def render_sidebar_controls():
     """Render sidebar upload, example dataset, and reset controls."""
-    st.sidebar.markdown("### Total Proteomics")
-    st.sidebar.caption("v1.0 | Bioinformatics Workflow")
+    st.sidebar.markdown("### Total Proteome (TMT)")
     st.sidebar.divider()
 
     st.sidebar.markdown("**Upload Data**")
@@ -2067,7 +2066,7 @@ def render_sidebar_controls():
 
     st.sidebar.divider()
     if st.sidebar.button(
-        "Reset Session",
+        "Reset session",
         type="secondary",
         help="Clear all current data, selections, and cache to start fresh."
     ):

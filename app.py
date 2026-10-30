@@ -525,6 +525,22 @@ def render_home():
                     render_app_card(app)
         st.write("")
 
+    with st.container(border=True):
+        st.markdown("**Measured both glycopeptides and proteins? The apps fit together like this:**")
+        f1, f2, f3 = st.columns(3, gap="large")
+        f1.markdown(
+            ":material/counter_1: **GlycoExplorer** (TMT or Label-free)  \n"
+            "Run the statistics, then open **Download Full Dataset (Unfiltered)** and save the CSV."
+        )
+        f2.markdown(
+            ":material/counter_2: **Total Proteome** (TMT or Label-free)  \n"
+            "Same groups and reference group, then **Download Full Dataset (Unfiltered)**."
+        )
+        f3.markdown(
+            ":material/counter_3: **Integrator**  \n"
+            "Upload both tables to see which glyco changes are more than a change in protein amount."
+        )
+
     st.divider()
     tip1, tip2, tip3 = st.columns(3, gap="large")
     tip1.markdown(

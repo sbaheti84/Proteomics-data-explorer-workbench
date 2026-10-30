@@ -1653,8 +1653,7 @@ def add_hosted_safe_file_download_button(label, data, file_name, key, use_contai
 def main():
     init_session_state_defaults()
 
-    st.sidebar.markdown("### GlycoExplorer (LFQ)")
-    st.sidebar.caption("v1.0 | Bioinformatics Workflow")
+    st.sidebar.markdown("### GlycoExplorer (Label-Free)")
     st.sidebar.divider()
 
     species = "Human"
@@ -1712,7 +1711,7 @@ def main():
                 add_download_button(example_msf2.read_bytes(), "MSFragger_sample2.tsv", label="Download Sample 2", key="save_ex_msf2", mime="text/tab-separated-values")
 
     if st.sidebar.button(
-        "Reset session data", 
+        "Reset session",
         key="main_reset_btn", 
         help="Clear all uploaded files, selections, and generated plots to start a fresh analysis."
     ):
@@ -1742,10 +1741,12 @@ def main():
         st.stop()
 
     # ---------------------- Merge & Process Data ----------------------
-    with st.container(border=True):
+    # Before the files are uploaded the start panel below explains what to do, so the
+    # (disabled) button is not drawn twice.
+    with st.container(border=not merge_disabled):
         main_merge_label = "Compile LFQ Data Matrix" if not merge_disabled else "Upload data to enable processing"
 
-        if st.button(
+        if (not merge_disabled) and st.button(
             main_merge_label,
             type="primary",
             disabled=merge_disabled,

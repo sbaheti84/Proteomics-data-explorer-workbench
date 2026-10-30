@@ -142,7 +142,12 @@ def faq_section():
                     "Upload two differential result tables:\n\n"
                     "1. A glycoproteome result table, usually peptide or glycopeptide level.\n"
                     "2. A total proteome result table, usually protein level.\n\n"
-                    "Both files should contain gene identifiers, log2 fold-change values, and p-value or q-value columns."
+                    "Both files should contain gene identifiers, log2 fold-change values, and p-value or q-value columns. "
+                    "The easiest source is **Download Full Dataset (Unfiltered)** in the Statistical Analysis Suite of "
+                    "GlycoExplorer and of Total Proteome.\n\n"
+                    "**Both tables must describe the same comparison in the same direction** (for example Treated vs Control "
+                    "in both). If one is Treated vs Control and the other Control vs Treated, every gene looks discordant.\n\n"
+                    "To try the app first, use **Download example files** in the sidebar (a small synthetic pair)."
                 ),
             },
             {
@@ -175,8 +180,18 @@ def faq_section():
                 "Category": "Column Detection",
                 "Question": "What if the app cannot detect my gene or log2FC column?",
                 "Answer": (
-                    "Check that your column names use recognizable terms such as `Gene`, `Genes`, `GeneID`, `log2FC`, `log2 fold change`, `p-value`, `q-value`, `FDR`, or `adj.P.Val`. "
-                    "Renaming columns to these common terms usually fixes detection issues."
+                    "Open **Input columns — auto-detected, change if wrong** at the top of the results and pick the right "
+                    "gene and log2FC columns for each table. The significance column used is shown under each table. "
+                    "Detection looks for terms such as `Gene`, `Genes`, `GeneID`, `log2FC`, `p-value`, `q-value`, `FDR` or `adj.P.Val`."
+                ),
+            },
+            {
+                "Category": "Column Detection",
+                "Question": "My glyco or protein result has several log2FC columns. Which one is used?",
+                "Answer": (
+                    "Three-group results (limma F-test) contain one log2FC and q-value per pair, for example `log2FC (B vs A)`. "
+                    "The app asks you to choose the pair under **Input columns** and then uses the matching `q-value (B vs A)`, "
+                    "not the overall F-test p-value, which answers a different question. Choose the same pair in both tables."
                 ),
             },
             {
@@ -215,16 +230,24 @@ def faq_section():
                 "Category": "Interpretation",
                 "Question": "What do the status labels mean?",
                 "Answer": (
-                    "Concordant classes mean glyco and protein move in the same direction. Discordant classes mean they move in opposite directions. "
-                    "Glyco-specific and protein-specific classes mark genes that pass thresholds in only one modality."
+                    "**Status** is the simple significance pattern: Concordant (both sides significant, same direction), Discordant "
+                    "(opposite directions), Glyco-specific / Protein-specific (only one side passed its cutoffs) and "
+                    "**Glyco-only, protein not measured** (glyco passed, the gene is not in the protein table).\n\n"
+                    "**Biological_Interpretation** adds the size of the change: it compares glyco log2FC with protein log2FC using the "
+                    "*Glyco − protein |log2FC| difference* cutoff in the sidebar (default 0.5). See *How to read the integration* on the results page."
                 ),
             },
             {
                 "Category": "Interpretation",
                 "Question": "What does glyco-specific mean?",
                 "Answer": (
-                    "Glyco-specific means the glycopeptide-level evidence passes the selected thresholds, but the total protein result does not. "
-                    "These genes may represent glycosylation regulation independent of total protein abundance."
+                    "Glycosylation-specific means the glyco change passes its thresholds, the protein **was measured**, and the protein "
+                    "did not change by a similar amount (difference above the glyco − protein cutoff).\n\n"
+                    "Two cases are deliberately **not** called glycosylation-specific:\n\n"
+                    "- **Glyco change matches protein trend:** the protein moved by about the same amount but missed its p/q cutoff. "
+                    "The glyco change is probably just protein abundance.\n"
+                    "- **Glyco change, protein not measured:** the gene is not in the protein table, so protein abundance cannot be ruled out. "
+                    "These stay high priority, but need protein evidence (for example a western blot) before calling them glycosylation-specific."
                 ),
             },
             {
@@ -298,6 +321,14 @@ def faq_section():
                 "Answer": (
                     "Common reasons include inconsistent gene symbols between glyco and protein tables, multi-gene peptide assignments, missing gene columns, or different identifier types. "
                     "Standardizing gene symbols before upload usually improves overlap."
+                ),
+            },
+            {
+                "Category": "Troubleshooting",
+                "Question": "Almost every gene is discordant. Why?",
+                "Answer": (
+                    "The two tables are probably compared in opposite directions (Treated vs Control in one, Control vs Treated in the "
+                    "other). Re-export one of them with the same reference group, or pick the matching log2FC column under Input columns."
                 ),
             },
             {

@@ -1781,8 +1781,7 @@ def _sanitize_lf(selected, allowed):
 
 def render_sidebar_controls_lf():
     """Render the LFQ sidebar controls and return the uploaded file object."""
-    st.sidebar.markdown("### Total Proteomics (LFQ)")
-    st.sidebar.caption("v1.0 | Bioinformatics LFQ Workflow")
+    st.sidebar.markdown("### Total Proteome (Label-Free)")
     st.sidebar.divider()
 
     st.sidebar.markdown("**Upload Data**")
@@ -1813,7 +1812,7 @@ def render_sidebar_controls_lf():
     st.sidebar.divider()
 
     if st.sidebar.button(
-        "Reset Session",
+        "Reset session",
         type="secondary",
         help="Clear all current data, selections, and cache to start fresh."
     ):

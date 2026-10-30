@@ -845,7 +845,6 @@ def main():
     init_session_state_defaults()
 
     st.sidebar.markdown("### GlycoExplorer (TMT)")
-    st.sidebar.caption("v1.0 | Bioinformatics Workflow")
     st.sidebar.divider()
 
     species = st.sidebar.radio("Select Species", ["Human", "Mouse"], index=0)
@@ -967,7 +966,7 @@ def main():
                     add_download_button(example_pep.read_bytes(), "MSFragger_pep.tsv", label="Download peptide.tsv", key="save_ex_pep_general", mime="text/tab-separated-values")
 
     if st.sidebar.button(
-        "Reset session data",
+        "Reset session",
         key="main_reset_btn",
         help="Clear all uploaded files, selections, and generated plots to start a fresh analysis."
     ):
@@ -1004,8 +1003,10 @@ def main():
         else "Upload data to enable processing"
     )
 
-    with st.container(border=True):
-        if st.button(
+    # Before the files are uploaded the start panel below explains what to do, so the
+    # (disabled) button is not drawn twice.
+    with st.container(border=not merge_disabled):
+        if (not merge_disabled) and st.button(
             main_merge_label,
             type="primary",
             disabled=merge_disabled,
