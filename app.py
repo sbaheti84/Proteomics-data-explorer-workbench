@@ -166,12 +166,12 @@ APPS = [
         "key": "proteome-lfq",
         "nav": "Proteome · Label-free",
         "title": "Total Proteome (Label-Free)",
-        # NOTE: this points to the *_old* launcher, as in the previous app.py.
-        "module": "app_launcher_TP_LF_old",
+        "module": "app_launcher_TP_LF",
         "omics": "proteome",
         "quant": "Label-free",
         "icon": ":material/biotech:",
-        "desc": "Label-free protein workflow with missing-value filtering and NAguideR imputation.",
+        "desc": "Label-free protein workflow: filtering, normalization, your choice of imputation "
+                "(built-in or NAguideR), batch correction, limma and t-tests, report.",
         "inputs": "LFQ protein intensity table (CSV, TSV or Excel)",
     },
     {

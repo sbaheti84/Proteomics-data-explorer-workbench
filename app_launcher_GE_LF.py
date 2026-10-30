@@ -53,7 +53,7 @@ from ge.heatmap import *
 from ge.lollipop import *
 from ge.report_utility import *
 from ge.batch_correcttion import *
-from faq.faq_GE import *
+from faq.faq_GE_LF import *   # label-free FAQ (previously imported the TMT FAQ by mistake)
 from ge.waterfall_lf import *
 
 # Optional import for ComBat Batch Correction
@@ -1002,12 +1002,78 @@ def compute_diffexp_anova(
     return df.sort_values("adj.p-value", na_position="last")[keep]
 
 
+# -----------------------------------------------------------------------------
+# limma for label-free data
+#
+# Same presence filter (and, if chosen, the same 0/NA replacement) as the
+# classical tests, then the shared limma implementation in
+# ge/diff_results_utility.py, which log2-transforms the raw intensities and
+# treats remaining zeros/NAs as missing.
+# -----------------------------------------------------------------------------
+def _prepare_lf_matrix(df, model_cols, presence_cols, presence_groups,
+                       do_zero_impute, zero_frac, do_presence_filter,
+                       presence_min_frac, presence_rule):
+    out = df.copy()
+    for c in model_cols:
+        out[c] = pd.to_numeric(out[c], errors="coerce")
+    if do_presence_filter:
+        out = filter_by_presence_rule(
+            df=out,
+            all_samples=presence_cols,
+            group_samples=presence_groups,
+            min_frac=presence_min_frac,
+            presence_rule=presence_rule,
+        )
+    if do_zero_impute:
+        out = replace_zeros_rowwise_min_fraction(
+            df=out, sample_cols=model_cols, frac=zero_frac,
+            replace_nan=True, add_debug=False,
+        )
+    if out.empty:
+        raise ValueError("No glycoforms are left after the presence filter. Lower the presence threshold.")
+    return out
+
+
+def compute_diffexp_limma_lf(df, group_cols, group_labels, control_idx, test_idx,
+                             use_all_groups=True, do_zero_impute=False, zero_frac=0.2,
+                             do_presence_filter=True, presence_min_frac=0.40,
+                             presence_rule="or"):
+    ctrl, test = list(group_cols[control_idx]), list(group_cols[test_idx])
+    model_groups = [list(g) for g in group_cols if g] if use_all_groups else [ctrl, test]
+    model_cols = list(dict.fromkeys(c for g in model_groups for c in g))
+    prepared = _prepare_lf_matrix(
+        df, model_cols, ctrl + test, [ctrl, test],
+        do_zero_impute, zero_frac, do_presence_filter, presence_min_frac, presence_rule,
+    )
+    return compute_diffexp_limma(
+        prepared, [list(g) for g in group_cols], list(group_labels),
+        control_idx, test_idx, use_all_groups,
+    )
+
+
+def compute_diffexp_limma_f_lf(df, group_cols, group_labels, control_idx=0,
+                               do_zero_impute=False, zero_frac=0.2,
+                               do_presence_filter=True, presence_min_frac=0.40,
+                               presence_rule="or"):
+    groups = [list(g) for g in group_cols if g]
+    all_cols = list(dict.fromkeys(c for g in groups for c in g))
+    prepared = _prepare_lf_matrix(
+        df, all_cols, all_cols, groups,
+        do_zero_impute, zero_frac, do_presence_filter, presence_min_frac, presence_rule,
+    )
+    return compute_diffexp_limma_f(
+        prepared, [list(g) for g in group_cols], list(group_labels), control_idx,
+    )
+
+
 
 # -----------------------------------------------------------------------------
 # APP LOGIC
 # -----------------------------------------------------------------------------
 
 def _reset_all_data(clear_cache: bool = False):
+    ss.pop("stat_method_label", None)
+    ss["show_class_breakdown"] = False
     ss["global_sample_cols"] = []
     ss["global_group_samples"] = []
     ss["global_group_labels"] = []
@@ -1661,18 +1727,18 @@ def main():
 
     script_dir = Path(__file__).resolve().parent
     default_dir = script_dir / "assets" / "glycan_images"
-    st.sidebar.subheader("Glycan Image Directory")
-    user_input = st.sidebar.text_input(
-        "Enter folder path (optional):", 
-        value=str(default_dir) if default_dir.exists() else "", 
-        help="Leave blank to use the default path detected automatically."
-    )
+    # Most users never change this, so it lives in a collapsed "Advanced" section.
+    with st.sidebar.expander("Advanced: glycan image folder", expanded=False):
+        user_input = st.text_input(
+            "Enter folder path (optional):",
+            value=str(default_dir) if default_dir.exists() else "",
+            help="Folder with the glycan cartoons used in volcano and waterfall plots. "
+                 "Leave as is to use the built-in images."
+        )
     glycan_image_dir = Path(user_input).expanduser().resolve() if user_input else default_dir
-    
-    if glycan_image_dir.is_dir():
-        st.sidebar.success(f"Glycan image folder found:\n{glycan_image_dir}")
-    else:
-        st.sidebar.error(f"Folder not found:\n{glycan_image_dir}")
+
+    if not glycan_image_dir.is_dir():
+        st.sidebar.error(f"Glycan image folder not found:\n{glycan_image_dir}")
         st.stop()
 
     # ---------------------- Merge & Process Data ----------------------
@@ -1788,6 +1854,10 @@ def main():
                 if pd.api.types.is_numeric_dtype(merged_display_df[c]) and c != "PSM_Count"
             ]
             m2.metric("Samples Detected", len(numeric_cols))
+            m3.metric(
+                "Glycan Classes",
+                merged_display_df["GlycanClass"].nunique() if "GlycanClass" in merged_display_df.columns else "N/A"
+            )
 
             st.markdown("<br>", unsafe_allow_html=True)
             dl_col1, dl_col2, spacer = st.columns([1.5, 1.5, 7])
@@ -1804,7 +1874,19 @@ def main():
                 add_download_button(excel_bytes, "LFQ_master_matrix.xlsx", label="Download Excel", key="save_lfq_master_excel", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
             st.markdown("<br>", unsafe_allow_html=True)
-            show_grid(merged_display_df, page_size=15, height=450)
+            tab_matrix, tab_classes = st.tabs(["Abundance matrix", "Glycan class composition"])
+            with tab_matrix:
+                show_grid(merged_display_df, page_size=15, height=450)
+            with tab_classes:
+                if "GlycanClass" in merged_display_df.columns:
+                    st.caption(
+                        "How the identified glycoforms are spread across glycan classes. This describes what was "
+                        "identified, not data quality. To see which classes change between groups, run the "
+                        "statistics and open **Glycan class breakdown** in Results Visualization."
+                    )
+                    create_glycan_class_summary(merged_display_df, "GlycanClass")
+                else:
+                    st.info("This dataset has no GlycanClass column.")
 
 
     if not ss.get("merged_ready") or df_is_empty(ss.get("merged_df")):
@@ -1833,55 +1915,53 @@ def main():
             "run_glycan_class": False
         })
 
+    _SECTIONS = ["show_global_select", "show_overview", "show_suite", "show_report"]
+
+    def _toggle_section(name):
+        # Runs as a button callback, i.e. before the page is redrawn, so the
+        # ▸/▾ labels below always match the open section. (Toggling inside
+        # "if st.button(...)" updated the label one run late; Streamlit then
+        # treated the relabelled button as a new one and dropped the next click.)
+        opening = not ss.get(name, False)
+        for _s in _SECTIONS:
+            ss[_s] = False
+        ss[name] = opening
+        _reset_overview_flags()
+
     c1, c2, c3, c4 = st.columns(4)
+    for _col, _name, _label, _help, _key in [
+        (c1, "show_global_select", "Data Filtering & Group Specification",
+         'Choose the sample runs, put them into groups, pick the reference group and (optionally) correct batches.', "btn_global_select"),
+        (c2, "show_overview", "Data Integrity Check & Sanity Profiling",
+         'Quality control before testing: PCA, sample correlation, sample clustering and per-sample intensity distributions.', "btn_overview"),
+        (c3, "show_suite", "Statistical Analysis Suite",
+         'Pairwise tests, ANOVA or limma, then volcano, waterfall, box, heatmap, lollipop and glycan class plots.', "btn_suite"),
+        (c4, "show_report", "Results Download",
+         'Generate a PDF report and a ZIP bundle of all tables and figures.', "btn_report"),
+    ]:
+        _col.button(
+            ("▾ " if ss.get(_name) else "▸ ") + _label,
+            width="stretch",
+            key=_key,
+            help=_help,
+            on_click=_toggle_section,
+            args=(_name,),
+        )
 
-    if c1.button(
-        ("▸ " if not ss["show_global_select"] else "▾ ") + "Data Filtering & Group Specification", 
-        use_container_width=True, 
-        key="btn_global_select"
-    ):
-        ss["show_global_select"] = not ss["show_global_select"]
-        if ss["show_global_select"]:
-            ss["show_overview"], ss["show_suite"], ss["show_report"] = False, False, False 
-            _reset_overview_flags()
-        else:
-            _reset_overview_flags()
-
-    if c2.button(
-        ("▸ " if not ss["show_overview"] else "▾ ") + "Data Integrity Check & Sanity Profiling", 
-        use_container_width=True, 
-        key="btn_overview"
-    ):
-        ss["show_overview"] = not ss["show_overview"]
-        if ss["show_overview"]:
-            ss["show_suite"], ss["show_global_select"], ss["show_report"] = False, False, False 
-            _reset_overview_flags()
-        else:
-            _reset_overview_flags()
-
-    if c3.button(
-        ("▸ " if not ss["show_suite"] else "▾ ") + "Statistical Analysis Suite", 
-        use_container_width=True, 
-        key="btn_suite"
-    ):
-        ss["show_suite"] = not ss["show_suite"]
-        if ss["show_suite"]:
-            ss["show_overview"], ss["show_global_select"], ss["show_report"] = False, False, False 
-            _reset_overview_flags()
-        else:
-            _reset_overview_flags()
-
-    if c4.button(
-        ("▸ " if not ss["show_report"] else "▾ ") + "Results Download", 
-        use_container_width=True, 
-        key="btn_report"
-    ):
-        ss["show_report"] = not ss["show_report"]
-        if ss["show_report"]:
-            ss["show_overview"], ss["show_global_select"], ss["show_suite"] = False, False, False 
-            _reset_overview_flags()
-        else:
-            _reset_overview_flags()
+    # Step guide under the four buttons: what each step needs and whether it is done.
+    _n_groups_ready = sum(1 for g in (ss.get("global_group_samples") or []) if g)
+    _method_short = str(ss.get("stat_method_label", "Statistics done")).split(";")[0]
+    c1.caption(
+        f"Step 1 · :green[✓ {_n_groups_ready} groups defined]" if _n_groups_ready >= 2
+        else "Step 1 · Start here: assign samples to at least 2 groups"
+    )
+    c2.caption("Step 2 · Check samples look as expected before testing")
+    c3.caption(
+        f"Step 3 · :green[✓ {_method_short}]" if ss.get("diff_done")
+        else ("Step 3 · Ready to run statistics" if _n_groups_ready >= 2 else "Step 3 · Needs groups from step 1")
+    )
+    c4.caption("Step 4 · PDF report and ZIP of tables and figures" if ss.get("diff_done")
+               else "Step 4 · Available after statistics")
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -1906,17 +1986,33 @@ def main():
             allowed_set = set(allowed)
             return list(dict.fromkeys([x for x in (selected or []) if x in allowed_set]))
 
+        with st.expander("What do I set here?", icon=":material/help:"):
+            st.markdown(
+                "1. **Sample columns**: the sample runs to analyse. Leave out blanks and failed runs.\n"
+                "2. **Groups**: put every run into a biological group (2 or 3 groups). The statistics "
+                "compare these groups.\n"
+                "3. **Reference group**: the baseline, usually the control. Fold changes are reported as "
+                "*other group vs reference*, so a positive log2FC means higher than the reference.\n"
+                "4. **Batch correction (optional)**: only if runs were acquired in separate batches (days, "
+                "columns, instruments). Every grouped run must be in a batch, and each batch should contain "
+                "more than one group. If a batch holds only one group, batch and biology cannot be separated."
+            )
+
         left, right = st.columns([0.42, 0.58], gap="large")
 
         with left:
             with st.container(border=True):
                 st.markdown("#### Define Experimental Groups")
-                default_samples = ss.get("global_sample_cols") or numeric_cols
-                ss["global_sample_cols_ui"] = _sanitize(default_samples, numeric_cols)
+                # Seed the widget only when it has no value yet (first open, or after the
+                # panel was closed). Overwriting it on every redraw undid the user's edits.
+                if "global_sample_cols_ui" not in ss:
+                    ss["global_sample_cols_ui"] = _sanitize(ss.get("global_sample_cols") or numeric_cols, numeric_cols)
+                ss["global_sample_cols_ui"] = _sanitize(ss["global_sample_cols_ui"], numeric_cols)
 
                 sample_cols = st.multiselect(
                     "Sample/abundance columns (used everywhere)", 
                     options=numeric_cols, 
+                    help="Sample runs used in QC, statistics and the report. Remove blanks or failed runs.",
                     format_func=fmt, 
                     key="global_sample_cols_ui"
                 )
@@ -1938,6 +2034,7 @@ def main():
                 n_groups = st.radio(
                     "Number of groups", 
                     [2, 3], 
+                    help="Choose 3 to unlock the three-group tests (limma F-test or ANOVA).",
                     index=0 if ss.setdefault("global_n_groups_ui", 2) == 2 else 1, 
                     horizontal=True, 
                     key="global_n_groups_ui"
@@ -2043,6 +2140,7 @@ def main():
 
                     control_choice = st.selectbox(
                         "Global Reference (Baseline) Group", 
+                        help="The baseline group, usually the control. log2FC = other group vs this group.",
                         options=valid_idxs, 
                         format_func=lambda i: global_group_labels[i], 
                         index=valid_idxs.index(current), 
@@ -2558,17 +2656,43 @@ def main():
 
                     # Updated to mirror the TMT module options (Removed Heatmap, added Sample Clustering)
                     mode = st.radio(
-                        "Analysis Module", 
+                        "Analysis Module",
                         [
-                            "Principal Component Analysis (PCA)", 
-                            "Correlation Matrix", 
-                            "Sample Clustering", 
-                            "Glycan Classification Summary"
-                        ], 
-                        index=None, 
+                            "Principal Component Analysis (PCA)",
+                            "Correlation Matrix",
+                            "Sample Clustering",
+                            "Abundance Density",
+                        ],
+                        index=None,
                         key="overview_mode",
-                        label_visibility="collapsed"
+                        label_visibility="collapsed",
+                        format_func=lambda m: {
+                            "Abundance Density": "Intensity Distribution (per sample)"
+                        }.get(m, m),
                     )
+
+                    _qc_help = {
+                        "Principal Component Analysis (PCA)":
+                            "Each dot is a sample run. Runs of the same group should sit together. A run far from "
+                            "its group may be an outlier (poor injection, failed run). If runs separate by batch or "
+                            "acquisition date instead of by group, consider batch correction.",
+                        "Correlation Matrix":
+                            "Correlation of intensities between runs. Replicates of one group should correlate "
+                            "highly. A run that correlates poorly with all others needs a closer look before testing.",
+                        "Sample Clustering":
+                            "Clusters runs on the most variable glycoforms without using the group labels. If "
+                            "runs cluster by group, biology dominates. If they cluster by batch or run order, "
+                            "check for batch effects.",
+                        "Abundance Density":
+                            "log2 intensity distribution of each run. The curves should roughly overlap. A curve "
+                            "shifted left or right means that run had less or more material injected. The statistics "
+                            "in this app do not correct for that, so check this before testing. A bump at 0 comes "
+                            "from glycoforms not detected in that run.",
+                    }
+                    if mode in _qc_help:
+                        st.info(_qc_help[mode], icon=":material/lightbulb:")
+                    else:
+                        st.caption("Pick a check above. Look at PCA first: it shows most problems at a glance.")
                     top_n_peptides = st.session_state.get("topn_pf", 20)
                     
                     if (mode or "").strip().lower() == "feature frequency profiling": 
@@ -2693,10 +2817,10 @@ def main():
                             run_pca=False, run_corr=False, run_overview_heatmap=True, 
                             run_peptide_freq=False, run_abundance=False, run_glycan_class=False
                         ),
-                        "Glycan Classification Summary": dict(
-                            run_pca=False, run_corr=False, run_overview_heatmap=False, 
-                            run_peptide_freq=False, run_abundance=False, run_glycan_class=True
-                        )
+                        "Abundance Density": dict(
+                            run_pca=False, run_corr=False, run_overview_heatmap=False,
+                            run_peptide_freq=False, run_abundance=True, run_glycan_class=False
+                        ),
                     }
                     
                     for k in [
@@ -2839,17 +2963,12 @@ def main():
                     )
                 elif ss.get("run_abundance", False):
                     if len(all_groups) >= 1:
-                        fig_obj = create_abundance_density(df, all_groups)
-                        _add_desktop_plot_save_buttons(
-                            fig_obj,
-                            "LFQ_abundance_density",
-                            "lfq_abundance_density"
-                        )
+                        # create_abundance_density adds its own download buttons.
+                        create_abundance_density(df, all_groups)
+                        # The report looks for "report_density_fig".
+                        ss["report_density_fig"] = ss.get("report_abundance_density_fig")
                     else:
                         st.info("No numeric sample columns detected for abundance density.")
-                elif ss.get("run_glycan_class", False):
-                    fig_obj = create_glycan_class_summary(df, "GlycanClass")
-                    
                 else:
                     st.info("Choose an Analysis Module on the left to begin.")
 
@@ -2897,169 +3016,320 @@ def main():
                     ss.setdefault("compare_open", False)
                     ss.setdefault("filter_open", False)
                     
-                    if st.button(
-                        ("▸ " if not ss["compare_open"] else "▾ ") + "Select Statistical Test", 
-                        key="btn_toggle_compare", 
-                        use_container_width=True
-                    ):
-                        ss["compare_open"] = not ss["compare_open"]
+                    def _toggle_compare():
+                        ss["compare_open"] = not ss.get("compare_open", False)
+
+                    st.button(
+                        ("▸ " if not ss["compare_open"] else "▾ ") + "Select Statistical Test",
+                        key="btn_toggle_compare",
+                        width="stretch",
+                        help="Open the panel to choose the design and test, then run the analysis.",
+                        on_click=_toggle_compare,
+                    )
 
                     if not ss["compare_open"]:
                         st.info("Click Select Statistical Test to choose pairwise or ANOVA and run the analysis.")
                     else:
                         with st.container(border=True):
                             st.markdown("#### Test Parameters and Execution")
-                            with st.expander("Parameter Definitions & Guide", expanded=False):
+
+                            with st.expander("Which test should I use?", icon=":material/help:"):
                                 st.markdown(
-                                    "**Preprocessing:**\n"
-                                    "* **Replace 0/NA:** Log-fold calculations fail on zeros. Replaces missing values with 20% of the minimum positive intensity.\n"
-                                    "* **Filter by presence:** Removes sparse glycopeptides.\n"
-                                    "* **Presence threshold:** Fraction of samples that must contain a valid (>0) intensity.\n"
-                                    "* **Presence rule:** Apply across Total samples, or within At least one group.\n\n"
-                                    "**Statistical Testing:**\n"
-                                    "* **Experimental design:** Pairwise vs ANOVA.\n"
-                                    "* **Statistical test:** Parametric vs Non-parametric equivalents."
+                                    "| Your design | Suggested test |\n"
+                                    "|---|---|\n"
+                                    "| 2 groups, independent samples, 3-6 replicates | **limma moderated t-test** |\n"
+                                    "| 2 groups, independent samples, 8+ replicates | Welch's t-test or limma |\n"
+                                    "| Same subjects measured twice (matched runs) | Paired t-test |\n"
+                                    "| 3 groups | **limma moderated F-test** (default), then read the pairwise q-values |\n\n"
+                                    "**Why limma?** With few replicates, each glycoform's variance is estimated from only "
+                                    "a handful of values, so ordinary t-tests produce many false hits (tiny variance by "
+                                    "chance) and miss real ones. limma shrinks each variance towards the typical variance "
+                                    "of all glycoforms, which makes the test both more reliable and more powerful.\n\n"
+                                    "**Missing values (label-free):** the classical tests need a value in every sample, so "
+                                    "by default they replace 0/missing with 20% of the glycoform's smallest measured "
+                                    "intensity. limma does not need that: it fits each glycoform on the values that were "
+                                    "measured. Glycoforms missing from a whole compared group therefore get no limma "
+                                    "p-value (listed at the bottom). Tick *Replace 0/NA* to impute them anyway; their "
+                                    "fold changes are then driven by the imputed value, so read them with care.\n\n"
+                                    "**Scale:** limma works on log2 intensities. The other tests run on raw intensities, "
+                                    "so their p-values and log2FC can differ from limma's.\n\n"
+                                    "**Presence filter:** drops glycoforms seen in too few samples before any test, so "
+                                    "sparse identifications do not use up the multiple-testing budget.\n\n"
+                                    "**q-value** is the Benjamini-Hochberg adjusted p-value (false discovery rate)."
                                 )
 
                             nonempty = [(lbl, cols) for lbl, cols in zip(group_labels, group_samples) if cols]
+                            nonempty_idx = [i for i, cols in enumerate(group_samples) if cols]
                             can_pairwise = len(nonempty) >= 2
                             can_anova = (len(nonempty) == 3) and (n_groups == 3)
+                            labels_unique = len({lbl for lbl, _ in nonempty}) == len(nonempty)
 
-                            with st.form("run_diff_form"):
-                                comparison_choices = []
-                                if can_pairwise:
-                                    comparison_choices.append("Pairwise")
-                                else:
-                                    comparison_choices.append("Pairwise — need ≥2 non-empty groups")
-                                    
-                                if can_anova:
-                                    comparison_choices.append("Three-group ANOVA")
-                                else:
-                                    comparison_choices.append("Three-group ANOVA — need exactly 3 non-empty groups")
-                                    
-                                comparison_type = st.radio("Select experimental design:", comparison_choices, index=0)
+                            # No st.form here on purpose: inside a form the options below
+                            # would not update when the design or test is changed.
+                            DESIGN_TWO = "Two groups (pairwise)"
+                            DESIGN_THREE = "All three groups (limma F-test or ANOVA)"
+                            comparison_choices = [
+                                DESIGN_TWO if can_pairwise else DESIGN_TWO + " — need ≥2 non-empty groups",
+                                DESIGN_THREE if can_anova else DESIGN_THREE + " — need exactly 3 non-empty groups",
+                            ]
+                            if ss.get("stat_design") not in comparison_choices:
+                                ss.pop("stat_design", None)
+                            comparison_type = st.radio(
+                                "Select experimental design:",
+                                comparison_choices,
+                                index=1 if can_anova else 0,
+                                horizontal=True,
+                                key="stat_design",
+                                help="Two groups: compares one pair and gives a fold change (volcano, waterfall). "
+                                     "All three groups: tests whether any group differs, and limma also reports "
+                                     "every pairwise comparison in the same table.",
+                            )
+                            is_pairwise_design = comparison_type.startswith(DESIGN_TWO)
 
-                                selected_pair, pairs, specific_test = None, {}, "Student's t-test (Independent, Equal Variance)"
-                                if comparison_type.startswith("Pairwise"):
-                                    if not can_pairwise:
-                                        st.warning("Please define at least two non-empty groups.")
-                                    else:
-                                        labels = [lbl for lbl, _ in nonempty]
-                                        pairs = {
-                                            f"{labels[i]} vs {labels[j]}": (
-                                                nonempty[i][1], 
-                                                nonempty[j][1], 
-                                                labels[i], 
-                                                labels[j]
-                                            ) 
-                                            for i in range(len(labels)) 
-                                            for j in range(i + 1, len(labels))
-                                        }
-                                        col1, col2 = st.columns(2)
-                                        selected_pair = col1.selectbox("Select pairwise comparison:", list(pairs.keys()))
-                                        specific_test = col2.selectbox(
-                                            "Select statistical test:", 
-                                            [
-                                                "Student's t-test (Independent, Equal Variance)", 
-                                                "Welch's t-test (Independent, Unequal Variance)", 
-                                                "Paired t-test (Matched Samples)", 
-                                                "Mann-Whitney U (Non-parametric Independent)", 
-                                                "Wilcoxon Signed-Rank (Non-parametric Paired)"
-                                            ]
+                            selected_pair = None
+                            pairs = {}
+                            specific_test = PAIRWISE_TESTS[0]
+                            multigroup_test = MULTIGROUP_TESTS[0]
+                            limma_all_groups = True
+
+                            if is_pairwise_design:
+                                if not can_pairwise:
+                                    st.warning("Please define at least two non-empty groups.")
+                                else:
+                                    pairs = {
+                                        f"{group_labels[i]} vs {group_labels[j]}": (i, j)
+                                        for a, i in enumerate(nonempty_idx)
+                                        for j in nonempty_idx[a + 1:]
+                                    }
+                                    col1, col2 = st.columns(2)
+                                    with col1:
+                                        selected_pair = st.selectbox(
+                                            "Select pairwise comparison:",
+                                            list(pairs.keys()),
+                                            key="stat_pair",
+                                            help="log2FC is always reported as the other group versus the reference group.",
                                         )
-                                else:
-                                    selected_pair = "Three-group ANOVA"
-                                
-                                st.divider()
-                                st.markdown("### Preprocessing (before statistics)")
-                                do_zero_impute = st.checkbox("Replace 0/NA intensities before differential", value=True)
-                                zero_frac = 0.2  
-                                do_presence_filter = st.checkbox("Filter by presence (drop sparse rows)", value=True)
-                                presence_min_frac = st.slider("Presence threshold (fraction)", 0.05, 1.00, 0.40, 0.05)
-                                
-                                rule_options = {
-                                    "Total samples only": "all_only", 
-                                    "At least one group only": "group_only", 
-                                    "OR: Total samples OR one group": "or", 
-                                    "AND: Total samples AND one group": "and"
-                                }
-                                rule_choice = st.radio(
-                                    "Presence rule", 
-                                    list(rule_options.keys()), 
-                                    index=2
-                                )
-                                presence_rule_key = rule_options[rule_choice]
+                                    with col2:
+                                        specific_test = st.selectbox(
+                                            "Select statistical test:",
+                                            PAIRWISE_TESTS,
+                                            key="stat_test",
+                                            help="Not sure? Open 'Which test should I use?' above.",
+                                        )
+                                    st.caption(TEST_HELP.get(specific_test, ""))
 
-                                run_button = st.form_submit_button("Run Analysis", type="primary")
+                                    if specific_test == LIMMA_T and len(nonempty) > 2:
+                                        limma_all_groups = st.checkbox(
+                                            "Use all groups to estimate variance (recommended)",
+                                            value=True,
+                                            key="stat_limma_all_groups",
+                                            help="Standard limma practice: the third group adds information about "
+                                                 "measurement noise and gives more power. Turn off to use only the "
+                                                 "two compared groups.",
+                                        )
+                            else:
+                                selected_pair = "Three-group ANOVA"
+                                if can_anova:
+                                    multigroup_test = st.radio(
+                                        "Select statistical test:",
+                                        MULTIGROUP_TESTS,
+                                        key="stat_multigroup_test",
+                                        captions=[
+                                            "Recommended. log2 scale, stable with few replicates. Also gives log2FC "
+                                            "and q-value for every pair of groups.",
+                                            "Classical test on raw intensities. Only says whether any group differs.",
+                                        ],
+                                        help=TEST_HELP[LIMMA_F],
+                                    )
+                                else:
+                                    st.warning("Define exactly three non-empty groups in Data Filtering & Group Specification.")
+
+                            uses_limma = (specific_test == LIMMA_T) if is_pairwise_design else (multigroup_test == LIMMA_F)
+
+                            st.divider()
+                            st.markdown("##### Preprocessing (before statistics)")
+                            # Separate widget keys so limma and the classical tests keep
+                            # their own sensible default for imputation.
+                            if uses_limma:
+                                do_zero_impute = st.checkbox(
+                                    "Replace 0/NA intensities before differential",
+                                    value=False,
+                                    key="lf_impute_limma",
+                                    help="Off is recommended for limma: it uses only measured values. Turn on to "
+                                         "also test glycoforms missing from a whole group (fold changes then depend "
+                                         "on the imputed value).",
+                                )
+                            else:
+                                do_zero_impute = st.checkbox(
+                                    "Replace 0/NA intensities before differential",
+                                    value=True,
+                                    key="lf_impute_classic",
+                                    help="Replaces 0/missing with 20% of the glycoform's smallest measured intensity. "
+                                         "The classical tests need a value in every sample.",
+                                )
+                            zero_frac = 0.2
+                            do_presence_filter = st.checkbox(
+                                "Filter by presence (drop sparse rows)",
+                                value=True,
+                                key="lf_presence_on",
+                                help="Drops glycoforms measured in too few samples before testing.",
+                            )
+                            presence_min_frac = st.slider(
+                                "Presence threshold (fraction)", 0.05, 1.00, 0.40, 0.05,
+                                key="lf_presence_frac",
+                                help="Fraction of samples that must have a value > 0.",
+                            )
+
+                            rule_options = {
+                                "Total samples only": "all_only",
+                                "At least one group only": "group_only",
+                                "OR: Total samples OR one group": "or",
+                                "AND: Total samples AND one group": "and"
+                            }
+                            rule_choice = st.radio(
+                                "Presence rule",
+                                list(rule_options.keys()),
+                                index=2,
+                                key="lf_presence_rule",
+                                help="Where the threshold is applied: across all compared samples, within at least "
+                                     "one group, or either/both. 'At least one group' keeps glycoforms that are "
+                                     "present in one condition and absent in another.",
+                            )
+                            presence_rule_key = rule_options[rule_choice]
+
+                            run_button = st.button(
+                                "Run Analysis",
+                                type="primary",
+                                key="btn_run_diff",
+                                help="Execute the selected statistical test to generate p-values, q-values and fold changes.",
+                            )
 
                             if run_button:
                                 ss["filter_open"] = False
+                                # A new test makes any earlier filtered subset stale.
+                                ss["filtered_df"] = None
+                                ss["filtered_ready"] = False
+                                prep = dict(
+                                    do_zero_impute=do_zero_impute,
+                                    zero_frac=zero_frac,
+                                    do_presence_filter=do_presence_filter,
+                                    presence_min_frac=presence_min_frac,
+                                    presence_rule=presence_rule_key,
+                                )
+                                prep_note = (
+                                    ("presence >= " + f"{presence_min_frac:.0%} ({rule_choice})" if do_presence_filter else "no presence filter")
+                                    + ("; 0/NA imputed" if do_zero_impute else "; no imputation")
+                                )
                                 try:
-                                    if comparison_type.startswith("Pairwise"):
+                                    if not labels_unique:
+                                        st.error("Group labels must be different from each other. Rename the groups in Data Filtering & Group Specification.")
+
+                                    elif is_pairwise_design:
                                         if not can_pairwise or not selected_pair:
                                             st.error("Define at least two non-empty groups and pick a comparison.")
                                         else:
-                                            group1, group2, label1, label2 = pairs[selected_pair]
-                                            ctrl_label = group_labels[ctrl_idx] if ctrl_idx < len(group_labels) else label1
-                                            
-                                            if ctrl_label == label1:
-                                                control_cols, test_cols, control_lab, test_lab = group1, group2, label1, label2
-                                            elif ctrl_label == label2:
-                                                control_cols, test_cols, control_lab, test_lab = group2, group1, label2, label1
-                                            else:
-                                                control_cols, test_cols, control_lab, test_lab = group1, group2, label1, label2
+                                            i, j = pairs[selected_pair]
+                                            c_i, t_i = (j, i) if ctrl_idx == j else (i, j)
+                                            control_cols, test_cols = group_samples[c_i], group_samples[t_i]
+                                            control_lab, test_lab = group_labels[c_i], group_labels[t_i]
 
-                                            diffexp_df = compute_diffexp(
-                                                df=merged_df, 
-                                                control_cols=control_cols, 
-                                                test_cols=test_cols, 
-                                                control_label=control_lab, 
-                                                test_label=test_lab, 
-                                                test_type=specific_test, 
-                                                do_zero_impute=do_zero_impute, 
-                                                zero_frac=zero_frac, 
-                                                do_presence_filter=do_presence_filter, 
-                                                presence_min_frac=presence_min_frac, 
-                                                presence_rule=presence_rule_key, 
-                                                group_samples_for_presence=[control_cols, test_cols]
-                                            )
+                                            with st.spinner(f"Running {specific_test}..."):
+                                                if specific_test == LIMMA_T:
+                                                    diffexp_df = compute_diffexp_limma_lf(
+                                                        df=merged_df,
+                                                        group_cols=[list(c) for c in group_samples],
+                                                        group_labels=list(group_labels),
+                                                        control_idx=c_i,
+                                                        test_idx=t_i,
+                                                        use_all_groups=limma_all_groups,
+                                                        **prep,
+                                                    )
+                                                else:
+                                                    diffexp_df = compute_diffexp(
+                                                        df=merged_df,
+                                                        control_cols=control_cols,
+                                                        test_cols=test_cols,
+                                                        control_label=control_lab,
+                                                        test_label=test_lab,
+                                                        test_type=specific_test,
+                                                        group_samples_for_presence=[control_cols, test_cols],
+                                                        **prep,
+                                                    )
+
+                                            method_label = f"{specific_test}: {test_lab} vs {control_lab}"
+                                            if specific_test == LIMMA_T and limma_all_groups and len(nonempty) > 2:
+                                                method_label += " (variance from all groups)"
                                             ss.update({
-                                                "pairwise_control_label": control_lab, 
-                                                "pairwise_test_label": test_lab, 
-                                                "pairwise_control_cols": control_cols, 
-                                                "pairwise_test_cols": test_cols, 
-                                                "diffexp_df": diffexp_df, 
+                                                "pairwise_control_label": control_lab,
+                                                "pairwise_test_label": test_lab,
+                                                "pairwise_control_cols": control_cols,
+                                                "pairwise_test_cols": test_cols,
+                                                "stat_method_label": f"{method_label}; {prep_note}",
+                                                "diffexp_df": diffexp_df,
                                                 "diff_done": True
                                             })
-                                            st.success(f"Differential analysis complete: {selected_pair}")
                                     else:
                                         if not can_anova:
                                             st.error("Provide exactly three non-empty groups for ANOVA.")
                                         else:
-                                            diffexp_df = compute_diffexp_anova(
-                                                df=merged_df, 
-                                                group1_cols=group_samples[0], 
-                                                group2_cols=group_samples[1], 
-                                                group3_cols=group_samples[2], 
-                                                group1_label=group_labels[0], 
-                                                group2_label=group_labels[1], 
-                                                group3_label=group_labels[2], 
-                                                run_tukey=False, 
-                                                do_zero_impute=do_zero_impute, 
-                                                zero_frac=zero_frac, 
-                                                do_presence_filter=do_presence_filter, 
-                                                presence_min_frac=presence_min_frac, 
-                                                presence_rule=presence_rule_key
-                                            )
+                                            with st.spinner(f"Running {multigroup_test}..."):
+                                                if multigroup_test == LIMMA_F:
+                                                    diffexp_df = compute_diffexp_limma_f_lf(
+                                                        df=merged_df,
+                                                        group_cols=[list(c) for c in group_samples],
+                                                        group_labels=list(group_labels),
+                                                        control_idx=ctrl_idx,
+                                                        **prep,
+                                                    )
+                                                else:
+                                                    diffexp_df = compute_diffexp_anova(
+                                                        df=merged_df,
+                                                        group1_cols=group_samples[0],
+                                                        group2_cols=group_samples[1],
+                                                        group3_cols=group_samples[2],
+                                                        group1_label=group_labels[0],
+                                                        group2_label=group_labels[1],
+                                                        group3_label=group_labels[2],
+                                                        run_tukey=False,
+                                                        **prep,
+                                                    )
                                             ss.update({
-                                                "diffexp_df": diffexp_df, 
+                                                "stat_method_label": f"{multigroup_test}: {', '.join(group_labels[:3])}; {prep_note}",
+                                                "diffexp_df": diffexp_df,
                                                 "diff_done": True
                                             })
-                                            st.success(f"Differential analysis complete: {selected_pair}")
                                 except Exception as e:
                                     st.error(f"Differential analysis failed: {e}")
 
                     if ss.get("diff_done") and df_is_nonempty(ss.get("diffexp_df")):
+                        _res = ss["diffexp_df"]
+                        _q = pd.to_numeric(_res["q-value"], errors="coerce") if "q-value" in _res.columns else pd.Series(dtype=float)
+                        _n_sig = int((_q < 0.05).sum())
+                        _n_untested = int(_q.isna().sum())
+                        st.success(
+                            f"**{ss.get('stat_method_label', 'Differential analysis complete')}**: "
+                            f"{len(_res):,} glycoforms in the results, {_n_sig:,} with q < 0.05."
+                        )
+                        if "AveExpr" in _res.columns:
+                            if "F" in _res.columns:
+                                st.caption(
+                                    "limma columns: **AveExpr** = mean log2 intensity; **F** = moderated F statistic; "
+                                    "**p-value / q-value** = does any group differ; **log2FC (B vs A)** and "
+                                    "**q-value (B vs A)** = each pair of groups (moderated t-test). "
+                                    "Group-name columns show the mean raw intensity."
+                                )
+                            else:
+                                st.caption(
+                                    "limma columns: **log2FC** = mean log2(test) − mean log2(reference); "
+                                    "**AveExpr** = mean log2 intensity; **t** = moderated t statistic. "
+                                    "Group-name columns show the mean raw intensity."
+                                )
+                            if _n_untested:
+                                st.caption(
+                                    f"{_n_untested:,} glycoforms have no limma p-value because they were not "
+                                    "measured in a whole compared group. They are listed at the bottom. Tick "
+                                    "*Replace 0/NA* and re-run to test them with imputed values."
+                                )
                         show_grid(ss["diffexp_df"], page_size=15, height=500)
                         
                         st.divider()
@@ -3087,7 +3357,8 @@ def main():
                                 sig_metric = st.selectbox(
                                     "Significance Metric", 
                                     ["q-value", "p-value"] if "q-value" in diff_df.columns else ["p-value"], 
-                                    key="filter_metric"
+                                    key="filter_metric",
+                                    help="q-value (false discovery rate) is recommended. Raw p-values give many false hits when thousands of glycoforms are tested."
                                 )
                                 alpha_thr = st.number_input(
                                     f"{sig_metric} cutoff (<)", 
@@ -3151,15 +3422,15 @@ def main():
                     test_a_label = ss.get("pairwise_test_label", test_a_label)
 
                 left, right = st.columns([0.42, 0.58], gap="large")
-                for key in ["show_volcano", "show_box", "show_heatmap", "show_box_gene", "show_lollipop", "show_waterfall"]:
+                for key in ["show_volcano", "show_box", "show_heatmap", "show_box_gene", "show_lollipop", "show_waterfall", "show_class_breakdown"]:
                     ss.setdefault(key, False)
 
                 with left:
                     with st.container(border=True):
                         modes = (
-                            ["Box plot", "Heatmap", "Box plot (Gene)", "Lollipop plot"] 
-                            if is_anova 
-                            else ["Volcano", "Waterfall", "Box plot", "Heatmap", "Box plot (Gene)", "Lollipop plot"]
+                            ["Box plot", "Heatmap", "Box plot (Gene)", "Lollipop plot", "Glycan class breakdown"]
+                            if is_anova
+                            else ["Volcano", "Waterfall", "Box plot", "Heatmap", "Box plot (Gene)", "Lollipop plot", "Glycan class breakdown"]
                         )
                         mode = st.radio(
                             "Select Analysis Module", 
@@ -3194,10 +3465,11 @@ def main():
                             "Lollipop plot": dict(
                                 show_volcano=False, show_waterfall=False, show_box=False, show_heatmap=False, 
                                 show_box_gene=False, show_lollipop=True
-                            )
+                            ),
+                            "Glycan class breakdown": dict(show_class_breakdown=True),
                         }
                         
-                        for k in ["show_volcano","show_waterfall","show_box","show_heatmap","show_box_gene","show_lollipop"]:
+                        for k in ["show_volcano","show_waterfall","show_box","show_heatmap","show_box_gene","show_lollipop","show_class_breakdown"]:
                             ss[k] = False
                             
                         if mode is not None:
@@ -3317,6 +3589,28 @@ def main():
                                 )
                             with col_b:
                                 st.button("Clear selection", key="btn_clear_genes", on_click=_clear_genes_cb)
+
+                        elif ss.get("show_class_breakdown", False):
+                            st.markdown("**Glycan class breakdown options**")
+                            st.caption(
+                                "Which glycan classes or traits change more often than expected? "
+                                "Uses the current results table."
+                            )
+                            st.radio(
+                                "Group glycoforms by",
+                                ["Glycan class", "Sialylation / fucosylation"],
+                                key="gcb_group_by",
+                                horizontal=True,
+                                help="Glycan class: high-mannose, paucimannose, complex/hybrid. "
+                                     "Sialylation / fucosylation: read from the H N A F composition.",
+                            )
+                            gcb_metric_opts = ["q-value", "p-value"] if "q-value" in diffexp_df.columns else ["p-value"]
+                            st.radio("Significance metric", gcb_metric_opts, key="gcb_sig_col", horizontal=True)
+                            st.number_input("Cutoff (<)", value=0.05, min_value=0.0001, max_value=1.0,
+                                            step=0.01, format="%.4f", key="gcb_alpha")
+                            if not is_anova:
+                                st.number_input("|log2FC| cutoff (>)", value=1.0, min_value=0.0, step=0.25,
+                                                format="%.2f", key="gcb_fc")
 
                         elif ss.get("show_lollipop", False):
                             st.markdown("**Lollipop plot options**")                            
@@ -3510,6 +3804,16 @@ def main():
                                                 quant_mode="LFQ"
                                             )
                                             
+                    elif ss.get("show_class_breakdown", False):
+                        render_glycan_class_breakdown(
+                            plot_df=diffexp_df,
+                            is_anova=is_anova,
+                            sig_col=ss.get("gcb_sig_col", "q-value" if "q-value" in diffexp_df.columns else "p-value"),
+                            alpha=float(ss.get("gcb_alpha", 0.05)),
+                            fc_thr=float(ss.get("gcb_fc", 1.0)),
+                            group_by=ss.get("gcb_group_by", "Glycan class"),
+                        )
+
                     elif ss.get("show_lollipop", False):
                         genes = ss.get("lollipop_gene_list", [])
 

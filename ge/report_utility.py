@@ -704,6 +704,8 @@ def generate_final_pdf():
     # Name the exact test when the app recorded it (GlycoExplorer TMT does);
     # fall back to the generic description otherwise.
     stat_test = ss.get("stat_method_label") or ("Three-group ANOVA" if is_anova else "Pairwise comparison")
+    # The PDF fonts are Latin-1 only; replace anything else instead of failing.
+    stat_test = str(stat_test).encode("latin-1", "replace").decode("latin-1")
     batch_applied, batch_status, _ = _get_batch_status(ss)
 
     # -------------------------------------------------------------------------

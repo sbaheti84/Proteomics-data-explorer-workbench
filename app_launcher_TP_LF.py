@@ -16,8 +16,8 @@ import sys
 import numpy as np
 import pandas as pd
 import streamlit as st
-import zipfile       
-import datetime      
+import zipfile
+import datetime
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -48,7 +48,7 @@ from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from scipy.cluster.hierarchy import linkage, dendrogram
-# Assuming you have local plotting utilities 
+# Assuming you have local plotting utilities
 from tp.qc_utility import * # noqa
 from tp.report_utility import * # noqa
 from tp.ui_utility import * # noqa
@@ -56,6 +56,11 @@ from streamlit.errors import StreamlitAPIException
 
 # Shared Total Protein helpers used by both TMT and LFQ launchers.
 from tp.tp_common_utility import *
+# limma core (validated against R limma) and the test names shared by all apps.
+from ge.diff_results_utility import (
+    limma_group_test, _bh_adjust, LIMMA_T, LIMMA_F, CLASSIC_ANOVA,
+    PAIRWISE_TESTS, MULTIGROUP_TESTS, TEST_HELP,
+)
 # Safely import FAQ
 try:
     from faq.faq_TP_LF import faq_section
@@ -188,43 +193,6 @@ def get_bundled_r_environment() -> tuple[str, dict]:
 
     return str(rscript), env
 
-def _get_downloads_dir():
-    """Return a safe Downloads folder path for macOS/Windows/Linux."""
-    downloads = Path.home() / "Downloads"
-    if downloads.exists():
-        return downloads
-    return Path.home()
-
-
-def _safe_download_filename(filename):
-    """Clean filename and avoid characters that can cause issues on macOS/Windows/Linux."""
-    filename = str(filename).strip()
-    filename = re.sub(r"[^A-Za-z0-9._-]+", "_", filename)
-    filename = filename.strip("_")
-    return filename or "downloaded_file"
-
-
-def _save_bytes_to_downloads(data, filename):
-    """Save bytes directly to the user's Downloads folder without overwriting existing files."""
-    outdir = _get_downloads_dir()
-    filename = _safe_download_filename(filename)
-    outpath = outdir / filename
-
-    if isinstance(data, BytesIO):
-        data = data.getvalue()
-    if isinstance(data, str):
-        data = data.encode("utf-8")
-    if not isinstance(data, (bytes, bytearray)):
-        data = bytes(data)
-
-    base_outpath = outpath
-    counter = 1
-    while outpath.exists():
-        outpath = base_outpath.with_name(f"{base_outpath.stem}_{counter}{base_outpath.suffix}")
-        counter += 1
-
-    outpath.write_bytes(data)
-    return outpath
 def _reset_all_data(clear_cache: bool = False):
     """Clear all derived data so the suite cannot run on stale state."""
     ss["global_sample_cols"] = []
@@ -233,7 +201,7 @@ def _reset_all_data(clear_cache: bool = False):
     ss["global_n_groups"] = 2
     ss["global_control_group_idx"] = 0
     ss["global_all_groups"] = []
-    
+
     ss["global_batch_samples"] = []
     ss["global_batch_labels"] = []
     ss["global_n_batches"] = 1
@@ -265,18 +233,26 @@ def _reset_all_data(clear_cache: bool = False):
     ss["normalization_applied_method"] = "None"
     ss["preprocessing_dirty"] = False
     ss["diff_results"] = None
+    for _k in ["stat_method_label", "diff_pair_labels", "tp_preprocessing_label", "imputation_applied_engine",
+               "global_sample_cols_ui"]:
+        ss.pop(_k, None)
     ss["filtered_df"] = None
     ss["filtered_ready"] = False
-    
+
     ss["show_overview"] = False
     ss["show_suite"] = False
     ss["show_global_select"] = False
     ss["show_report"] = False
-    ss["upload_sig"] = None 
+    ss["upload_sig"] = None
     ss.pop("final_pdf_bytes", None)
     ss.pop("final_report_zip_bytes", None)
     ss.pop("final_report_timestamp", None)
     if clear_cache:
+        # Reset Session: also go back to the default preprocessing settings.
+        for _k in PREPROCESSING_SETTING_KEYS:
+            ss.pop(_k, None)
+            ss.pop("_w_" + _k, None)
+        ss.pop("_lfq_r_status", None)
         try:
             st.cache_data.clear()
         except Exception:
@@ -316,7 +292,11 @@ def init_session_state_defaults():
         "pre_presence_rule": "or",
         "pre_normalization_method": "Median centering (log2)",
         "pre_imputation_family": "All methods",
-        "pre_imputation_method": "K-nearest neighbor (KNN)",
+        "pre_imputation_method": DEFAULT_IMPUTATION_METHOD,
+        "pre_drop_contaminants": True,
+        "pre_pi_width": 0.3,
+        "pre_pi_downshift": 1.8,
+        "pre_rf_ntree": 20,
         "show_overview": False,
         "show_suite": False,
         "show_global_select": False,
@@ -331,13 +311,19 @@ def init_session_state_defaults():
 def df_is_nonempty(df) -> bool:
     return isinstance(df, pd.DataFrame) and not df.empty
 def clean_lfq_sample(col: str) -> str:
-    if col is None: return col
+    """Short sample name for display (the original column name is kept in the data)."""
+    if col is None:
+        return col
     s = str(col)
+    if re.search(r"[\\/]", s):  # DIA-NN / Spectronaut: full raw-file paths as column names
+        s = re.split(r"[\\/]", s.rstrip("\\/"))[-1]
+        s = re.sub(r"(?i)\.(raw|d|mzml|mzxml|wiff2?|dia)$", "", s)
+    s = re.sub(r"(?i)max\s*lfq\s*intensity\s*", "", s)
     s = re.sub(r"(?i)lfq\s*intensity\s*", "", s)
     s = re.sub(r"(?i)intensity\s*", "", s)
     s = re.sub(r"(?i)abundance\s*:\s*", "", s)
     s = s.replace(":", "").strip()
-    return s.strip()
+    return s or str(col)
 def apply_batch_correction(
     df: pd.DataFrame,
     batch_list: list[list[str]],
@@ -449,7 +435,7 @@ def filter_by_presence_rule(
     all_samples: list[str],
     group_samples: list[list[str]],
     min_frac: float = 0.40,
-    presence_rule: str = "or",   
+    presence_rule: str = "or",
 ) -> pd.DataFrame:
     out = df.copy()
     all_cols = [c for c in all_samples if c in out.columns]
@@ -473,65 +459,232 @@ def filter_by_presence_rule(
         keep = keep_group
     elif rule == "and":
         keep = keep_all & keep_group
-    else: 
+    else:
         keep = keep_all | keep_group
     return out.loc[keep].copy()
-def replace_zeros_rowwise_min_fraction(
-    df: pd.DataFrame,
-    sample_cols: list[str],
-    frac: float = 0.2,          
-    replace_nan: bool = True
-) -> pd.DataFrame:
-    out = df.copy()
-    cols = [c for c in sample_cols if c in out.columns]
-    if not cols:
-        return out
-    X = out[cols].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
-    pos_mask = np.isfinite(X) & (X > 0)
-    has_pos = pos_mask.any(axis=1)
-    pos_vals = np.where(pos_mask, X, np.nan)
-    row_min_pos = np.nanmin(pos_vals, axis=1)   
-    fill = row_min_pos * float(frac)
-    if replace_nan:
-        repl_mask = (X == 0) | (~np.isfinite(X))
-    else:
-        repl_mask = (X == 0)
-    X_new = X.copy()
-    good = has_pos & np.isfinite(fill)
-    if np.any(good):
-        X_new[good] = np.where(repl_mask[good], fill[good, None], X[good])
-        out[cols] = X_new
-    return out
+# -----------------------------------------------------------------------------
+# Missing-value imputation
+#   engine "python": runs inside this app, no R needed (works on every platform,
+#                    including hosted servers without R).
+#   engine "R":      NAguideR method run through naguider_impute.R (needs R and
+#                    the listed package; bundled in the Windows/macOS/Docker builds).
+# The method the user picks is the method that runs. Nothing is swapped silently.
+# -----------------------------------------------------------------------------
+IMPUTE_NONE = "None (leave missing values)"
+IMPUTE_ROWMIN_FIFTH = "1/5 of protein minimum (previous default)"
+DEFAULT_IMPUTATION_METHOD = IMPUTE_ROWMIN_FIFTH
+BUILTIN_FAMILY = "Built-in (no R needed)"
 
-# -----------------------------------------------------------------------------
-# LFQ normalization and NAguideR-compatible R imputation bridge
-# -----------------------------------------------------------------------------
-NAGUIDER_METHODS = [
-    {"label": "Zero", "key": "zero", "family": "Single value", "package": None, "speed": "Fast"},
-    {"label": "Minimum", "key": "minimum", "family": "Single value", "package": None, "speed": "Fast"},
-    {"label": "Column median", "key": "colmedian", "family": "Single value", "package": "e1071", "speed": "Fast"},
-    {"label": "Row median", "key": "rowmedian", "family": "Single value", "package": "e1071", "speed": "Fast"},
-    {"label": "Deterministic minimum (MinDet)", "key": "mindet", "family": "Single value", "package": "imputeLCMD", "speed": "Fast"},
-    {"label": "Stochastic minimum (MinProb)", "key": "minprob", "family": "Single value", "package": "imputeLCMD", "speed": "Fast"},
-    {"label": "Perseus imputation (PI)", "key": "pi", "family": "Single value", "package": None, "speed": "Fast"},
-    {"label": "Singular value decomposition (SVD)", "key": "svdmethod", "family": "Global structure", "package": "pcaMethods", "speed": "Medium"},
-    {"label": "Maximum likelihood estimation (MLE)", "key": "mle", "family": "Global structure", "package": "norm", "speed": "Medium"},
-    {"label": "Sequential imputation (ImpSeq)", "key": "impseq", "family": "Global structure", "package": "rrcovNA", "speed": "Medium"},
-    {"label": "Robust sequential imputation (ImpSeqRob)", "key": "impseqrob", "family": "Global structure", "package": "rrcovNA", "speed": "Medium"},
-    {"label": "Bayesian PCA (BPCA)", "key": "bpca", "family": "Global structure", "package": "pcaMethods", "speed": "Slow"},
-    {"label": "K-nearest neighbor (KNN)", "key": "knnmethod", "family": "Local similarity", "package": "impute", "speed": "Medium"},
-    {"label": "Sequential KNN (Seq-KNN)", "key": "seqknn", "family": "Local similarity", "package": "SeqKnn", "speed": "Medium"},
-    {"label": "Quantile regression (QRILC)", "key": "qrilc", "family": "Local similarity", "package": "imputeLCMD", "speed": "Medium"},
-    {"label": "Local least squares (LLS)", "key": "lls", "family": "Local similarity", "package": "pcaMethods", "speed": "Medium"},
-    {"label": "Glmnet ridge regression (GRR)", "key": "grr", "family": "Local similarity", "package": "DreamAI", "speed": "Medium"},
-    {"label": "MICE Bayesian linear regression (mice-norm)", "key": "mice-norm", "family": "Local similarity", "package": "mice", "speed": "Slow"},
-    {"label": "Truncation KNN (trKNN)", "key": "trknn", "family": "Local similarity", "package": "NAguideR", "speed": "Slow"},
-    {"label": "Iterative robust model (IRM)", "key": "irm", "family": "Local similarity", "package": "VIM", "speed": "Slow"},
-    {"label": "Generalized Mass Spectrum (GMS)", "key": "gms", "family": "Local similarity", "package": "GMSimpute", "speed": "Slow"},
-    {"label": "MICE classification/regression trees (mice-cart)", "key": "mice-cart", "family": "Local similarity", "package": "mice", "speed": "Slow"},
-    {"label": "Random forest (RF)", "key": "rf", "family": "Local similarity", "package": "missForest", "speed": "Slow"},
+IMPUTATION_METHODS = [
+    # ---- built-in (Python) -------------------------------------------------
+    {"label": IMPUTE_ROWMIN_FIFTH, "key": "rowmin_fifth", "family": "Single value", "engine": "python",
+     "package": None, "speed": "Fast", "assumes": "low abundance",
+     "help": "Each missing value of a protein = 1/5 of that protein's smallest measured intensity "
+             "(on log2: its smallest value minus 2.32). The rule this app used before. Simple, but all "
+             "filled values of a protein are identical, so a group that is fully missing gets zero spread, "
+             "which can make p-values look better than they are."},
+    {"label": "Perseus imputation (PI)", "key": "pi", "family": "Single value", "engine": "python",
+     "package": None, "speed": "Fast", "assumes": "low abundance",
+     "help": "Perseus default. Random values from a narrow normal distribution placed at the low end of each "
+             "sample (width 0.3 SD, shifted down 1.8 SD). Common choice for MaxQuant/FragPipe LFQ data."},
+    {"label": "Stochastic minimum (MinProb)", "key": "minprob", "family": "Single value", "engine": "python",
+     "package": None, "speed": "Fast", "assumes": "low abundance",
+     "help": "Random values around each sample's 1% lowest intensity, with the typical protein spread as noise "
+             "(imputeLCMD MinProb, q = 0.01)."},
+    {"label": "Deterministic minimum (MinDet)", "key": "mindet", "family": "Single value", "engine": "python",
+     "package": None, "speed": "Fast", "assumes": "low abundance",
+     "help": "Each sample's 1% lowest intensity, no noise (imputeLCMD MinDet, q = 0.01)."},
+    {"label": "Row median", "key": "rowmedian", "family": "Single value", "engine": "python",
+     "package": None, "speed": "Fast", "assumes": "random",
+     "help": "The protein's median over all samples. Pulls groups together, so it hides real differences "
+             "when a protein is missing in one group."},
+    {"label": "Column median", "key": "colmedian", "family": "Single value", "engine": "python",
+     "package": None, "speed": "Fast", "assumes": "random",
+     "help": "The sample's median intensity. Puts missing values in the middle of the distribution; "
+             "not recommended for differential analysis."},
+    {"label": "Minimum", "key": "minimum", "family": "Single value", "engine": "python",
+     "package": None, "speed": "Fast", "assumes": "low abundance",
+     "help": "The single smallest value of the whole matrix."},
+    {"label": "Zero", "key": "zero", "family": "Single value", "engine": "python",
+     "package": None, "speed": "Fast", "assumes": "-",
+     "help": "Fills 0 (on log2 this means intensity 1). For comparison only: creates very large artificial fold changes."},
+    # ---- NAguideR methods through R ----------------------------------------
+    {"label": "Singular value decomposition (SVD)", "key": "svdmethod", "family": "Global structure", "engine": "R", "package": "pcaMethods", "speed": "Medium", "assumes": "random",
+     "help": "Fills values from the main patterns (components) of the whole matrix."},
+    {"label": "Maximum likelihood estimation (MLE)", "key": "mle", "family": "Global structure", "engine": "R", "package": "norm", "speed": "Medium", "assumes": "random",
+     "help": "EM algorithm under a multivariate normal model. Can be slow or unstable with many proteins."},
+    {"label": "Sequential imputation (ImpSeq)", "key": "impseq", "family": "Global structure", "engine": "R", "package": "rrcovNA", "speed": "Medium", "assumes": "random",
+     "help": "Sequential imputation (rrcovNA)."},
+    {"label": "Robust sequential imputation (ImpSeqRob)", "key": "impseqrob", "family": "Global structure", "engine": "R", "package": "rrcovNA", "speed": "Medium", "assumes": "random",
+     "help": "Outlier-robust version of ImpSeq."},
+    {"label": "Bayesian PCA (BPCA)", "key": "bpca", "family": "Global structure", "engine": "R", "package": "pcaMethods", "speed": "Slow", "assumes": "random",
+     "help": "Bayesian PCA. Often among the most accurate for randomly missing values."},
+    {"label": "K-nearest neighbor (KNN)", "key": "knnmethod", "family": "Local similarity", "engine": "R", "package": "impute", "speed": "Medium", "assumes": "random",
+     "help": "Average of the 10 most similar proteins (impute::impute.knn)."},
+    {"label": "Sequential KNN (Seq-KNN)", "key": "seqknn", "family": "Local similarity", "engine": "R", "package": "SeqKnn", "speed": "Medium", "assumes": "random",
+     "help": "KNN that fills the least-missing proteins first and reuses them."},
+    {"label": "Quantile regression (QRILC)", "key": "qrilc", "family": "Local similarity", "engine": "R", "package": "imputeLCMD", "speed": "Medium", "assumes": "low abundance",
+     "help": "Random values from a truncated distribution fitted to the low end of each sample (left-censored)."},
+    {"label": "Local least squares (LLS)", "key": "lls", "family": "Local similarity", "engine": "R", "package": "pcaMethods", "speed": "Medium", "assumes": "random",
+     "help": "Regression on the most similar proteins."},
+    {"label": "Glmnet ridge regression (GRR)", "key": "grr", "family": "Local similarity", "engine": "R", "package": "DreamAI", "speed": "Medium", "assumes": "random",
+     "help": "Ridge-regression imputation (DreamAI)."},
+    {"label": "MICE Bayesian linear regression (mice-norm)", "key": "mice-norm", "family": "Local similarity", "engine": "R", "package": "mice", "speed": "Slow", "assumes": "random",
+     "help": "Multiple imputation (5 sets, averaged)."},
+    {"label": "Truncation KNN (trKNN)", "key": "trknn", "family": "Local similarity", "engine": "R", "package": "NAguideR", "speed": "Slow", "assumes": "both",
+     "help": "KNN with a truncated-normal distance that accounts for low-abundance missingness."},
+    {"label": "Iterative robust model (IRM)", "key": "irm", "family": "Local similarity", "engine": "R", "package": "VIM", "speed": "Slow", "assumes": "random",
+     "help": "Iterative robust regression (VIM::irmi)."},
+    {"label": "Generalized Mass Spectrum (GMS)", "key": "gms", "family": "Local similarity", "engine": "R", "package": "GMSimpute", "speed": "Slow", "assumes": "both",
+     "help": "Lasso-based method designed for mass-spectrometry data."},
+    {"label": "MICE classification/regression trees (mice-cart)", "key": "mice-cart", "family": "Local similarity", "engine": "R", "package": "mice", "speed": "Slow", "assumes": "random",
+     "help": "Multiple imputation with regression trees."},
+    {"label": "Random forest (RF)", "key": "rf", "family": "Local similarity", "engine": "R", "package": "missForest", "speed": "Slow", "assumes": "random",
+     "help": "missForest. Accurate for random missingness, but slow on large matrices."},
 ]
+IMPUTATION_BY_LABEL = {m["label"]: m for m in IMPUTATION_METHODS}
+# R-only methods (kept under the old name used by the R bridge helpers).
+NAGUIDER_METHODS = [m for m in IMPUTATION_METHODS if m["engine"] == "R"]
 NAGUIDER_BY_LABEL = {m["label"]: m for m in NAGUIDER_METHODS}
+
+
+def imputation_engine_text(label: str) -> str:
+    """Short, honest description of where a method runs."""
+    if not label or label == IMPUTE_NONE:
+        return "no imputation"
+    m = IMPUTATION_BY_LABEL.get(label)
+    if m is None:
+        return "unknown"
+    if m["engine"] == "python":
+        return "built-in (no R needed)"
+    return f"R / NAguideR, package {m['package']}" if m.get("package") else "R / NAguideR"
+
+
+def _offset_to_normalized(transformed: pd.DataFrame, normalized: pd.DataFrame) -> pd.Series:
+    """Per-sample shift that normalization applied (normalization here is a pure shift per sample)."""
+    offsets = {}
+    for col in normalized.columns:
+        obs = transformed[col].notna() & normalized[col].notna()
+        offsets[col] = float((normalized.loc[obs, col] - transformed.loc[obs, col]).median()) if obs.any() else 0.0
+    return pd.Series(offsets)
+
+
+def impute_builtin_lfq(
+    normalized: pd.DataFrame,
+    method_label: str,
+    transformed: Optional[pd.DataFrame] = None,
+    log2_scale: bool = True,
+    pi_width: float = 0.3,
+    pi_downshift: float = 1.8,
+    q: float = 0.01,
+    seed: int = 1234,
+) -> pd.DataFrame:
+    """Built-in imputation methods (no R).
+
+    `normalized` is the matrix that gets imputed (log2 and normalized when those steps are on).
+    `transformed` is the same matrix before normalization; it is only used by the 1/5-minimum
+    rule, which is defined on the protein's own measured intensities.
+    Formulas follow NAguideR / imputeLCMD / Perseus. The random methods (PI, MinProb) use a fixed
+    seed, so a re-run gives the same numbers (they will not equal R's random numbers).
+    """
+    method = IMPUTATION_BY_LABEL.get(method_label)
+    if method is None or method["engine"] != "python":
+        raise ValueError(f"'{method_label}' is not a built-in imputation method.")
+    key = method["key"]
+    X = normalized.copy().astype(float)
+    miss = X.isna()
+    if not miss.to_numpy().any():
+        return X
+    rng = np.random.default_rng(seed)
+
+    if key == "rowmin_fifth":
+        base = (transformed if transformed is not None else X).astype(float)
+        if log2_scale:
+            fill = base.min(axis=1, skipna=True) + np.log2(0.2)
+            offsets = _offset_to_normalized(base, X) if transformed is not None else pd.Series(0.0, index=X.columns)
+            for col in X.columns:
+                X.loc[miss[col], col] = (fill + offsets[col])[miss[col]]
+        else:
+            fill = base.where(base > 0).min(axis=1, skipna=True) * 0.2
+            for col in X.columns:
+                X.loc[miss[col], col] = fill[miss[col]]
+
+    elif key == "zero":
+        X = X.fillna(0.0)
+
+    elif key == "minimum":
+        minval = np.nanmin(X.to_numpy())
+        if not np.isfinite(minval):
+            raise ValueError("Minimum imputation failed: the matrix has no measured values.")
+        X = X.fillna(minval)
+
+    elif key == "colmedian":
+        X = X.fillna(X.median(axis=0, skipna=True))
+
+    elif key == "rowmedian":
+        X = X.T.fillna(X.median(axis=1, skipna=True)).T
+
+    elif key in ("mindet", "minprob"):
+        low = X.quantile(q, axis=0, interpolation="linear")
+        if key == "mindet":
+            X = X.fillna(low)
+        else:
+            frac_obs = X.notna().mean(axis=1)
+            prot_sd = X.loc[frac_obs > 0.5].std(axis=1, ddof=1)
+            sd_temp = float(np.nanmedian(prot_sd.to_numpy())) if prot_sd.notna().any() else np.nan
+            if not np.isfinite(sd_temp):
+                raise ValueError("MinProb needs proteins measured in more than half of the samples to estimate the noise level.")
+            for col in X.columns:
+                draws = rng.normal(loc=float(low[col]), scale=sd_temp, size=len(X))
+                X.loc[miss[col], col] = draws[miss[col].to_numpy()]
+
+    elif key == "pi":
+        for col in X.columns:
+            n_miss = int(miss[col].sum())
+            if not n_miss:
+                continue
+            obs = X.loc[~miss[col], col]
+            if len(obs) < 2 or not np.isfinite(obs.std(ddof=1)):
+                raise ValueError(f"Perseus imputation needs at least two measured values in sample '{col}'.")
+            sd = float(obs.std(ddof=1))
+            X.loc[miss[col], col] = rng.normal(loc=float(obs.mean()) - pi_downshift * sd, scale=pi_width * sd, size=n_miss)
+    else:
+        raise ValueError(f"Unsupported built-in method: {method_label}")
+
+    return X
+
+
+def missingness_profile_lfq(raw: pd.DataFrame, n_bins: int = 5) -> Optional[pd.DataFrame]:
+    """% missing per intensity bin (proteins sorted by mean measured log2 intensity).
+
+    If low-intensity proteins are missing much more often, missing values mostly mean
+    'below detection' (MNAR) and low-end methods fit; if the bars are flat, missing
+    values look random (MAR) and similarity methods (KNN, BPCA, ...) fit better.
+    """
+    X = raw.apply(pd.to_numeric, errors="coerce")
+    X = X.where(X > 0)
+    mean_log = np.log2(X).mean(axis=1, skipna=True)
+    frac_missing = X.isna().mean(axis=1)
+    ok = mean_log.notna()
+    if ok.sum() < n_bins * 5 or frac_missing.sum() == 0:
+        return None
+    bins = pd.qcut(mean_log[ok].rank(method="first"), n_bins, labels=False)
+    prof = frac_missing[ok].groupby(bins).mean() * 100
+    names = ["Lowest 20%", "20-40%", "40-60%", "60-80%", "Highest 20%"] if n_bins == 5 else [f"Bin {i+1}" for i in range(n_bins)]
+    return pd.DataFrame({"Intensity group": names, "% missing": prof.to_numpy()})
+
+
+def missingness_verdict_lfq(profile: Optional[pd.DataFrame]) -> str:
+    if profile is None or profile.empty:
+        return ""
+    low, high = float(profile["% missing"].iloc[0]), float(profile["% missing"].iloc[-1])
+    if low >= max(2.0 * high, high + 10):
+        return (f"Missing values are much more common in low-intensity proteins ({low:.0f}% vs {high:.0f}% in the "
+                "brightest 20%). They mostly mean 'below detection', so a low-end method fits: Perseus (PI), MinProb, "
+                "MinDet, QRILC or the 1/5 minimum rule.")
+    return (f"Missingness is fairly even across intensity ({low:.0f}% in the lowest vs {high:.0f}% in the highest 20%). "
+            "Missing values look closer to random, so a similarity method (KNN, BPCA, SVD, RF; needs R) or no "
+            "imputation with limma is reasonable.")
 
 
 def normalize_lfq_log2(df: pd.DataFrame, method: str) -> pd.DataFrame:
@@ -744,6 +897,111 @@ def run_naguider_imputation_lfq(
 
     return out
 
+def r_backend_available_lfq() -> tuple[bool, str]:
+    """Quick check (no R process started): is Rscript there, and is the bridge script bundled?"""
+    try:
+        rscript, _ = get_bundled_r_environment()
+    except Exception:
+        return False, "Rscript was not found on this computer or server"
+    if _find_naguider_bridge_script_lfq() is None:
+        return False, "naguider_impute.R is missing from the app folder"
+    return True, f"Rscript: {rscript}"
+
+
+def r_method_status_lfq(method_label: str, refresh: bool = False) -> tuple[bool, str]:
+    """Check that R can load the package a method needs. Cached per session (starting R takes a second)."""
+    cache = ss.setdefault("_lfq_r_status", {})
+    if refresh or method_label not in cache:
+        cache[method_label] = check_naguider_r_environment_lfq(method_label)
+    return cache[method_label]
+
+
+# -----------------------------------------------------------------------------
+# Settings that survive the panel being closed
+# -----------------------------------------------------------------------------
+# Streamlit deletes a widget's value when the widget is not drawn in a run (for
+# example while another panel is open). The value is therefore kept under a
+# permanent key, and each widget gets its own key seeded from it.
+def _pw(perm_key: str, default, options: Optional[list] = None) -> str:
+    wkey = "_w_" + perm_key
+    value = ss.get(wkey, ss.get(perm_key, default))
+    if options is not None and value not in options:
+        value = default if default in options else options[0]
+    # Assigned on every run, before the widget is drawn: when the option list
+    # changes (for example the method filter), Streamlit treats the selectbox as a
+    # new widget and would otherwise reset it to the first option ("None").
+    ss[wkey] = value
+    return wkey
+
+
+def _setting(perm_key: str, default):
+    """Current value of a setting, including a change the user just made in its widget."""
+    return ss.get("_w_" + perm_key, ss.get(perm_key, default))
+
+
+PREPROCESSING_SETTING_KEYS = [
+    "pre_drop_contaminants", "pre_treat_zero", "pre_presence_filter", "pre_presence_min_frac",
+    "pre_presence_rule", "pre_log2", "pre_normalization_method", "pre_imputation_family",
+    "pre_imputation_method", "pre_pi_width", "pre_pi_downshift", "pre_rf_ntree",
+]
+
+
+# -----------------------------------------------------------------------------
+# Input helpers
+# -----------------------------------------------------------------------------
+def detect_contaminants_lf(df: pd.DataFrame) -> tuple[pd.Series, str]:
+    """Rows flagged as contaminant/decoy by MaxQuant ('+' columns, CON__/REV__) or FragPipe (contam_/rev_)."""
+    mask = pd.Series(False, index=df.index)
+    parts = []
+    for col in ["Reverse", "Potential contaminant", "Contaminant", "Only identified by site"]:
+        if col in df.columns:
+            m = df[col].astype(str).str.strip().eq("+")
+            if m.any():
+                parts.append(f"{col} = + ({int(m.sum())})")
+                mask |= m
+    id_col = next((c for c in ["Protein IDs", "Majority protein IDs", "Protein ID", "Protein", "Accession",
+                               "Protein.Group", "Protein.IDs", "Protein.Ids"] if c in df.columns), None)
+    if id_col:
+        lead = df[id_col].astype(str).str.split(";").str[0].str.strip()
+        m = lead.str.match(r"(?i)(CON__|REV__|contam_|rev_)")
+        if m.any():
+            parts.append(f"{id_col} starts with CON__/REV__/contam_/rev_ ({int(m.sum())})")
+            mask |= m
+    return mask, "; ".join(parts)
+
+
+def suggest_default_lfq_samples(numeric_cols: list) -> list:
+    """Pre-select the LFQ columns when the table also has raw-intensity or other numeric columns."""
+    for pattern in [r"(?i)max\s*lfq\s*intensity", r"(?i)^lfq\s*intensity"]:
+        hits = [c for c in numeric_cols if re.search(pattern, str(c))]
+        if len(hits) >= 2:
+            return hits
+    return list(numeric_cols)
+
+
+def describe_preprocessing_lf(drop_contam, n_contam, pre_zero, presence, removed_n, pre_log2,
+                              normalization, imputation, missing_before, missing_after, n_proteins) -> str:
+    """Plain ASCII summary of the matrix used for statistics (also printed in the PDF report)."""
+    parts = []
+    if n_contam:
+        parts.append(f"{n_contam} contaminant/decoy rows removed" if drop_contam else "contaminants kept")
+    parts.append("0 = missing" if pre_zero else "0 kept as a value")
+    if presence:
+        frac, rule = presence
+        rule_txt = {"or": "all samples OR one group", "all_only": "all samples", "group_only": "one group",
+                    "and": "all samples AND one group"}.get(rule, rule)
+        parts.append(f"presence >= {frac:.0%} ({rule_txt}), {removed_n} proteins removed")
+    else:
+        parts.append("no presence filter")
+    parts.append("log2" if pre_log2 else "no log2")
+    if pre_log2:
+        parts.append(f"normalization: {normalization}")
+    parts.append(f"imputation: {imputation} [{imputation_engine_text(imputation)}], "
+                 f"missing values {missing_before} -> {missing_after}")
+    parts.append(f"{n_proteins} proteins")
+    return "; ".join(parts)
+
+
 def _group_map_pretty_lfq(pretty_labels: dict) -> dict:
     """Map pretty sample names to biological group labels for ComBat preservation."""
     mapping = {}
@@ -753,123 +1011,191 @@ def _group_map_pretty_lfq(pretty_labels: dict) -> dict:
     return mapping
 
 # -----------------------------------------------------------------------------
-# Differential Engine 
+# Differential Engine
 # -----------------------------------------------------------------------------
+LF_TEST_HELP = dict(TEST_HELP)
+LF_TEST_HELP.update({
+    "Student's t-test (Independent, Equal Variance)":
+        "Classic two-sample t-test on the final log2 matrix. Assumes both groups have a similar spread.",
+    "Welch's t-test (Independent, Unequal Variance)":
+        "t-test on the final log2 matrix that does not assume equal spread. Safer than Student's when one group is more variable.",
+    CLASSIC_ANOVA:
+        "One-way ANOVA on the final log2 matrix: does any of the three groups differ?",
+    LIMMA_T:
+        "Recommended with few replicates (3-6 per group). Borrows variance information from all proteins "
+        "(empirical Bayes) and uses only measured values when some are missing. log2FC = mean log2(test) "
+        "- mean log2(reference), the same definition as the t-tests.",
+    LIMMA_F:
+        "limma's version of ANOVA, with empirical Bayes variances. The p/q-value says whether any group "
+        "differs. The table also gives log2FC and q-value for every pair of groups.",
+})
+
+_LF_META = ["RowID", "GeneID", "Genes", "Description", "Accession", "Master Protein Accessions"]
+
+
+def _lf_values(df: pd.DataFrame, cols: list) -> np.ndarray:
+    """Final matrix is already log2 (statistics refuse to run without log2), so use it as is."""
+    vals = df[cols].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+    return np.where(np.isfinite(vals), vals, np.nan)
+
+
+def _sort_pairwise(out: pd.DataFrame) -> pd.DataFrame:
+    out["Regulation"] = "Not Significant"
+    out.loc[(out["q-value"] < 0.05) & (out["log2FC"] > 1), "Regulation"] = "Upregulated"
+    out.loc[(out["q-value"] < 0.05) & (out["log2FC"] < -1), "Regulation"] = "Downregulated"
+    out["__reg_sort__"] = out["Regulation"].map({"Upregulated": 0, "Downregulated": 1, "Not Significant": 2}).fillna(3)
+    return out.sort_values(by=["__reg_sort__", "q-value"], ascending=[True, True], na_position="last").drop(columns="__reg_sort__")
+
+
+def compute_diffexp_limma_lf(df, groups, labels, control_idx, test_idx, use_all_groups=True) -> pd.DataFrame:
+    """limma moderated t-test (test vs control) on the final log2 LFQ matrix."""
+    keep = [i for i, g in enumerate(groups) if g] if use_all_groups else [control_idx, test_idx]
+    cols, gvec = [], []
+    for k, gi in enumerate(keep):
+        for c in groups[gi]:
+            cols.append(c)
+            gvec.append(k)
+    C = np.zeros((len(keep), 1))
+    C[keep.index(test_idx), 0] = 1.0
+    C[keep.index(control_idx), 0] = -1.0
+    res = limma_group_test(_lf_values(df, cols), np.array(gvec), C)
+
+    out = df.copy()
+    ctrl, test = list(groups[control_idx]), list(groups[test_idx])
+    c_lab, t_lab = labels[control_idx], labels[test_idx]
+    out[c_lab] = out[ctrl].mean(axis=1)
+    out[t_lab] = out[test].mean(axis=1)
+    out["log2FC"] = res["logFC"][:, 0]
+    out["AveExpr"] = res["AveExpr"]
+    out["t"] = res["t"][:, 0]
+    out["p-value"] = res["p"][:, 0]
+    out["q-value"] = _bh_adjust(out["p-value"].to_numpy())
+    out = _sort_pairwise(out)
+    keep_cols = [c for c in _LF_META if c in out.columns] + [
+        c_lab, t_lab, "log2FC", "AveExpr", "t", "p-value", "q-value", "Regulation"
+    ] + list(dict.fromkeys(ctrl + test))
+    return out[keep_cols]
+
+
+def compute_diffexp_limma_f_lf(df, groups, labels, control_idx=0) -> pd.DataFrame:
+    """limma moderated F-test across all groups, plus every pairwise contrast."""
+    keep = [i for i, g in enumerate(groups) if g]
+    if control_idx not in keep:
+        control_idx = keep[0]
+    cols, gvec = [], []
+    for k, gi in enumerate(keep):
+        for c in groups[gi]:
+            cols.append(c)
+            gvec.append(k)
+    others = [gi for gi in keep if gi != control_idx]
+    pairs = [(gi, control_idx) for gi in others]
+    pairs += [(others[b], others[a]) for a in range(len(others)) for b in range(a + 1, len(others))]
+
+    def _cm(pair_list):
+        C = np.zeros((len(keep), len(pair_list)))
+        for k, (num, den) in enumerate(pair_list):
+            C[keep.index(num), k] = 1.0
+            C[keep.index(den), k] = -1.0
+        return C
+
+    Y = _lf_values(df, cols)
+    gvec = np.array(gvec)
+    # Overall F from the non-redundant contrasts (as limma topTableF); pairs computed separately.
+    res = limma_group_test(Y, gvec, _cm(pairs[:len(others)]))
+    res_pairs = limma_group_test(Y, gvec, _cm(pairs))
+
+    out = df.copy()
+    for gi in keep:
+        out[labels[gi]] = out[list(groups[gi])].mean(axis=1)
+    out["AveExpr"] = res["AveExpr"]
+    out["F"] = res["F"]
+    out["p-value"] = res["F_p"]
+    out["q-value"] = _bh_adjust(out["p-value"].to_numpy())
+    out["Regulation"] = np.where(out["q-value"] < 0.05, "Significant", "Not Significant")
+    contrast_cols = []
+    for k, (num, den) in enumerate(pairs):
+        name = f"{labels[num]} vs {labels[den]}"
+        out[f"log2FC ({name})"] = res_pairs["logFC"][:, k]
+        out[f"q-value ({name})"] = _bh_adjust(res_pairs["p"][:, k])
+        contrast_cols += [f"log2FC ({name})", f"q-value ({name})"]
+    keep_cols = [c for c in _LF_META if c in out.columns] + [labels[gi] for gi in keep] + [
+        "AveExpr", "F", "p-value", "q-value", "Regulation"
+    ] + contrast_cols + list(dict.fromkeys(cols))
+    return out.sort_values("q-value", na_position="last")[keep_cols]
+
+
 def compute_diffexp_tp_lf(
     df: pd.DataFrame,
     control_cols: list[str],
     test_cols: list[str],
     control_label: str = "Control",
     test_label: str = "Test",
-    test_type: str = "Student's t-test (Independent, Equal Variance)",
-    do_zero_impute: bool = False,
-    zero_frac: float = 0.2,
-    do_presence_filter: bool = True,
-    presence_min_frac: float = 0.40,
-    presence_rule: str = "or",
+    test_type: str = "Welch's t-test (Independent, Unequal Variance)",
     min_n_per_group: int = 2,
-    batch_samples: list[list[str]] = None,
-    batch_method: str = "None"
 ) -> pd.DataFrame:
+    """Classical pairwise tests on the final log2 matrix.
+
+    Filtering, normalization, imputation and batch correction are done once in the
+    preprocessing step; this function only tests. (Older versions could re-impute and
+    re-batch-correct here on the wrong scale; that code was removed.)
+    """
     df = df.copy()
     ctrl = [c for c in control_cols if c in df.columns]
     test = [c for c in test_cols if c in df.columns]
     all_cols = list(dict.fromkeys(ctrl + test))
-    
     if not ctrl or not test:
         raise ValueError("Need at least 1 valid sample column in both control and test groups.")
     for c in all_cols:
         df[c] = pd.to_numeric(df[c], errors="coerce")
-    if do_presence_filter:
-        df = filter_by_presence_rule(
-            df=df, all_samples=all_cols, group_samples=[ctrl, test], 
-            min_frac=presence_min_frac, presence_rule=presence_rule
-        )
-    if do_zero_impute:
-        df = replace_zeros_rowwise_min_fraction(
-            df=df, sample_cols=all_cols, frac=zero_frac, replace_nan=True
-        )
-    for c in all_cols:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    # --- BATCH CORRECTION ---
-    if batch_method and batch_method != "None" and batch_samples:
-        tmp_vals = df[all_cols].astype(float)
-        tmp_vals[tmp_vals <= 0] = np.nan
-        tmp_log = np.log2(tmp_vals)
-        
-        corrected_log = apply_batch_correction(tmp_log, batch_samples, batch_method)
-        corrected_raw = (2 ** corrected_log).fillna(0)
-        df[all_cols] = corrected_raw
+
     df[control_label] = df[ctrl].mean(axis=1)
     df[test_label] = df[test].mean(axis=1)
-    
-    pseudo = 0.0
-    # Input abundances are already log2-transformed by the global preprocessing pipeline.
-    # Therefore log2 fold-change is the difference between group mean log2 abundances.
+    # Values are log2, so log2 fold-change = difference of group mean log2 abundances.
     df["log2FC"] = df[test_label] - df[control_label]
+
+    is_paired = "Paired" in test_type or "Wilcoxon" in test_type
+    if is_paired and len(ctrl) != len(test):
+        raise ValueError(f"{test_type} needs the same number of samples in both groups, matched in order.")
     pvals = []
-    is_paired = "Paired" in test_type
-    for i in range(len(df)):
-        row = df.iloc[i]
-        v1_raw = row[ctrl].astype(float).values
-        v2_raw = row[test].astype(float).values
+    for v1_raw, v2_raw in zip(df[ctrl].to_numpy(dtype=float), df[test].to_numpy(dtype=float)):
         if is_paired:
-            if len(v1_raw) == len(v2_raw):
-                mask = ~np.isnan(v1_raw) & ~np.isnan(v2_raw)
-                v1 = v1_raw[mask]
-                v2 = v2_raw[mask]
-            else:
-                v1, v2 = [], [] 
+            mask = ~np.isnan(v1_raw) & ~np.isnan(v2_raw)
+            v1, v2 = v1_raw[mask], v2_raw[mask]
         else:
-            v1 = v1_raw[~np.isnan(v1_raw)]
-            v2 = v2_raw[~np.isnan(v2_raw)]
+            v1, v2 = v1_raw[~np.isnan(v1_raw)], v2_raw[~np.isnan(v2_raw)]
+        pval = np.nan
         if len(v1) >= min_n_per_group and len(v2) >= min_n_per_group:
             try:
                 if test_type == "Student's t-test (Independent, Equal Variance)":
-                    pval = float(ttest_ind(v1, v2, equal_var=True, nan_policy="omit")[1])
+                    pval = float(ttest_ind(v1, v2, equal_var=True)[1])
                 elif test_type == "Welch's t-test (Independent, Unequal Variance)":
-                    pval = float(ttest_ind(v1, v2, equal_var=False, nan_policy="omit")[1])
+                    pval = float(ttest_ind(v1, v2, equal_var=False)[1])
                 elif test_type == "Paired t-test (Matched Samples)":
-                    pval = float(ttest_rel(v1, v2, nan_policy="omit")[1])
+                    pval = float(ttest_rel(v1, v2)[1])
                 elif test_type == "Mann-Whitney U (Non-parametric Independent)":
-                    pval = float(mannwhitneyu(v1, v2, nan_policy="omit")[1])
+                    pval = float(mannwhitneyu(v1, v2)[1])
                 elif test_type == "Wilcoxon Signed-Rank (Non-parametric Paired)":
-                    pval = float(wilcoxon(v1, v2, nan_policy="omit")[1])
-                else:
-                    pval = np.nan
+                    pval = float(wilcoxon(v1, v2)[1])
             except Exception:
                 pval = np.nan
-        else:
-            pval = np.nan
-            
         pvals.append(pval)
     df["p-value"] = pvals
-    df["q-value"] = multipletests(np.nan_to_num(df["p-value"], nan=1.0), method="fdr_bh")[1]
-    df["Regulation"] = "Not Significant"
-    df.loc[(df["q-value"] < 0.05) & (df["log2FC"] > 1), "Regulation"] = "Upregulated"
-    df.loc[(df["q-value"] < 0.05) & (df["log2FC"] < -1), "Regulation"] = "Downregulated"
-    regulation_order = {"Upregulated": 0, "Downregulated": 1, "Not Significant": 2}
-    df["__reg_sort__"] = df["Regulation"].map(regulation_order).fillna(3)
-    metadata_cols = ["RowID", "GeneID", "Genes", "Description", "Accession", "Master Protein Accessions"]
-    computed_cols = [control_label, test_label, "log2FC", "p-value", "q-value", "Regulation"]
-    keep_cols = [c for c in metadata_cols if c in df.columns] + computed_cols + all_cols
-    out = (
-        df.sort_values(by=["__reg_sort__", "q-value"], ascending=[True, True], na_position="last")
-          .drop(columns=["__reg_sort__"], errors="ignore")
-    )
+    # q-values only over proteins that were tested (untested proteins stay blank).
+    df["q-value"] = _bh_adjust(df["p-value"].to_numpy(dtype=float))
+    out = _sort_pairwise(df)
+    keep_cols = [c for c in _LF_META if c in out.columns] + [
+        control_label, test_label, "log2FC", "p-value", "q-value", "Regulation"
+    ] + all_cols
     return out[keep_cols]
+
+
 def compute_diffexp_anova_tp_lf(
     df: pd.DataFrame,
     group1_cols: list[str], group2_cols: list[str], group3_cols: list[str],
     group1_label: str = "Group1", group2_label: str = "Group2", group3_label: str = "Group3",
-    do_zero_impute: bool = False,
-    zero_frac: float = 0.2,
-    do_presence_filter: bool = True,
-    presence_min_frac: float = 0.40,
-    presence_rule: str = "or",
-    batch_samples: list[list[str]] = None,
-    batch_method: str = "None"
+    min_n_per_group: int = 2,
 ) -> pd.DataFrame:
+    """Classical one-way ANOVA across three groups on the final log2 matrix."""
     df = df.copy()
     g1 = [c for c in group1_cols if c in df.columns]
     g2 = [c for c in group2_cols if c in df.columns]
@@ -879,160 +1205,25 @@ def compute_diffexp_anova_tp_lf(
         raise ValueError("ANOVA requires 3 non-empty groups.")
     for c in all_cols:
         df[c] = pd.to_numeric(df[c], errors="coerce")
-    if do_presence_filter:
-        df = filter_by_presence_rule(
-            df=df, all_samples=all_cols, group_samples=[g1, g2, g3], 
-            min_frac=presence_min_frac, presence_rule=presence_rule
-        )
-    if do_zero_impute:
-        df = replace_zeros_rowwise_min_fraction(
-            df=df, sample_cols=all_cols, frac=zero_frac, replace_nan=True
-        )
-    for c in all_cols:
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    # --- BATCH CORRECTION ---
-    if batch_method and batch_method != "None" and batch_samples:
-        tmp_vals = df[all_cols].astype(float)
-        tmp_vals[tmp_vals <= 0] = np.nan
-        tmp_log = np.log2(tmp_vals)
-        
-        corrected_log = apply_batch_correction(tmp_log, batch_samples, batch_method)
-        corrected_raw = (2 ** corrected_log).fillna(0)
-        df[all_cols] = corrected_raw
     df[group1_label] = df[g1].mean(axis=1)
     df[group2_label] = df[g2].mean(axis=1)
     df[group3_label] = df[g3].mean(axis=1)
     pvals = []
-    for _, row in df.iterrows():
-        v1 = row[g1].dropna().astype(float).values
-        v2 = row[g2].dropna().astype(float).values
-        v3 = row[g3].dropna().astype(float).values
-        if len(v1) < 2 or len(v2) < 2 or len(v3) < 2:
+    for a, b, c in zip(df[g1].to_numpy(dtype=float), df[g2].to_numpy(dtype=float), df[g3].to_numpy(dtype=float)):
+        a, b, c = a[~np.isnan(a)], b[~np.isnan(b)], c[~np.isnan(c)]
+        if min(len(a), len(b), len(c)) < min_n_per_group:
             pvals.append(np.nan)
             continue
         try:
-            pvals.append(float(f_oneway(v1, v2, v3).pvalue))
+            pvals.append(float(f_oneway(a, b, c).pvalue))
         except Exception:
             pvals.append(np.nan)
     df["p-value"] = pvals
-    df["q-value"] = multipletests(df["p-value"].fillna(1.0), method="fdr_bh")[1]
+    df["q-value"] = _bh_adjust(df["p-value"].to_numpy(dtype=float))
     df["Regulation"] = np.where(df["q-value"] < 0.05, "Significant", "Not Significant")
-    metadata_cols = ["RowID", "GeneID", "Genes", "Description", "Accession", "Master Protein Accessions"]
     computed_cols = [group1_label, group2_label, group3_label, "p-value", "q-value", "Regulation"]
-    
-    keep_cols = [c for c in metadata_cols if c in df.columns] + computed_cols + all_cols
+    keep_cols = [c for c in _LF_META if c in df.columns] + computed_cols + all_cols
     return df.sort_values("q-value", na_position="last")[keep_cols]
-
-def create_static_volcano_plot_tp_lf(
-    res: pd.DataFrame,
-    gene_col_name: Optional[str],
-    metric: str,
-    alpha_thr: float,
-    fc_thresh: float,
-    top_n_annot: int = 0,
-):
-    """Create a static downloadable volcano plot for LFQ total proteomics.
-
-    The interactive Plotly volcano stays clean. This static figure is used only
-    for PNG/SVG downloads and can annotate the top N significant proteins.
-    """
-    plot_df = res.copy()
-    plot_df[metric] = pd.to_numeric(plot_df[metric], errors="coerce")
-    plot_df["log2FC"] = pd.to_numeric(plot_df["log2FC"], errors="coerce")
-    plot_df = plot_df.dropna(subset=["log2FC", metric]).copy()
-
-    plot_df["-log10(metric)"] = -np.log10(plot_df[metric].clip(lower=1e-300))
-
-    mask_up = (plot_df[metric] <= alpha_thr) & (plot_df["log2FC"] >= fc_thresh)
-    mask_down = (plot_df[metric] <= alpha_thr) & (plot_df["log2FC"] <= -fc_thresh)
-    mask_sig = mask_up | mask_down
-    mask_ns = ~mask_sig
-
-    fig, ax = plt.subplots(figsize=(8.5, 6.5))
-
-    ax.scatter(
-        plot_df.loc[mask_ns, "log2FC"],
-        plot_df.loc[mask_ns, "-log10(metric)"],
-        color="#bdbdbd",
-        alpha=0.55,
-        s=18,
-        label="Not Significant",
-    )
-    ax.scatter(
-        plot_df.loc[mask_up, "log2FC"],
-        plot_df.loc[mask_up, "-log10(metric)"],
-        color="#d62728",
-        alpha=0.85,
-        s=24,
-        label="Up regulated",
-    )
-    ax.scatter(
-        plot_df.loc[mask_down, "log2FC"],
-        plot_df.loc[mask_down, "-log10(metric)"],
-        color="#1f77b4",
-        alpha=0.85,
-        s=24,
-        label="Down regulated",
-    )
-
-    ax.axhline(-np.log10(alpha_thr), color="black", linestyle="--", linewidth=1)
-    #ax.axvline(fc_thresh, color="black", linestyle="--", linewidth=1)
-    #ax.axvline(-fc_thresh, color="black", linestyle="--", linewidth=1)
-
-    if top_n_annot and top_n_annot > 0 and gene_col_name and gene_col_name in plot_df.columns:
-        annot_df = plot_df.loc[mask_sig].copy()
-        if not annot_df.empty:
-            annot_df["abs_log2FC"] = annot_df["log2FC"].abs()
-            annot_df = annot_df.sort_values([metric, "abs_log2FC"], ascending=[True, False]).head(int(top_n_annot))
-
-            texts = []
-            x_span = max(float(plot_df["log2FC"].max() - plot_df["log2FC"].min()), 1.0)
-            y_span = max(float(plot_df["-log10(metric)"].max() - plot_df["-log10(metric)"].min()), 1.0)
-
-            for _, row in annot_df.iterrows():
-                label = str(row.get(gene_col_name, "")).strip()
-                if not label or label.lower() == "nan":
-                    continue
-                x = float(row["log2FC"])
-                y = float(row["-log10(metric)"])
-                dx = 0.015 * x_span if x >= 0 else -0.015 * x_span
-                dy = 0.015 * y_span
-                txt = ax.text(
-                    x + dx,
-                    y + dy,
-                    label,
-                    fontsize=8,
-                    fontweight="bold",
-                    color="black",
-                    ha="left" if x >= 0 else "right",
-                    va="bottom",
-                )
-                texts.append(txt)
-                ax.plot([x, x + dx], [y, y + dy], color="gray", linewidth=0.5, alpha=0.7)
-
-            if HAS_ADJUST_TEXT and texts:
-                adjust_text(texts, ax=ax, arrowprops=dict(arrowstyle="-", color="gray", lw=0.5, alpha=0.7))
-
-    #ax.set_title(f"Volcano Plot ({metric} < {alpha_thr}, |log2FC| > {fc_thresh})", fontweight="bold")
-    ax.set_xlabel(
-        fr"log$_2$ fold-change ({test_label}/{control_label})",
-        fontsize=12,
-        fontweight="bold"
-    )
-
-    ax.set_ylabel(
-        fr"$-$log$_{{10}}$ ({metric})",
-        fontsize=12,
-        fontweight="bold"
-    )
-   #ax.set_xlabel("log2 Fold-Change", fontweight="bold")
-   #ax.set_ylabel(f"-log10({metric})", fontweight="bold")
-    ax.grid(False)
-    ax.legend(frameon=False, fontsize=8, loc="upper right")
-    for spine in ["top", "right"]:
-        ax.spines[spine].set_visible(False)
-    fig.tight_layout()
-    return fig
 
 def _figure_to_bytes_tp_lf(fig, fmt: str, dpi: int = 300) -> bytes:
     """
@@ -1046,164 +1237,6 @@ def _figure_to_bytes_tp_lf(fig, fmt: str, dpi: int = 300) -> bytes:
     else:
         fig.savefig(buf, format="png", dpi=dpi, bbox_inches="tight")
     return buf.getvalue()
-
-
-def add_figure_download_buttons_tp_lf(fig, base_filename: str, key_suffix: str = "", include_pdf: bool = True):
-    """
-    Desktop-safe figure export buttons. Files are saved directly to the user's
-    Downloads folder, which is more reliable for packaged Streamlit apps.
-    """
-    if fig is None:
-        return
-
-    if not key_suffix:
-        key_suffix = str(uuid.uuid4())[:8]
-
-    base_filename = _safe_download_filename(base_filename)
-    png_bytes = _figure_to_bytes_tp_lf(fig, "png")
-    svg_bytes = _figure_to_bytes_tp_lf(fig, "svg")
-    pdf_bytes = _figure_to_bytes_tp_lf(fig, "pdf") if include_pdf else None
-
-    cols = st.columns(3 if include_pdf else 2)
-
-    with cols[0]:
-        if st.button(
-            "Download PNG",
-            key=f"save_png_{base_filename}_{key_suffix}",
-            use_container_width=True,
-            help="Save PNG directly to your local Downloads folder."
-        ):
-            try:
-                outpath = _save_bytes_to_downloads(png_bytes, f"{base_filename}.png")
-                st.success(f"Saved PNG to: {outpath}")
-            except Exception as e:
-                st.error(f"Could not save PNG: {e}")
-
-    with cols[1]:
-        if st.button(
-            "Download SVG",
-            key=f"save_svg_{base_filename}_{key_suffix}",
-            use_container_width=True,
-            help="Save SVG directly to your local Downloads folder."
-        ):
-            try:
-                outpath = _save_bytes_to_downloads(svg_bytes, f"{base_filename}.svg")
-                st.success(f"Saved SVG to: {outpath}")
-            except Exception as e:
-                st.error(f"Could not save SVG: {e}")
-
-    if include_pdf:
-        with cols[2]:
-            if st.button(
-                "Download PDF",
-                key=f"save_pdf_{base_filename}_{key_suffix}",
-                use_container_width=True,
-                help="Save PDF directly to your local Downloads folder."
-            ):
-                try:
-                    outpath = _save_bytes_to_downloads(pdf_bytes, f"{base_filename}.pdf")
-                    st.success(f"Saved PDF to: {outpath}")
-                except Exception as e:
-                    st.error(f"Could not save PDF: {e}")
-
-
-def add_plotly_html_download_button_tp_lf(fig, base_filename: str, key_suffix: str = ""):
-    """
-    Save an interactive Plotly figure as a self-contained HTML file.
-    """
-    if fig is None:
-        return
-    if not key_suffix:
-        key_suffix = str(uuid.uuid4())[:8]
-    base_filename = _safe_download_filename(base_filename)
-    try:
-        html_bytes = fig.to_html(include_plotlyjs="cdn", full_html=True).encode("utf-8")
-    except Exception as e:
-        st.warning(f"Could not prepare interactive HTML export: {e}")
-        return
-
-    if st.button(
-        "Download Interactive HTML",
-        key=f"save_html_{base_filename}_{key_suffix}",
-        use_container_width=True,
-        help="Save the interactive Plotly figure to your local Downloads folder."
-    ):
-        try:
-            outpath = _save_bytes_to_downloads(html_bytes, f"{base_filename}.html")
-            st.success(f"Saved HTML to: {outpath}")
-        except Exception as e:
-            st.error(f"Could not save HTML: {e}")
-
-
-def create_static_ma_plot_tp_lf(
-    res: pd.DataFrame,
-    gene_col_name: Optional[str],
-    metric: str,
-    alpha_thr: float,
-    fc_thresh: float,
-    mean_cols: list,
-    top_n_annot: int = 0,
-):
-    """Create a static MA plot with optional top significant labels."""
-    plot_df = res.copy()
-    plot_df[metric] = pd.to_numeric(plot_df[metric], errors="coerce")
-    plot_df["log2FC"] = pd.to_numeric(plot_df["log2FC"], errors="coerce")
-    for c in mean_cols:
-        plot_df[c] = pd.to_numeric(plot_df[c], errors="coerce")
-    plot_df["Average_Intensity"] = plot_df[mean_cols].mean(axis=1)
-    plot_df = plot_df.dropna(subset=["Average_Intensity", "log2FC", metric]).copy()
-
-    sig_mask = (plot_df[metric] <= alpha_thr) & (plot_df["log2FC"].abs() >= fc_thresh)
-
-    fig, ax = plt.subplots(figsize=(8, 6))
-    ax.scatter(
-        plot_df.loc[~sig_mask, "Average_Intensity"],
-        plot_df.loc[~sig_mask, "log2FC"],
-        alpha=0.35,
-        color="#a9a9a9",
-        s=20,
-        label="Not Significant",
-    )
-    ax.scatter(
-        plot_df.loc[sig_mask, "Average_Intensity"],
-        plot_df.loc[sig_mask, "log2FC"],
-        alpha=0.85,
-        color="#d62728",
-        s=24,
-        label="Significant",
-    )
-    ax.axhline(0, color="black", lw=1)
-    ax.axhline(fc_thresh, color="gray", linestyle="--", linewidth=0.9)
-    ax.axhline(-fc_thresh, color="gray", linestyle="--", linewidth=0.9)
-
-    if top_n_annot > 0 and gene_col_name and gene_col_name in plot_df.columns:
-        annot_df = plot_df.loc[sig_mask].sort_values(metric).head(int(top_n_annot))
-        texts = []
-        for _, row in annot_df.iterrows():
-            label = str(row.get(gene_col_name, "")).strip()
-            if not label or label.lower() == "nan":
-                continue
-            txt = ax.text(
-                row["Average_Intensity"],
-                row["log2FC"],
-                label,
-                fontsize=8,
-                fontweight="bold",
-                color="black",
-            )
-            texts.append(txt)
-        if HAS_ADJUST_TEXT and texts:
-            adjust_text(texts, ax=ax, arrowprops=dict(arrowstyle="-", color="black", lw=0.5, alpha=0.6))
-
-    ax.set_title("MA Plot", fontweight="bold")
-    ax.set_xlabel("Average Intensity (Log2)", fontweight="bold")
-    ax.set_ylabel("Log2 Fold Change", fontweight="bold")
-    ax.grid(False)
-    ax.legend(frameon=False, fontsize=8, loc="best")
-    for spine in ["top", "right"]:
-        ax.spines[spine].set_visible(False)
-    fig.tight_layout()
-    return fig, plot_df
 
 
 def _p_to_star_label(pval: float) -> str:
@@ -1762,13 +1795,15 @@ def render_sidebar_controls_lf():
         st.caption("Use this example file to see the required formatting and test the workflow.")
 
         script_dir = Path(__file__).resolve().parent
-        example_path = script_dir / "assets" / "example" / "TPLF" / "Protein_abundance_LFQ.csv"
+        example_dir = script_dir / "assets" / "example" / "TPLF"
+        example_path = next((example_dir / n for n in ["Protein_abundance_LFQ.csv", "Protein_abundance_LFQ.xlsx"]
+                             if (example_dir / n).exists()), None)
 
-        if example_path.exists():
+        if example_path is not None:
             add_bytes_download_button_tp_lf(
-                label="Download Protein_abundance_LFQ.csv",
+                label=f"Download {example_path.name}",
                 data=example_path.read_bytes(),
-                filename="Protein_abundance_LFQ_example.csv",
+                filename=f"{example_path.stem}_example{example_path.suffix}",
                 key="dl_ex_tp_lf",
                 help_text="Download a sample LFQ dataset to test the workflow.",
             )
@@ -1826,7 +1861,12 @@ def add_gene_id_and_row_id_lf(raw_df: pd.DataFrame) -> pd.DataFrame:
                 "Accession",
                 "Master Protein Accessions",
                 "Protein ID",
-                "Protein.IDs"
+                "Protein.IDs",
+                "Protein IDs",            # MaxQuant proteinGroups.txt
+                "Majority protein IDs",   # MaxQuant
+                "Protein.Group",          # DIA-NN pg_matrix
+                "Protein.Ids",            # DIA-NN
+                "Protein",                # FragPipe combined_protein.tsv
             ]
             if c in raw_df.columns
         ),
@@ -1887,13 +1927,21 @@ def detect_lfq_numeric_columns(df: pd.DataFrame) -> list:
 
 
 def make_pretty_lfq_labels(numeric_cols: list) -> dict:
-    """Create unique display labels for LFQ sample columns."""
+    """Create unique display labels for LFQ sample columns.
+
+    The pre-selected LFQ columns get the short names (e.g. 'Ctrl_1'). When another
+    column would shorten to the same name (MaxQuant 'Intensity Ctrl_1' next to
+    'LFQ intensity Ctrl_1'), it keeps its full column name instead.
+    """
+    preferred = suggest_default_lfq_samples(numeric_cols)
+    ordered = list(preferred) + [c for c in numeric_cols if c not in set(preferred)]
     pretty_labels = {}
     used_labels = set()
 
-    for col in numeric_cols:
+    for col in ordered:
         base_label = clean_lfq_sample(col)
-
+        if base_label in used_labels and str(col) not in used_labels:
+            base_label = str(col)
         if base_label in used_labels:
             i = 2
             new_label = f"{base_label} [{i}]"
@@ -1905,7 +1953,7 @@ def make_pretty_lfq_labels(numeric_cols: list) -> dict:
         used_labels.add(base_label)
         pretty_labels[col] = base_label
 
-    return pretty_labels
+    return {c: pretty_labels[c] for c in numeric_cols}
 
 
 def is_downstream_active_lf() -> bool:
@@ -1969,77 +2017,48 @@ def reset_overview_flags_lf():
 
 
 def render_navigation_buttons_lf():
-    """Render the four main workflow navigation buttons and update panel state."""
+    """Render the four main workflow buttons and the step guide below them."""
     c1, c2, c3, c4 = st.columns(4)
+    panels = [
+        (c1, "show_global_select", "btn_global_select", "Data Filtering & Group Specification",
+         "Assign samples to biological groups and set a control/baseline."),
+        (c2, "show_overview", "btn_overview", "Preprocessing, QC & Batch Correction",
+         "Normalize, impute, review QC, and optionally correct technical batch effects."),
+        (c3, "show_suite", "btn_suite", "Statistical Analysis Suite",
+         "Perform differential protein abundance testing and visualize results (Volcano, Heatmaps, etc.)."),
+        (c4, "show_report", "btn_report", "Results Download",
+         "Compile and export a comprehensive PDF report and ZIP bundle of your analysis."),
+    ]
+    all_keys = [p[1] for p in panels]
 
-    if c1.button(
-        ("▸ " if not ss["show_global_select"] else "▾ ") + "Data Filtering & Group Specification",
-        use_container_width=True,
-        key="btn_global_select",
-        help="Assign samples to biological groups and set a control/baseline."
-    ):
-        ss["show_global_select"] = not ss["show_global_select"]
-        if ss["show_global_select"]:
-            ss["show_overview"] = False
-            ss["show_suite"] = False
-            ss["show_report"] = False
+    def _toggle(state_key):
+        # Runs as a callback, before the page is redrawn, so the arrow label always
+        # matches the open panel. Toggling inside "if st.button(...)" changed the
+        # label one run late, and Streamlit then dropped the next click.
+        if ss.get(state_key):
+            ss[state_key] = False
+            return
+        for k in all_keys:
+            ss[k] = (k == state_key)
+        if state_key != "show_overview":
             reset_overview_flags_lf()
 
-    if c2.button(
-        ("▸ " if not ss["show_overview"] else "▾ ") + "Preprocessing, QC & Batch Correction",
-        use_container_width=True,
-        key="btn_overview",
-        help="Normalize, impute, review QC, and optionally correct technical batch effects."
-    ):
-        ss["show_overview"] = not ss["show_overview"]
-        if ss["show_overview"]:
-            ss["show_suite"] = False
-            ss["show_global_select"] = False
-            ss["show_report"] = False
+    for col, state_key, button_key, label, help_text in panels:
+        prefix = "▾ " if ss.get(state_key) else "▸ "
+        col.button(prefix + label, use_container_width=True, key=button_key, help=help_text,
+                   on_click=_toggle, args=(state_key,))
 
-    if c3.button(
-        ("▸ " if not ss["show_suite"] else "▾ ") + "Statistical Analysis Suite",
-        use_container_width=True,
-        key="btn_suite",
-        help="Perform differential protein abundance testing and visualize results (Volcano, Heatmaps, etc.)."
-    ):
-        ss["show_suite"] = not ss["show_suite"]
-        if ss["show_suite"]:
-            ss["show_overview"] = False
-            ss["show_global_select"] = False
-            ss["show_report"] = False
-
-    if c4.button(
-        ("▸ " if not ss["show_report"] else "▾ ") + "Results Download",
-        use_container_width=True,
-        key="btn_report",
-        help="Compile and export a comprehensive PDF report and ZIP bundle of your analysis."
-    ):
-        ss["show_report"] = not ss["show_report"]
-        if ss["show_report"]:
-            ss["show_overview"] = False
-            ss["show_global_select"] = False
-            ss["show_suite"] = False
-
+    n_ready = sum(1 for g in (ss.get("global_group_samples") or []) if g)
+    prepped = ss.get("preprocessing_applied", False) and not ss.get("preprocessing_dirty", False)
+    done = ss.get("diff_results") is not None
+    c1.caption(f"Step 1 · :green[✓ {n_ready} groups defined]" if n_ready >= 2
+               else "Step 1 · Start here: assign samples to at least 2 groups")
+    c2.caption(f"Step 2 · :green[✓ {ss.get('imputation_applied_method', '')}]" if prepped
+               else ("Step 2 · Run normalization + imputation" if n_ready >= 2 else "Step 2 · Needs groups from step 1"))
+    c3.caption(f"Step 3 · :green[✓ {str(ss.get('stat_method_label', 'Statistics done')).split(':')[0]}]" if done
+               else ("Step 3 · Ready to run statistics" if prepped else "Step 3 · Needs the processed matrix from step 2"))
+    c4.caption("Step 4 · PDF report and ZIP of tables and figures" if done else "Step 4 · Available after statistics")
     st.markdown("<br>", unsafe_allow_html=True)
-
-
-def get_pairwise_group_labels_lf() -> tuple[str, str]:
-    """Return the active test/control labels for pairwise plots."""
-    labels = ss.get("global_group_labels", [])
-    control_idx = ss.get("global_control_group_idx", 0)
-
-    control_label = labels[control_idx] if 0 <= control_idx < len(labels) else "Control"
-    test_idx = 1 if control_idx == 0 else 0
-    test_label = labels[test_idx] if 0 <= test_idx < len(labels) else "Test"
-
-    return control_label, test_label
-
-
-def make_pairwise_sig_mask_lf(res: pd.DataFrame, metric: str, alpha_thr: float, fc_thresh: float) -> pd.Series:
-    """Build the common significance mask used by pairwise LFQ plots."""
-    return (res[metric] <= alpha_thr) & (res["log2FC"].abs() >= fc_thresh)
-
 
 
 # -----------------------------------------------------------------------------
@@ -2147,25 +2166,6 @@ def create_interactive_ma_plot_tp_lf(
         control_label=control_label,
         test_label=test_label,
         show_title=False,
-    )
-
-
-def add_figure_download_buttons_tp_lf(fig, base_filename: str, key_suffix: str = "", include_pdf: bool = True):
-    return add_figure_download_buttons_common(
-        fig=fig,
-        base_filename=base_filename,
-        key_suffix=key_suffix,
-        include_pdf=include_pdf,
-        save_to_downloads=True,
-    )
-
-
-def add_plotly_html_download_button_tp_lf(fig, base_filename: str, key_suffix: str = ""):
-    return add_plotly_html_download_button_common(
-        fig=fig,
-        base_filename=base_filename,
-        key_suffix=key_suffix,
-        save_to_downloads=True,
     )
 
 
@@ -2484,6 +2484,7 @@ def add_plotly_html_download_button_tp_lf(
 
 def main():
     init_session_state_defaults()
+    ss["report_analysis_type"] = "Total Proteomics (label-free)"
 
     file = render_sidebar_controls_lf()
     handle_file_change_lf(file)
@@ -2499,7 +2500,7 @@ def main():
     if df is None:
         return
 
-    
+
     numeric_cols = detect_lfq_numeric_columns(df)
 
     if not numeric_cols:
@@ -2526,11 +2527,13 @@ def main():
             with st.container(border=True):
                 st.markdown("#### Define Experimental Groups")
                 if "global_sample_cols_ui" not in ss:
-                    default_samples = ss.get("global_sample_cols") or numeric_cols
+                    default_samples = ss.get("global_sample_cols") or suggest_default_lfq_samples(numeric_cols)
                     ss["global_sample_cols_ui"] = _sanitize(default_samples, numeric_cols)
                 ss["global_sample_cols_ui"] = _sanitize(ss["global_sample_cols_ui"], numeric_cols)
                 sample_cols = st.multiselect(
                     "Active LFQ Samples",
+                    help="Intensity columns to analyse. When the table has LFQ columns (MaxQuant 'LFQ intensity', "
+                         "FragPipe 'MaxLFQ Intensity') only those are pre-selected.",
                     options=numeric_cols,
                     format_func=lambda x: pretty_labels.get(x, x),
                     key="global_sample_cols_ui",
@@ -2657,14 +2660,14 @@ def main():
                         grp_name = "Unassigned"
                         grp_num = None
                         is_ctrl = False
-                        
+
                         for i, g_cols in enumerate(ss.get("global_group_samples", [])):
                             if c in g_cols:
                                 grp_name = ss["global_group_labels"][i] if i < len(ss["global_group_labels"]) else f"Group{i+1}"
                                 grp_num = i + 1
                                 is_ctrl = (ss.get("global_control_group_idx") is not None and i == ss["global_control_group_idx"])
                                 break
-                                
+
                         batch_name = "N/A"
                         if ss.get("enable_batch_correction", False):
                             batch_name = "Unassigned"
@@ -2673,7 +2676,7 @@ def main():
                                     labels_tmp = ss.get("global_batch_labels", [])
                                     batch_name = labels_tmp[j] if j < len(labels_tmp) else f"Batch {j+1}"
                                     break
-                                
+
                         rows.append({
                             "Column": c,
                             "Sample": pretty_labels.get(c, c),
@@ -2682,10 +2685,10 @@ def main():
                             "Batch": batch_name,
                             "Is_Reference": is_ctrl
                         })
-                    
+
                     meta_df = pd.DataFrame(rows)
                     assigned_df = meta_df[meta_df["Group"] != "Unassigned"].copy()
-                    
+
                     if assigned_df.empty:
                         st.info("No selected samples are assigned to a group yet.")
                     else:
@@ -2704,8 +2707,12 @@ def main():
         ]
         all_pretty_samples = [pretty_labels.get(c, c) for c in ss["global_all_groups"]]
 
+        contam_mask, contam_desc = detect_contaminants_lf(df)
+        n_contam = int(contam_mask.sum())
+        drop_contam = n_contam > 0 and bool(_setting("pre_drop_contaminants", True))
+        src_df = df.loc[~contam_mask] if drop_contam else df
         expr_raw_current = (
-            df[["RowID"] + ss["global_all_groups"]]
+            src_df[["RowID"] + ss["global_all_groups"]]
             .groupby("RowID")
             .mean()
             .apply(pd.to_numeric, errors="coerce")
@@ -2716,53 +2723,87 @@ def main():
         with st.container(border=True):
             st.markdown("#### Step 1 — Normalize and Impute LFQ Matrix")
             st.caption(
-                "Preprocessing is performed once here and the resulting matrix is reused by QC, optional batch "
-                "correction, and differential analysis. No second hidden imputation is performed during statistics."
+                "Preprocessing is done once here. QC, batch correction and statistics all use this matrix; "
+                "statistics never re-impute or re-normalize."
             )
 
-            with st.expander("Preprocessing definitions and NAguideR integration", expanded=False):
-                st.markdown("""
-                - **0 → NA:** zeros in LFQ intensity matrices usually represent non-detection rather than measured zero abundance.
-                - **Presence filtering:** removes very sparse proteins before imputation.
-                - **Log2:** stabilizes variance and makes differences in group means interpretable as log2 fold-changes.
-                - **Normalization:** median or mean centering aligns sample-level distributions on the log2 scale.
-                - **NAguideR imputation:** all 23 NAguideR methods are available through an Rscript backend.
-                - **Batch correction:** is deliberately performed only after preprocessing and QC.
-                """)
+            with st.expander("Help: what each step does, and which imputation to pick", expanded=False):
+                st.markdown(
+                    "**Order:** remove contaminants → 0 becomes missing → drop sparse proteins → log2 → "
+                    "normalize → impute missing values. Batch correction (step 3) comes after QC.\n\n"
+                    "- **0 → missing:** in LFQ tables a 0 means *not detected*, not *zero protein*.\n"
+                    "- **Drop sparse proteins:** proteins measured in too few samples cannot be tested reliably "
+                    "and make imputation guess most of their values.\n"
+                    "- **log2:** makes intensities roughly normal and turns ratios into differences, so log2FC = "
+                    "mean log2(test) − mean log2(reference).\n"
+                    "- **Normalization:** shifts each sample so the sample medians (or means) line up. It corrects "
+                    "for different loading or instrument response.\n"
+                    "- **Imputation:** fills the remaining missing values. The method you pick is the method that runs.\n\n"
+                    "**Choosing an imputation method**\n\n"
+                    "| Your situation | Good choices |\n"
+                    "|---|---|\n"
+                    "| Missing values are mostly low-abundance proteins (typical for DDA label-free) | "
+                    "Perseus (PI), MinProb, MinDet, QRILC, 1/5 minimum |\n"
+                    "| Missing values look random (often DIA data, or few missing values) | "
+                    "KNN, BPCA, SVD, LLS, RF (need R) |\n"
+                    "| You will use limma and prefer not to invent values | None — limma uses only measured values |\n\n"
+                    "Methods marked **built-in** run inside this app. Methods marked **needs R** run the NAguideR "
+                    "code in R; they work in the Windows/macOS/Docker builds, which ship R, but not on a server "
+                    "without R. The bar chart below shows which situation your data is in."
+                )
+                profile = missingness_profile_lfq(expr_raw_current)
+                if profile is not None:
+                    pc1, pc2 = st.columns([0.45, 0.55])
+                    with pc1:
+                        fig_m, ax_m = plt.subplots(figsize=(4.6, 2.4))
+                        ax_m.bar(profile["Intensity group"], profile["% missing"], color="#6b8fb5")
+                        ax_m.set_ylabel("% missing", fontsize=8, fontweight="normal")
+                        ax_m.set_xlabel("Proteins grouped by mean intensity", fontsize=8, fontweight="normal")
+                        ax_m.tick_params(axis="both", labelsize=7)
+                        for _lbl in ax_m.get_xticklabels() + ax_m.get_yticklabels():
+                            _lbl.set_fontweight("normal")
+                        sns.despine(ax=ax_m)
+                        fig_m.tight_layout()
+                        st.pyplot(fig_m)
+                        plt.close(fig_m)
+                    with pc2:
+                        st.info(missingness_verdict_lfq(profile))
 
             pcol1, pcol2, pcol3 = st.columns(3, gap="large")
             with pcol1:
-                pre_zero = st.checkbox(
-                    "Treat 0 as missing (NA)",
-                    value=bool(ss.get("pre_treat_zero", True)),
-                    key="pre_treat_zero",
-                )
+                if n_contam:
+                    drop_contam = st.checkbox(
+                        f"Remove contaminants/decoys ({n_contam:,} rows)",
+                        key=_pw("pre_drop_contaminants", True),
+                        help="Rows flagged by the search engine: " + contam_desc,
+                    )
+                    ss["pre_drop_contaminants"] = bool(drop_contam)
+                pre_zero = st.checkbox("Treat 0 as missing (NA)", key=_pw("pre_treat_zero", True))
+                ss["pre_treat_zero"] = bool(pre_zero)
                 pre_presence_filter = st.checkbox(
-                    "Filter sparse proteins before imputation",
-                    value=bool(ss.get("pre_presence_filter", True)),
-                    key="pre_presence_filter",
+                    "Filter sparse proteins before imputation", key=_pw("pre_presence_filter", True)
                 )
+                ss["pre_presence_filter"] = bool(pre_presence_filter)
+                rule_labels = {
+                    "OR: total samples OR one group": "or",
+                    "Total samples only": "all_only",
+                    "At least one group only": "group_only",
+                    "AND: total samples AND one group": "and",
+                }
                 if pre_presence_filter:
                     presence_min_frac = st.slider(
-                        "Presence threshold",
-                        0.05, 1.00,
-                        float(ss.get("pre_presence_min_frac", 0.40)),
-                        0.05,
-                        key="pre_presence_min_frac",
+                        "Presence threshold", 0.05, 1.00, step=0.05,
+                        key=_pw("pre_presence_min_frac", 0.40),
+                        help="Fraction of samples (or of one group's samples) that must have a measured value.",
                     )
-                    rule_labels = {
-                        "OR: total samples OR one group": "or",
-                        "Total samples only": "all_only",
-                        "At least one group only": "group_only",
-                        "AND: total samples AND one group": "and",
-                    }
-                    current_rule_key = ss.get("pre_presence_rule", "or")
-                    default_rule_label = next((k for k, v in rule_labels.items() if v == current_rule_key), list(rule_labels)[0])
+                    ss["pre_presence_min_frac"] = float(presence_min_frac)
+                    rule_from_key = {v: k for k, v in rule_labels.items()}
+                    if "_w_pre_presence_rule" not in ss:
+                        ss["_w_pre_presence_rule"] = rule_from_key.get(ss.get("pre_presence_rule", "or"), list(rule_labels)[0])
                     presence_rule_label = st.selectbox(
-                        "Presence rule",
-                        list(rule_labels.keys()),
-                        index=list(rule_labels.keys()).index(default_rule_label),
-                        key="pre_presence_rule_ui",
+                        "Presence rule", list(rule_labels.keys()), key="_w_pre_presence_rule",
+                        help="'At least one group' keeps proteins seen in one condition but absent in another "
+                             "(often the most interesting ones).",
                     )
                     presence_rule_key = rule_labels[presence_rule_label]
                     ss["pre_presence_rule"] = presence_rule_key
@@ -2772,88 +2813,133 @@ def main():
 
             with pcol2:
                 pre_log2 = st.checkbox(
-                    "Log2 transform",
-                    value=bool(ss.get("pre_log2", True)),
-                    key="pre_log2",
-                    help="Keep this enabled for differential analysis and batch correction.",
+                    "Log2 transform", key=_pw("pre_log2", True),
+                    help="Keep this on. Statistics and batch correction need log2 values.",
                 )
+                ss["pre_log2"] = bool(pre_log2)
                 normalization_options = ["None", "Median centering (log2)", "Mean centering (log2)"]
-                previous_norm = ss.get("pre_normalization_method", "Median centering (log2)")
-                if previous_norm not in normalization_options:
-                    previous_norm = "Median centering (log2)"
                 normalization_method = st.selectbox(
-                    "Normalization method",
-                    normalization_options,
-                    index=normalization_options.index(previous_norm),
-                    key="pre_normalization_method",
+                    "Normalization method", normalization_options,
+                    key=_pw("pre_normalization_method", "Median centering (log2)", normalization_options),
                     disabled=not pre_log2,
+                    help="Median centering is the safer default: it is not pulled by a few very bright proteins.",
                 )
+                ss["pre_normalization_method"] = normalization_method
                 if not pre_log2:
                     normalization_method = "None"
-                    st.warning("Normalization and downstream differential analysis are designed for log2 LFQ values.")
+                    st.warning("Normalization and statistics need log2 values. Turn log2 back on before testing.")
 
             with pcol3:
-                family_options = ["All methods", "Single value", "Global structure", "Local similarity"]
-                previous_family = ss.get("pre_imputation_family", "All methods")
-                if previous_family not in family_options:
-                    previous_family = "All methods"
+                family_options = [BUILTIN_FAMILY, "All methods", "Single value", "Global structure", "Local similarity"]
                 imputation_family = st.selectbox(
-                    "NAguideR method family",
-                    family_options,
-                    index=family_options.index(previous_family),
-                    key="pre_imputation_family",
+                    "Show imputation methods", family_options,
+                    key=_pw("pre_imputation_family", "All methods", family_options),
+                    help="Filter the list below. NAguideR groups methods into single-value, global-structure and "
+                         "local-similarity families.",
                 )
+                ss["pre_imputation_family"] = imputation_family
                 filtered_methods = [
-                    m["label"] for m in NAGUIDER_METHODS
-                    if imputation_family == "All methods" or m["family"] == imputation_family
+                    m["label"] for m in IMPUTATION_METHODS
+                    if imputation_family == "All methods"
+                    or (imputation_family == BUILTIN_FAMILY and m["engine"] == "python")
+                    or m["family"] == imputation_family
                 ]
-                imputation_options = ["None (leave missing values)"] + filtered_methods
-                previous_imp = ss.get("pre_imputation_method", "K-nearest neighbor (KNN)")
-                if previous_imp not in imputation_options:
-                    previous_imp = imputation_options[1] if len(imputation_options) > 1 else imputation_options[0]
+                imputation_options = [IMPUTE_NONE] + filtered_methods
+                current_imp = ss.get("_w_pre_imputation_method", ss.get("pre_imputation_method", DEFAULT_IMPUTATION_METHOD))
+                if current_imp not in imputation_options and current_imp in IMPUTATION_BY_LABEL:
+                    # Keep the user's choice visible even when the family filter would hide it.
+                    imputation_options.insert(1, current_imp)
+                r_base_ok, r_base_msg = r_backend_available_lfq()
+
+                def _imp_fmt(label):
+                    m = IMPUTATION_BY_LABEL.get(label)
+                    if not m:
+                        return label
+                    if m["engine"] == "python":
+                        return f"{label}  · built-in"
+                    return f"{label}  · needs R" + ("" if r_base_ok else " (R not found)")
+
                 imputation_method = st.selectbox(
-                    "Missing-value imputation",
-                    imputation_options,
-                    index=imputation_options.index(previous_imp),
-                    key="pre_imputation_method",
+                    "Missing-value imputation", imputation_options,
+                    key=_pw("pre_imputation_method", DEFAULT_IMPUTATION_METHOD, imputation_options),
+                    format_func=_imp_fmt,
+                    help="The method you pick here is the one that runs. See the help above.",
                 )
-                if imputation_method != "None (leave missing values)":
-                    mmeta = NAGUIDER_BY_LABEL[imputation_method]
+                ss["pre_imputation_method"] = imputation_method
+                mmeta = IMPUTATION_BY_LABEL.get(imputation_method)
+                if mmeta:
                     st.caption(
-                        f"Family: {mmeta['family']} · Speed: {mmeta['speed']} · "
-                        f"R package: {mmeta['package'] or 'base R / NAguideR logic'}"
+                        f"{mmeta['help']}  \n"
+                        f"Runs: **{imputation_engine_text(imputation_method)}** · Speed: {mmeta['speed']} · "
+                        f"Suited when missing = {mmeta['assumes']}"
                     )
+                else:
+                    st.caption("Missing values stay missing. limma and the t-tests use only measured values; "
+                               "PCA and heatmaps fill them temporarily for drawing only. ComBat needs a complete matrix.")
 
             pi_width = 0.3
             pi_downshift = 1.8
             rf_ntree = 20
             if imputation_method == "Perseus imputation (PI)":
-                acol1, acol2 = st.columns(2)
+                acol1, acol2, _ = st.columns([1, 1, 2])
                 with acol1:
-                    pi_width = st.number_input("PI width", min_value=0.01, max_value=2.0, value=0.3, step=0.05)
+                    pi_width = st.number_input("PI width (x SD)", min_value=0.01, max_value=2.0, step=0.05,
+                                               key=_pw("pre_pi_width", 0.3))
+                    ss["pre_pi_width"] = float(pi_width)
                 with acol2:
-                    pi_downshift = st.number_input("PI downshift", min_value=0.0, max_value=5.0, value=1.8, step=0.1)
+                    pi_downshift = st.number_input("PI downshift (x SD)", min_value=0.0, max_value=5.0, step=0.1,
+                                                   key=_pw("pre_pi_downshift", 1.8))
+                    ss["pre_pi_downshift"] = float(pi_downshift)
             elif imputation_method == "Random forest (RF)":
-                rf_ntree = st.number_input("RF number of trees", min_value=10, max_value=1000, value=20, step=10)
+                acol1, _ = st.columns([1, 3])
+                with acol1:
+                    rf_ntree = st.number_input("RF number of trees", min_value=10, max_value=1000, step=10,
+                                               key=_pw("pre_rf_ntree", 20))
+                    ss["pre_rf_ntree"] = int(rf_ntree)
+
+            # Is the selected method able to run here?
+            method_ready, method_msg = True, ""
+            if mmeta and mmeta["engine"] == "R":
+                if not r_base_ok:
+                    method_ready = False
+                    method_msg = (
+                        f"**{imputation_method}** needs R, and R was not found here ({r_base_msg}). "
+                        "Pick a **built-in** method (for example Perseus (PI), MinProb or the 1/5 minimum rule), "
+                        "or run this method in the Windows/macOS/Docker build, which includes R."
+                    )
+                else:
+                    method_ready, detail = r_method_status_lfq(imputation_method)
+                    if not method_ready:
+                        method_msg = (
+                            f"R was found, but **{imputation_method}** cannot run: the R package "
+                            f"'{mmeta['package']}' is not installed. Pick another method, or install the package "
+                            f"(install_naguider_r_dependencies.R).\n\nDetails: {detail[-600:]}"
+                        )
 
             setup_col, run_col = st.columns([0.35, 0.65])
             with setup_col:
-                if st.button("Check R / NAguideR Setup", use_container_width=True, key="check_naguider_r_lfq"):
-                    ok, msg = check_naguider_r_environment_lfq(
-                        None if imputation_method == "None (leave missing values)" else imputation_method
-                    )
-                    (st.success if ok else st.error)(msg)
+                if mmeta and mmeta["engine"] == "R":
+                    if st.button("Re-check R setup", use_container_width=True, key="check_naguider_r_lfq",
+                                 help="Run the R package check again (for example after installing a package)."):
+                        ok, msg = r_method_status_lfq(imputation_method, refresh=True)
+                        method_ready = ok
+                        (st.success if ok else st.error)(msg)
+                    elif method_ready:
+                        st.caption(":green[R and the required package are ready.]")
             with run_col:
                 run_preprocessing = st.button(
                     "Run Normalization + Imputation",
                     type="primary",
                     use_container_width=True,
                     key="run_preprocessing_lfq",
+                    disabled=not method_ready,
                 )
+            if not method_ready:
+                st.warning(method_msg)
 
             preprocessing_signature = (
                 tuple(ss.get("global_all_groups", [])),
-                bool(pre_zero), bool(pre_presence_filter), float(presence_min_frac), str(presence_rule_key),
+                bool(drop_contam), bool(pre_zero), bool(pre_presence_filter), float(presence_min_frac), str(presence_rule_key),
                 bool(pre_log2), str(normalization_method), str(imputation_method),
                 float(pi_width), float(pi_downshift), int(rf_ntree),
             )
@@ -2883,14 +2969,21 @@ def main():
                             st.warning(f"{nonpositive:,} non-positive observed values were converted to NA before log2 transformation.")
                         work = work.where(work > 0)
                         work = np.log2(work)
+                    transformed = work.copy()
 
                     normalized = normalize_lfq_log2(work, normalization_method if pre_log2 else "None")
                     missing_before = int(normalized.isna().sum().sum())
 
-                    if imputation_method == "None (leave missing values)":
+                    if imputation_method == IMPUTE_NONE:
                         imputed = normalized.copy()
+                    elif IMPUTATION_BY_LABEL[imputation_method]["engine"] == "python":
+                        with st.spinner(f"Imputing: {imputation_method} ..."):
+                            imputed = impute_builtin_lfq(
+                                normalized, imputation_method, transformed=transformed,
+                                log2_scale=bool(pre_log2), pi_width=float(pi_width), pi_downshift=float(pi_downshift),
+                            )
                     else:
-                        with st.spinner(f"Running NAguideR method: {imputation_method} ..."):
+                        with st.spinner(f"Running NAguideR method in R: {imputation_method} ..."):
                             imputed = run_naguider_imputation_lfq(
                                 normalized,
                                 method_label=imputation_method,
@@ -2908,19 +3001,36 @@ def main():
                     ss["preprocessing_applied"] = True
                     ss["preprocessing_run_signature"] = preprocessing_signature
                     ss["imputation_applied_method"] = imputation_method
+                    ss["imputation_applied_engine"] = imputation_engine_text(imputation_method)
                     ss["normalization_applied_method"] = normalization_method if pre_log2 else "None"
                     ss["preprocessing_dirty"] = False
                     ss["batch_correction_applied"] = False
                     ss["batch_correction_applied_method"] = "None"
                     ss["batch_correction_run_signature"] = None
                     ss["diff_results"] = None
+                    ss.pop("stat_method_label", None)
+                    ss.pop("diff_pair_labels", None)
                     ss["filtered_df"] = None
                     ss["filtered_ready"] = False
+                    ss.pop("qc_data_source_lfq", None)  # QC below then shows the new matrix
+                    ss["tp_preprocessing_label"] = describe_preprocessing_lf(
+                        drop_contam=drop_contam, n_contam=n_contam, pre_zero=pre_zero,
+                        presence=(presence_min_frac, presence_rule_key) if pre_presence_filter else None,
+                        removed_n=removed_n, pre_log2=pre_log2, normalization=normalization_method if pre_log2 else "None",
+                        imputation=imputation_method, missing_before=missing_before, missing_after=missing_after,
+                        n_proteins=imputed.shape[0],
+                    )
 
                     st.success(
-                        f"Preprocessing complete: {imputed.shape[0]:,} proteins retained; "
-                        f"{removed_n:,} sparse proteins removed; missing values {missing_before:,} → {missing_after:,}."
+                        f"Preprocessing complete: {imputed.shape[0]:,} proteins kept; "
+                        f"{removed_n:,} sparse proteins removed; missing values {missing_before:,} → {missing_after:,} "
+                        f"({imputation_engine_text(imputation_method)})."
                     )
+                    if missing_after and imputation_method != IMPUTE_NONE:
+                        st.warning(
+                            f"{missing_after:,} values are still missing (proteins with no measured value to work from). "
+                            "Statistics will skip them; ComBat needs a complete matrix."
+                        )
                 except Exception as e:
                     st.error(f"Preprocessing failed: {e}")
 
@@ -2931,8 +3041,9 @@ def main():
                 else:
                     ss["preprocessing_dirty"] = False
                     st.success(
-                        f"Current matrix: {ss.get('normalization_applied_method', 'None')} + "
-                        f"{ss.get('imputation_applied_method', 'None')}"
+                        f"Current matrix: {ss['expr_processed'].shape[0]:,} proteins · "
+                        f"{ss.get('normalization_applied_method', 'None')} · imputation: "
+                        f"{ss.get('imputation_applied_method', 'None')} ({ss.get('imputation_applied_engine', '')})"
                     )
 
         # ------------------------------------------------------------------
@@ -2949,7 +3060,7 @@ def main():
         qc_sources = {"Raw selected abundances": expr_raw_current}
         if isinstance(ss.get("expr_normalized"), pd.DataFrame):
             qc_sources["Normalized (before imputation)"] = ss["expr_normalized"]
-        if isinstance(ss.get("expr_imputed"), pd.DataFrame):
+        if isinstance(ss.get("expr_imputed"), pd.DataFrame) and ss.get("imputation_applied_method") != IMPUTE_NONE:
             qc_sources["Imputed (before batch correction)"] = ss["expr_imputed"]
         if ss.get("batch_correction_applied", False) and isinstance(ss.get("expr_processed"), pd.DataFrame):
             qc_sources["After batch correction"] = ss["expr_processed"]
@@ -3301,8 +3412,8 @@ def main():
             labels = ss["global_group_labels"]
             ctrl_idx = ss["global_control_group_idx"]
             active = [(lbl, cols, i) for i, (lbl, cols) in enumerate(zip(labels, groups)) if cols]
-            
-            with st.expander("Current global groups (read-only)", expanded=True):
+
+            with st.expander("Current global groups (read-only)", expanded=False):
                 st.write(f"**Number of groups:** {ss['global_n_groups']}")
                 control_label = labels[ctrl_idx] if ctrl_idx < len(labels) else "Unknown"
                 st.write(f"**Reference group (Baseline):** {control_label}")
@@ -3319,118 +3430,192 @@ def main():
                     "abundant proteins. Expand the guide below for a detailed explanation of each setting.</p>",
                     unsafe_allow_html=True
                 )
-                
-                with st.expander("Parameter Definitions & Guide", expanded=False):
-                    st.markdown("""
-                    **Preprocessing is locked before statistics.**
-                    - Sparse-protein filtering, normalization, and missing-value imputation are performed in the preprocessing/QC section.
-                    - Differential analysis does **not** re-impute or re-normalize the data.
-                    - Pairwise tests operate on the final log2 abundance matrix, so log2 fold-change is the difference between group mean log2 abundances.
-                    """)
+
+                with st.expander("Which test should I use?", expanded=False):
+                    st.markdown(
+                        "- **limma moderated t-test (recommended):** label-free studies usually have 3–6 samples per "
+                        "group. With so few values, ordinary t-tests give many false hits (tiny variance by chance) and "
+                        "miss real ones. limma borrows variance information from all proteins (empirical Bayes), which "
+                        "makes the test more reliable and more powerful. It also copes with missing values: it fits each "
+                        "protein on the values that were measured.\n"
+                        "- **Welch / Student t-test:** classic tests, fine with many replicates. Welch does not assume "
+                        "equal spread in both groups.\n"
+                        "- **Paired tests:** only when samples are matched (same patient before/after) and listed in the "
+                        "same order in both groups.\n"
+                        "- **Mann-Whitney / Wilcoxon:** rank tests; with 3 vs 3 samples they cannot reach small p-values.\n"
+                        "- **Three groups:** the limma F-test asks *does any group differ?* and also reports log2FC and "
+                        "q-value for every pair. One-way ANOVA is the classical version.\n\n"
+                        "**Fully imputed groups:** if a protein was missing in a whole group and was imputed, its fold change "
+                        "and p-value depend on the imputation method, not on a measurement. Check such proteins in the "
+                        "Protein Profile view before reporting them.\n\n"
+                        "**q-value** is the Benjamini-Hochberg adjusted p-value (false discovery rate)."
+                    )
+
+                st.caption(
+                    f"Matrix: {ss.get('tp_preprocessing_label', '')} · Batch correction: "
+                    f"{ss.get('batch_correction_applied_method', 'None')}. Change it in Preprocessing, QC & Batch Correction."
+                )
+
                 can_pairwise = len(active) >= 2
                 can_anova = (len(active) == 3 and ss["global_n_groups"] == 3)
-                with st.form("run_diff_form"):
-                    st.markdown("### Final Preprocessed Matrix")
-                    st.info(
-                        f"Normalization: **{ss.get('normalization_applied_method', 'None')}** · "
-                        f"Imputation: **{ss.get('imputation_applied_method', 'None')}** · "
-                        f"Batch correction: **{ss.get('batch_correction_applied_method', 'None')}**"
-                    )
-                    st.divider()
-                    st.markdown("### Comparison")
-                    comparison_choices = []
-                    if can_pairwise: comparison_choices.append("Pairwise")
-                    else: comparison_choices.append("Pairwise — need ≥2 non-empty groups")
-                    
-                    if can_anova: comparison_choices.append("Three-group ANOVA")
-                    else: comparison_choices.append("Three-group ANOVA — need exactly 3 non-empty groups")
-                    comparison_type = st.radio("Select experimental design:", comparison_choices, index=0)
-                    selected_pair = None
-                    specific_test = "Welch's t-test (Independent, Unequal Variance)"
-                    if comparison_type.startswith("Pairwise"):
-                        if can_pairwise:
-                            pairs = {
-                                f"{active[i][0]} vs {active[j][0]}": (active[i][1], active[j][1], active[i][0], active[j][0])
-                                for i in range(len(active)) for j in range(i + 1, len(active))
-                            }
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                selected_pair = st.selectbox("Select pairwise comparison:", list(pairs.keys()))
-                            with col2:
-                                specific_test = st.selectbox("Select statistical test:", [
-                                    "Student's t-test (Independent, Equal Variance)",
-                                    "Welch's t-test (Independent, Unequal Variance)",
-                                    "Paired t-test (Matched Samples)",
-                                    "Mann-Whitney U (Non-parametric Independent)",
-                                    "Wilcoxon Signed-Rank (Non-parametric Paired)"
-                                ], index=1)
-                    else:
-                        selected_pair = "Three-group ANOVA"
-                    batch_method = "None"
-                    if ss.get("batch_correction_applied", False):
-                        st.info(
-                            "Differential analysis is using the batch-corrected matrix generated with "
-                            f"**{ss.get('batch_correction_applied_method', 'batch correction')}**."
-                        )
+                labels_unique = len({lbl for lbl, _, _ in active}) == len(active)
 
-                    run_button = st.form_submit_button(
-                        "Run Analysis", 
-                        type="primary", 
-                        help="Execute the selected statistical test on the grouped data."
-                    )
+                # No st.form on purpose: inside a form the options below would not
+                # update when the design or the test is changed.
+                DESIGN_TWO = "Two groups (pairwise)"
+                DESIGN_THREE = "All three groups (limma F-test or ANOVA)"
+                comparison_choices = [
+                    DESIGN_TWO if can_pairwise else DESIGN_TWO + " — need ≥2 non-empty groups",
+                    DESIGN_THREE if can_anova else DESIGN_THREE + " — need exactly 3 non-empty groups",
+                ]
+                if ss.get("stat_design") not in comparison_choices:
+                    ss.pop("stat_design", None)
+                comparison_type = st.radio(
+                    "Select experimental design:",
+                    comparison_choices,
+                    index=1 if can_anova else 0,
+                    horizontal=True,
+                    key="stat_design",
+                    help="Two groups: compares one pair and gives a fold change (volcano, waterfall, MA). "
+                         "All three groups: tests whether any group differs; limma also reports every pair.",
+                )
+                is_pairwise_design = comparison_type.startswith(DESIGN_TWO)
+
+                selected_pair = None
+                pairs = {}
+                specific_test = PAIRWISE_TESTS[0]
+                multigroup_test = MULTIGROUP_TESTS[0]
+                limma_all_groups = True
+                if is_pairwise_design:
+                    if can_pairwise:
+                        pairs = {
+                            f"{labels[i]} vs {labels[j]}": (i, j)
+                            for a, (_, _, i) in enumerate(active)
+                            for (_, _, j) in active[a + 1:]
+                        }
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            selected_pair = st.selectbox(
+                                "Select pairwise comparison:", list(pairs.keys()), key="stat_pair",
+                                help="log2FC is reported as the other group versus the reference group.",
+                            )
+                        with col2:
+                            specific_test = st.selectbox(
+                                "Select statistical test:", PAIRWISE_TESTS, key="stat_test",
+                                help="Not sure? Open 'Which test should I use?' above.",
+                            )
+                        st.caption(LF_TEST_HELP.get(specific_test, ""))
+                        if specific_test == LIMMA_T and len(active) > 2:
+                            limma_all_groups = st.checkbox(
+                                "Use all groups to estimate variance (recommended)", value=True,
+                                key="stat_limma_all_groups",
+                                help="Standard limma practice: the third group adds information about measurement "
+                                     "noise and gives more power. Turn off to use only the two compared groups.",
+                            )
+                else:
+                    selected_pair = "Three-group test"
+                    if can_anova:
+                        multigroup_test = st.radio(
+                            "Select statistical test:", MULTIGROUP_TESTS, key="stat_multigroup_test",
+                            captions=[
+                                "Recommended. Stable with few replicates. Also gives log2FC and q-value for every pair of groups.",
+                                "Classical test. Only says whether any group differs.",
+                            ],
+                            help=LF_TEST_HELP[LIMMA_F],
+                        )
+                    else:
+                        st.warning("Define exactly three non-empty groups in Data Filtering & Group Specification.")
+
+                min_n = 2
+                if not (is_pairwise_design and specific_test == LIMMA_T) and not (not is_pairwise_design and multigroup_test == LIMMA_F):
+                    min_n = int(st.number_input(
+                        "Minimum measured values per group", min_value=2, max_value=10, value=2, step=1,
+                        key="stat_min_n",
+                        help="Proteins with fewer measured (or imputed) values in a group get no p-value.",
+                    ))
+
+                run_button = st.button(
+                    "Run Analysis", type="primary", key="btn_run_diff_lf",
+                    help="Run the selected test on the final preprocessed matrix.",
+                )
+
                 if run_button:
+                    ss["filtered_df"] = None
+                    ss["filtered_ready"] = False
                     try:
+                        if not labels_unique:
+                            raise ValueError("Group labels must be different from each other. Rename the groups in Data Filtering & Group Specification.")
                         meta_df = df.drop_duplicates(subset="RowID").set_index("RowID")
                         meta_cols = [c for c in ["GeneID", "Genes", "Description", "Accession", "Master Protein Accessions"] if c in meta_df.columns]
                         analysis_df = meta_df[meta_cols].join(expr, how="right").reset_index()
-                        target_cols = [c for g in groups for c in g]
-                        
-                        if comparison_type.startswith("Pairwise"):
-                            group1, group2, label1, label2 = pairs[selected_pair]
-                            
-                            if control_label == label1:
-                                control_cols, test_cols = group1, group2
-                                control_lab, test_lab = label1, label2
-                            elif control_label == label2:
-                                control_cols, test_cols = group2, group1
-                                control_lab, test_lab = label2, label1
-                            else:
-                                control_cols, test_cols = group1, group2
-                                control_lab, test_lab = label1, label2
-                            diff_df = compute_diffexp_tp_lf(
-                                df=analysis_df, control_cols=control_cols, test_cols=test_cols,
-                                control_label=control_lab, test_label=test_lab, test_type=specific_test,
-                                do_zero_impute=False, zero_frac=0.2,
-                                do_presence_filter=False, presence_min_frac=0.0,
-                                presence_rule="all_only", min_n_per_group=2,
-                                batch_samples=ss.get("global_batch_samples"),
-                                batch_method=batch_method
-                            )
+
+                        if is_pairwise_design:
+                            if not can_pairwise or not selected_pair:
+                                raise ValueError("Define at least two non-empty groups and pick a comparison.")
+                            i, j = pairs[selected_pair]
+                            c_i, t_i = (j, i) if ctrl_idx == j else (i, j)
+                            control_lab, test_lab = labels[c_i], labels[t_i]
+                            with st.spinner(f"Running {specific_test}..."):
+                                if specific_test == LIMMA_T:
+                                    diff_df = compute_diffexp_limma_lf(
+                                        analysis_df, groups, labels, c_i, t_i, use_all_groups=limma_all_groups,
+                                    )
+                                else:
+                                    diff_df = compute_diffexp_tp_lf(
+                                        df=analysis_df, control_cols=groups[c_i], test_cols=groups[t_i],
+                                        control_label=control_lab, test_label=test_lab, test_type=specific_test,
+                                        min_n_per_group=min_n,
+                                    )
+                            method_label = f"{specific_test}: {test_lab} vs {control_lab}"
+                            if specific_test == LIMMA_T and limma_all_groups and len(active) > 2:
+                                method_label += " (variance from all groups)"
+                            ss["diff_pair_labels"] = (control_lab, test_lab)
                         else:
-                            diff_df = compute_diffexp_anova_tp_lf(
-                                df=analysis_df, 
-                                group1_cols=groups[0], group2_cols=groups[1], group3_cols=groups[2],
-                                group1_label=labels[0], group2_label=labels[1], group3_label=labels[2],
-                                do_zero_impute=False, zero_frac=0.2,
-                                do_presence_filter=False, presence_min_frac=0.0,
-                                presence_rule="all_only",
-                                batch_samples=ss.get("global_batch_samples"),
-                                batch_method=batch_method
-                            )
-                        
+                            if not can_anova:
+                                raise ValueError("Provide exactly three non-empty groups for the three-group test.")
+                            with st.spinner(f"Running {multigroup_test}..."):
+                                if multigroup_test == LIMMA_F:
+                                    diff_df = compute_diffexp_limma_f_lf(analysis_df, groups, labels, ctrl_idx)
+                                else:
+                                    diff_df = compute_diffexp_anova_tp_lf(
+                                        df=analysis_df,
+                                        group1_cols=groups[0], group2_cols=groups[1], group3_cols=groups[2],
+                                        group1_label=labels[0], group2_label=labels[1], group3_label=labels[2],
+                                        min_n_per_group=min_n,
+                                    )
+                            method_label = f"{multigroup_test}: {', '.join(labels[:3])}"
+                            ss.pop("diff_pair_labels", None)
+
                         ss["diff_results"] = diff_df
-                        st.success(f"LFQ Differential analysis complete: {selected_pair}")
-                    
+                        ss["stat_method_label"] = method_label
                     except Exception as e:
                         st.error(f"Differential analysis failed: {e}")
             if ss.get("diff_results") is not None:
-                st.success("Differential analysis complete. Results available below.")
-                st.dataframe(ss["diff_results"], use_container_width=True)
-                
+                _res = ss["diff_results"]
+                _q = pd.to_numeric(_res["q-value"], errors="coerce") if "q-value" in _res.columns else pd.Series(dtype=float)
+                st.success(
+                    f"**{ss.get('stat_method_label', 'Differential analysis complete')}**: "
+                    f"{len(_res):,} proteins in the results, {int((_q < 0.05).sum()):,} with q < 0.05."
+                )
+                if "AveExpr" in _res.columns:
+                    if "F" in _res.columns:
+                        st.caption(
+                            "limma columns: **AveExpr** = mean log2 abundance; **F** = moderated F statistic; "
+                            "**p-value / q-value** = does any group differ; **log2FC (B vs A)** and "
+                            "**q-value (B vs A)** = each pair of groups (moderated t-test)."
+                        )
+                    else:
+                        st.caption(
+                            "limma columns: **log2FC** = mean log2(test) − mean log2(reference); "
+                            "**AveExpr** = mean log2 abundance; **t** = moderated t statistic; "
+                            "**q-value** = Benjamini-Hochberg adjusted p-value."
+                        )
+                st.dataframe(_res, use_container_width=True)
+
                 with st.expander("📥 Download Full Dataset (Unfiltered)", expanded=False):
                     download_diff_df = ss["diff_results"].copy()
                     dl_col1, dl_col2 = st.columns(2)
-                    
+
                     csv_diff = download_diff_df.to_csv(index=False).encode("utf-8")
                     with dl_col1:
                         add_bytes_download_button_tp_lf(
@@ -3465,7 +3650,7 @@ def main():
             else:
                 res = ss["diff_results"]
                 expr = ss["expr_processed"]
-                
+
                 gene_col_name = next((c for c in ["GeneID", "Genes", "Gene", "Description"] if c in res.columns), None)
                 accession_col_name = next((c for c in ["Accession", "Master Protein Accessions", "Protein Accessions", "Protein ID", "ProteinID", "Protein.IDs", "UniProt", "Uniprot"] if c in res.columns), None)
 
@@ -3476,15 +3661,15 @@ def main():
 
                 with left:
                     with st.container(border=True):
-                        
+
                         is_anova = "log2FC" not in res.columns
                         modes = ["Heatmap", "Protein Profile"] if is_anova else ["Volcano", "Waterfall", "MA Plot", "Heatmap", "Protein Profile"]
 
                         mode = st.radio(
-                            "Select Analysis Module", 
-                            modes, 
-                            index=None, 
-                            key="explore_mode_tp", 
+                            "Select Analysis Module",
+                            modes,
+                            index=None,
+                            key="explore_mode_tp",
                             horizontal=False,
                             label_visibility="collapsed"
                         )
@@ -3496,10 +3681,10 @@ def main():
                             "Heatmap": dict(show_volcano=False, show_waterfall=False, show_ma=False, show_density=False, show_heatmap=True, show_profile=False),
                             "Protein Profile": dict(show_volcano=False, show_waterfall=False, show_ma=False, show_density=False, show_heatmap=False, show_profile=True),
                         }
-                        
+
                         for k in ["show_volcano", "show_waterfall", "show_ma", "show_density", "show_heatmap", "show_profile"]:
                             ss[k] = False
-                        
+
                         if mode is not None:
                             ss.update(flags.get(mode, {}))
 
@@ -3606,11 +3791,11 @@ def main():
                                 ss["hm_fc_thresh"] = st.slider("|log2FC| threshold", 0.0, 4.0, 1.0)
                             else:
                                 ss["hm_fc_thresh"] = 0.0
-                                
+
                             ss["hm_top_n"] = st.slider("Top N for Heatmap", 5, 200, 25)
                             ss["hm_norm"] = st.radio("Normalize data", ["Z-score", "Raw Abundance"], horizontal=True)
                             ss["hm_cluster"] = st.selectbox("Clustering", ["Hierarchical", "K-Means", "None"])
-                            
+
                             st.markdown("**Group Colors**")
                             active_groups = [g for g in ss.get("global_group_labels", []) if g]
                             default_colors = sns.color_palette("Set2", n_colors=max(1, len(active_groups))).as_hex()
@@ -3628,22 +3813,22 @@ def main():
                                 ss["prof_fc_thresh"] = st.slider("|log2FC| threshold", 0.0, 4.0, 1.0)
                             else:
                                 ss["prof_fc_thresh"] = 0.0
-                                
+
                             st.markdown("**Group Colors**")
                             active_groups_prof = [g for g in ss.get("global_group_labels", []) if g]
                             default_colors_prof = sns.color_palette("Set2", n_colors=max(1, len(active_groups_prof))).as_hex()
-                            
+
                             prof_palette = {}
                             for idx, grp in enumerate(active_groups_prof):
                                 prof_palette[grp] = st.color_picker(f"{grp} Color", default_colors_prof[idx], key=f"prof_color_{grp}")
                             ss["prof_palette"] = prof_palette
                             st.markdown("<br>", unsafe_allow_html=True)
-                            
-                            # Filter the dropdown dynamically 
+
+                            # Filter the dropdown dynamically
                             sig_mask = res[ss["prof_sig_col"]] <= ss["prof_alpha_thr"]
                             if "log2FC" in res.columns:
                                 sig_mask = sig_mask & (res["log2FC"].abs() >= ss["prof_fc_thresh"])
-                            
+
                             if not gene_col_name:
                                 st.warning("Cannot map to a specific protein. Protein/gene identifier column missing.")
                                 st.selectbox("Search for a Protein:", options=[], key="pick_gene")
@@ -3869,7 +4054,7 @@ def main():
                             alpha_thr = ss["ma_alpha_thr"]
                             fc_thresh = ss["ma_fc_thresh"]
                             top_n_ma_annot = ss["ma_top_n"]
-                            
+
                             sig_mask = res[metric] <= alpha_thr
                             sig_mask = sig_mask & (res["log2FC"].abs() >= fc_thresh)
                             display_sig_stats(sig_mask)
@@ -3920,11 +4105,11 @@ def main():
                         top_n_hm = ss["hm_top_n"]
                         normalize_heatmap = ss["hm_norm"]
                         cluster_option = ss["hm_cluster"]
-                        
+
                         sig_mask = res[metric] <= alpha_thr
                         if not is_anova:
                             sig_mask = sig_mask & (res["log2FC"].abs() >= fc_thresh)
-                            
+
                         display_sig_stats(sig_mask)
 
                         if sig_mask.sum() < 2:
@@ -3932,27 +4117,27 @@ def main():
                         else:
                             heat_idx = res[sig_mask].nsmallest(top_n_hm, metric)["RowID"]
                             hm_data = expr.loc[heat_idx]
-                            
+
                             if normalize_heatmap == "Z-score":
                                 df_data = hm_data.sub(hm_data.mean(axis=1), axis=0).div(hm_data.std(axis=1), axis=0).fillna(0)
                             else:
                                 df_data = hm_data.copy().fillna(0)
-                            
+
                             mapping_dict = {}
                             for grp_label, grp_cols in zip(ss["global_group_labels"], ss["global_group_samples"]):
                                 for c in grp_cols:
                                     mapping_dict[pretty_labels[c]] = grp_label
-                                    
+
                             sample_groups = pd.Series(df_data.columns).map(mapping_dict)
                             unique_groups = [g for g in ss["global_group_labels"] if g in sample_groups.values]
-                            
+
                             fallback_colors = {g: c for g, c in zip(unique_groups, sns.color_palette("Set2", len(unique_groups)).as_hex())}
                             group_palette = ss.get("diff_hm_palette", fallback_colors)
                             col_colors = sample_groups.map(group_palette).values
-                            
+
                             row_cluster = False
                             col_cluster = False
-                            
+
                             if cluster_option == "K-Means":
                                 row_cluster = True
                                 col_cluster = True
@@ -3965,29 +4150,29 @@ def main():
 
                             fig = sns.clustermap(
                                 df_data, figsize=(10, fig_height),
-                                cmap="vlag" if normalize_heatmap == "Z-score" else "YlGnBu", 
+                                cmap="vlag" if normalize_heatmap == "Z-score" else "YlGnBu",
                                 center=0 if normalize_heatmap == "Z-score" else None,
                                 col_cluster=col_cluster, row_cluster=row_cluster,
                                 col_colors=col_colors, yticklabels=True,
                                 dendrogram_ratio=(0.15, 0.05) if row_cluster else 0.15,
                                 colors_ratio=(0.02, 0.02)
                             )
-                            
+
                             if gene_col_name:
                                 rowid_to_gene = res.set_index("RowID")[gene_col_name].to_dict()
                                 new_labels = [str(rowid_to_gene.get(t.get_text(), t.get_text())) for t in fig.ax_heatmap.get_yticklabels()]
                                 fig.ax_heatmap.set_yticklabels(new_labels, fontsize=10, fontweight='bold', rotation=0)
                             else:
                                 plt.setp(fig.ax_heatmap.get_yticklabels(), rotation=0, fontsize=10, fontweight='bold')
-                                
+
                             plt.setp(fig.ax_heatmap.get_xticklabels(), rotation=45, horizontalalignment='right', fontsize=10, fontweight='bold')
-                            
+
                             cbar_label = 'Z-score' if normalize_heatmap == "Z-score" else 'Abundance'
                             fig.cax.set_ylabel(cbar_label, fontsize=12, fontweight='bold')
 
                             handles = [mpatches.Patch(color=group_palette[g], label=g) for g in unique_groups if g in group_palette]
                             fig.ax_col_dendrogram.legend(handles=handles, title="Group", loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=True)
-                            
+
                             st.pyplot(fig.fig)
                             ss["report_heatmap_fig"] = fig.fig
                             add_plot_download_buttons(fig.fig, "differential_heatmap")
@@ -4125,10 +4310,10 @@ def main():
             with col_info:
                 st.markdown(
                     "<p class='subtitle-text'>Generate a document summarizing your entire analysis workflow. "
-                    "The compiled report includes:</p>", 
+                    "The compiled report includes:</p>",
                     unsafe_allow_html=True
                 )
-                
+
                 st.markdown(
                     """
                     - **Experimental Design:** Cohort definitions and sample mapping.
@@ -4180,7 +4365,7 @@ def main():
                             group_samples = ss.get("global_group_samples", [])
                             group_labels = ss.get("global_group_labels", [])
                             control_idx = ss.get("global_control_group_idx", 0)
-                            
+
                             batch_samples = ss.get("global_batch_samples", [])
                             batch_labels = ss.get("global_batch_labels", [])
                             for col in ss.get("global_sample_cols", []):
@@ -4191,7 +4376,7 @@ def main():
                                         grp_name = group_labels[i] if i < len(group_labels) else f"Group{i+1}"
                                         grp_num = i + 1
                                         break
-                                        
+
                                 batch_name = "N/A"
                                 for j, b_cols in enumerate(batch_samples):
                                     if col in (b_cols or []):
@@ -4199,7 +4384,7 @@ def main():
                                         break
                                 rows.append({
                                     "Column": col,
-                                    "Sample": pretty_labels.get(col, col), 
+                                    "Sample": pretty_labels.get(col, col),
                                     "Group": grp_name,
                                     "Group_Number": grp_num,
                                     "Batch": batch_name,
@@ -4210,8 +4395,8 @@ def main():
                                 zf.writestr("tables/sample_metadata_mapping.csv", sample_map_df.to_csv(index=False))
                         plot_keys = [
                             "report_pca_fig", "report_corr_fig", "report_density_raw_fig", "report_density_proc_fig",
-                            "report_qc_boxplot_fig", "report_qc_missing_fig", "report_qc_heatmap_fig", 
-                            "report_dendrogram_fig", "report_volcano_fig", "report_ma_fig", 
+                            "report_qc_boxplot_fig", "report_qc_missing_fig", "report_qc_heatmap_fig",
+                            "report_dendrogram_fig", "report_volcano_fig", "report_ma_fig",
                             "report_log2fc_density_fig", "report_heatmap_fig", "report_boxplot_fig"
                         ]
                         for plot_key in plot_keys:
@@ -4315,9 +4500,9 @@ def main():
                         st.rerun()
     # ====================== DEFAULT STATE & FAQ ======================
     any_tab_active = (
-        ss.get("show_global_select", False) or 
-        ss.get("show_overview", False) or 
-        ss.get("show_suite", False) or 
+        ss.get("show_global_select", False) or
+        ss.get("show_overview", False) or
+        ss.get("show_suite", False) or
         ss.get("show_report", False)
     )
     if not any_tab_active:

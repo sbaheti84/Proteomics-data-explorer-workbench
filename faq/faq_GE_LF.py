@@ -271,9 +271,10 @@ def faq_section():
                 "Category": "Sample Setup",
                 "Question": "Can I analyze three groups?",
                 "Answer": (
-                    "Yes. When three groups are defined, the app performs ANOVA. "
-                    "ANOVA identifies features that differ across groups, but it does not have a simple two-group log2FC direction. "
-                    "Volcano and waterfall views are mainly for pairwise comparisons."
+                    "Yes. Choose **All three groups** in the Statistical Analysis Suite and the limma moderated F-test "
+                    "(default) or one-way ANOVA. Both test whether any group differs. The limma F-test also reports "
+                    "log2FC and q-value for every pair of groups (B vs A, C vs A, C vs B) in the same table. "
+                    "Volcano and waterfall views need a single pairwise comparison, so run a two-group test for those."
                 ),
             },
 
@@ -353,11 +354,13 @@ def faq_section():
                 ),
             },
             {
-                "Category": "QC",
-                "Question": "What does the glycan classification summary show?",
+                "Category": "Data Overview",
+                "Question": "Where is the glycan classification summary?",
                 "Answer": (
-                    "It summarizes glycopeptides by glycan class, such as high-mannose, paucimannose, or complex/hybrid, "
-                    "based on the glycan composition detected by the app."
+                    "It describes what was identified (high-mannose, paucimannose, complex/hybrid), not data quality, so "
+                    "it now sits next to the compiled matrix: open the **Glycan class composition** tab. To see which "
+                    "glycan classes or traits (sialylation, fucosylation) change between groups, run the statistics and "
+                    "choose **Glycan class breakdown** in Results Visualization."
                 ),
             },
 
@@ -366,13 +369,29 @@ def faq_section():
                 "Category": "Differential Analysis",
                 "Question": "Which statistical tests are supported?",
                 "Answer": (
-                    "For two-group comparisons, the app supports:\n\n"
+                    "For two-group comparisons:\n\n"
+                    "- limma moderated t-test (default)\n"
                     "- Student's t-test\n"
                     "- Welch's t-test\n"
                     "- Paired t-test\n"
                     "- Mann-Whitney U test\n"
                     "- Wilcoxon signed-rank test\n\n"
-                    "For three groups, the app uses ANOVA."
+                    "For three groups: limma moderated F-test (default) or one-way ANOVA.\n\n"
+                    "With the 3-6 replicates typical of label-free experiments, limma is usually the best choice: it "
+                    "borrows variance information from all glycoforms, which makes it more reliable and more powerful "
+                    "than an ordinary t-test."
+                ),
+            },
+            {
+                "Category": "Differential Analysis",
+                "Question": "How does the limma option work, and why can its log2FC differ from the t-test?",
+                "Answer": (
+                    "limma fits a linear model to the **log2** intensity of every glycoform (zeros count as missing), "
+                    "then shrinks each glycoform's variance towards the typical variance of all glycoforms "
+                    "(empirical Bayes). The implementation is a Python port of R limma's lmFit, contrasts.fit and eBayes "
+                    "and gives the same numbers as R limma.\n\n"
+                    "limma's log2FC is mean(log2 test) minus mean(log2 reference). The other tests run on raw intensities "
+                    "and report log2 of the ratio of mean intensities, so the two fold changes can differ."
                 ),
             },
             {
@@ -388,7 +407,10 @@ def faq_section():
                 "Answer": (
                     "Zero/NA imputation replaces missing or zero LFQ values using a row-wise small fraction of the observed minimum. "
                     "Presence filtering keeps features that are observed in enough samples overall or within groups. "
-                    "These options reduce unstable statistics caused by sparse LFQ data."
+                    "These options reduce unstable statistics caused by sparse LFQ data.\n\n"
+                    "For **limma**, imputation is off by default: limma fits each glycoform on the values that were measured. "
+                    "Glycoforms missing from a whole compared group then get no limma p-value. Turn imputation on to test them, "
+                    "but their fold changes will depend on the imputed value."
                 ),
             },
             {

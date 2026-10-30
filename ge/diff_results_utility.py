@@ -531,7 +531,6 @@ def compute_diffexp_limma_f(df: pd.DataFrame,
         df[group_labels[gi]] = df[cols].mean(axis=1).round(3)
         all_cols += cols
 
-    ref = group_labels[control_idx]
     df["AveExpr"] = res["AveExpr"]
     df["F"] = res["F"]
     df["p-value"] = res["F_p"]
@@ -552,3 +551,49 @@ def compute_diffexp_limma_f(df: pd.DataFrame,
     df = df.sort_values(by="adj.p-value", na_position="last")
     df.attrs["limma"] = {"df_prior": float(res["df_prior"]), "s2_prior": float(res["s2_prior"])}
     return df[keep_cols]
+
+
+# =============================================================================
+# Test names and descriptions shown in the GlycoExplorer apps (TMT and label-free)
+# =============================================================================
+# -----------------------------------------------------------------------------
+LIMMA_T = "limma moderated t-test (log2 scale)"
+LIMMA_F = "limma moderated F-test (log2 scale)"
+CLASSIC_ANOVA = "One-way ANOVA (classical F-test)"
+
+# limma is listed first, so it is the default choice.
+PAIRWISE_TESTS = [
+    LIMMA_T,
+    "Student's t-test (Independent, Equal Variance)",
+    "Welch's t-test (Independent, Unequal Variance)",
+    "Paired t-test (Matched Samples)",
+    "Mann-Whitney U (Non-parametric Independent)",
+    "Wilcoxon Signed-Rank (Non-parametric Paired)",
+]
+MULTIGROUP_TESTS = [LIMMA_F, CLASSIC_ANOVA]
+
+TEST_HELP = {
+    "Student's t-test (Independent, Equal Variance)":
+        "Classic two-sample t-test on raw (not log) abundances. Assumes both groups have a similar spread.",
+    "Welch's t-test (Independent, Unequal Variance)":
+        "t-test on raw (not log) abundances that does not assume equal spread. Safer than Student's when one group is more variable.",
+    "Paired t-test (Matched Samples)":
+        "For matched samples (e.g. the same patient before and after). Channels are paired in the order they are "
+        "listed in each group, so both groups need the same number of channels in matching order.",
+    "Mann-Whitney U (Non-parametric Independent)":
+        "Rank-based test with no normality assumption. With 3 vs 3 samples the smallest possible p-value is 0.1, "
+        "so nothing can pass a 0.05 cutoff. Use it only with larger groups.",
+    "Wilcoxon Signed-Rank (Non-parametric Paired)":
+        "Rank-based paired test. Needs at least 6 pairs before any p-value can fall below 0.05.",
+    LIMMA_T:
+        "Recommended with few replicates (3-6 per group). Works on log2 values and borrows variance information "
+        "from all glycoforms (empirical Bayes), which gives stable results. log2FC is the difference of mean log2 "
+        "values, so it can differ slightly from the log2FC of the other tests.",
+    CLASSIC_ANOVA:
+        "One-way ANOVA on raw (not log) abundances: does any of the three groups differ? Glycoforms with no variation "
+        "inside a group are skipped.",
+    LIMMA_F:
+        "limma's version of ANOVA on log2 abundances, with empirical Bayes variances. The p/q-value says whether "
+        "any group differs. The table also gives log2FC and q-value for every pair of groups (e.g. B vs A, C vs A, "
+        "C vs B), so one run answers which groups differ.",
+}

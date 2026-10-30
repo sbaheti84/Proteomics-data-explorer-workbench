@@ -57,6 +57,13 @@ from streamlit.errors import StreamlitAPIException
 # Shared Total Protein helpers used by both TMT and LFQ launchers.
 from tp.tp_common_utility import *
 
+# Shared statistics (limma core, test names) and ComBat with biological covariate
+from ge.diff_results_utility import (
+    limma_group_test, _bh_adjust,
+    LIMMA_T, LIMMA_F, CLASSIC_ANOVA, PAIRWISE_TESTS, MULTIGROUP_TESTS, TEST_HELP,
+)
+from ge.batch_correcttion import apply_combat_batch_correction
+
 # Safely import FAQ
 try:
     from faq.faq_TP import faq_section
@@ -171,6 +178,17 @@ def _reset_all_data(clear_cache: bool = False):
     ss.pop("final_report_zip_bytes", None)
     ss.pop("final_report_timestamp", None)
 
+    # Matrix preprocessing settings back to defaults for a new file.
+    ss["tp_pre_zero"] = True
+    ss["tp_pre_log2"] = True
+    ss["tp_pre_norm"] = "Quantile normalization"
+    ss["tp_min_unique_pep"] = 1
+    ss["tp_high_conf_master"] = False
+    for _k in ["_tp_pre_zero", "_tp_pre_log2", "_tp_pre_norm", "_tp_min_unique_pep",
+               "_tp_high_conf_master", "tp_matrix_sig", "tp_preprocessing_label",
+               "stat_method_label", "batch_combat_info", "diff_pair_labels"]:
+        ss.pop(_k, None)
+
     if clear_cache:
         try:
             st.cache_data.clear()
@@ -197,6 +215,12 @@ def init_session_state_defaults():
         "batch_correction_run_signature": None,
         "batch_correction_last_error": None,
         "expr_pre_batch": None,
+        "batch_combat_info": None,
+        "tp_pre_zero": True,
+        "tp_pre_log2": True,
+        "tp_pre_norm": "Quantile normalization",
+        "tp_min_unique_pep": 1,
+        "tp_high_conf_master": False,
         "show_overview": False,
         "show_suite": False,
         "show_global_select": False,
@@ -221,7 +245,7 @@ def clean_tmt_sample(col: str) -> str:
     s = re.sub(r"(?i)reporter\s*", "", s)
     s = re.sub(r"(?i)intensity\s*", "", s)
     s = s.replace(":", "").strip()
-    match = re.search(r"(12[6-9]|13[0-4])[NC]?", s)
+    match = re.search(r"(12[6-9]|13[0-5])[NC]?", s)  # 126-135N (TMTpro 18-plex)
     if match: return match.group(0)
     return s.strip()
 
@@ -286,7 +310,7 @@ def quantile_normalize(df: pd.DataFrame) -> pd.DataFrame:
         )
     return out
 
-def apply_batch_correction(df: pd.DataFrame, batch_dict: dict, method: str, is_log2: bool, irs_refs: dict = None) -> pd.DataFrame:
+def apply_batch_correction(df: pd.DataFrame, batch_dict: dict, method: str, is_log2: bool, irs_refs: dict = None, group_map: dict = None) -> pd.DataFrame:
     """
     Applies the selected statistical batch correction algorithm.
     Handles mathematical differences depending on whether df is log2 transformed.
@@ -369,40 +393,40 @@ def apply_batch_correction(df: pd.DataFrame, batch_dict: dict, method: str, is_l
             st.error(msg)
             return out
             
-        sample_to_batch = {}
-        for b_name, cols in batch_dict.items():
-            for c in cols:
-                if c in out.columns:
-                    sample_to_batch[c] = b_name
-                    
-        valid_cols = list(sample_to_batch.keys())
-        if len(valid_cols) < 2 or len(batch_dict) < 2:
+        named = {b: [c for c in cols if c in out.columns] for b, cols in batch_dict.items()}
+        named = {b: v for b, v in named.items() if v}
+        valid_cols = [c for v in named.values() for c in v]
+        if len(valid_cols) < 2 or len(named) < 2:
             return out
-            
-        dat = out[valid_cols].copy()
-        
-        if not is_log2:
-            # ComBat assumes normal-ish distributions, usually log2. 
-            # We temporarily log2 transform it, apply combat, and exponentiate back.
-            dat = np.log2(dat.replace(0, np.nan))
-        
-        na_mask = dat.isna()
-        row_medians = dat.median(axis=1)
-        dat_imputed = dat.apply(lambda col: col.fillna(row_medians)).fillna(0)
-        
-        covars = pd.DataFrame({"batch": [sample_to_batch[c] for c in valid_cols]}, index=valid_cols)
-        
+
+        # The biological group must be in the model, otherwise ComBat removes
+        # real group differences together with the batch offsets.
+        missing_group = [c for c in valid_cols if c not in (group_map or {})]
+        if not group_map or missing_group:
+            msg = (
+                "ComBat needs the biological group of every batched sample. "
+                "Assign all batched samples to Group 1/2/3 first."
+            )
+            ss["batch_correction_last_error"] = msg
+            st.error(msg)
+            return out
+
+        # The shared routine takes linear abundances and returns log2 values.
+        lin = np.exp2(out[valid_cols]) if is_log2 else out[valid_cols]
         try:
-            combat_res = neuroCombat(dat=dat_imputed, covars=covars, batch_col="batch")
-            corrected_df = pd.DataFrame(combat_res["data"], index=dat.index, columns=valid_cols)
-            
-            corrected_df[na_mask] = np.nan
-            
-            if not is_log2:
-                corrected_df = np.exp2(corrected_df)
-                
-            out[valid_cols] = corrected_df
-            
+            corrected_log, info = apply_combat_batch_correction(
+                lin,
+                named,
+                valid_cols,
+                group_map={c: group_map[c] for c in valid_cols},
+                return_linear=False,
+                strict=False,
+            )
+        except ValueError as e:
+            msg = str(e)
+            ss["batch_correction_last_error"] = msg
+            st.error(msg)
+            return out
         except Exception as e:
             msg = (
                 f"ComBat correction failed: {e}. "
@@ -410,6 +434,11 @@ def apply_batch_correction(df: pd.DataFrame, batch_dict: dict, method: str, is_l
             )
             ss["batch_correction_last_error"] = msg
             st.error(msg)
+            return out
+
+        corrected = corrected_log[valid_cols]
+        out[valid_cols] = corrected if is_log2 else np.exp2(corrected)
+        ss["batch_combat_info"] = info
 
     return out
 
@@ -418,16 +447,22 @@ def filter_by_presence_rule(
     all_samples: list[str],
     group_samples: list[list[str]],
     min_frac: float = 0.40,
-    presence_rule: str = "or",   
+    presence_rule: str = "or",
+    log2_scale: bool = False,
 ) -> pd.DataFrame:
+    """Keep rows measured in enough samples. On the log2 scale any finite value
+    counts as measured (log2 values can be 0 or negative)."""
     out = df.copy()
 
     all_cols = [c for c in all_samples if c in out.columns]
     if not all_cols:
         return out
 
-    X = out[all_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
-    pres_all = X.gt(0)
+    def _present(frame):
+        x = frame.apply(pd.to_numeric, errors="coerce")
+        return x.notna() if log2_scale else x.fillna(0).gt(0)
+
+    pres_all = _present(out[all_cols])
 
     frac_all = pres_all.mean(axis=1)
     keep_all = frac_all >= float(min_frac)
@@ -437,7 +472,7 @@ def filter_by_presence_rule(
         gcols = [c for c in (g or []) if c in out.columns]
         if not gcols:
             continue
-        pres_g = out[gcols].apply(pd.to_numeric, errors="coerce").fillna(0).gt(0)
+        pres_g = _present(out[gcols])
         keep_group = keep_group | (pres_g.mean(axis=1) >= float(min_frac))
 
     rule = (presence_rule or "or").strip().lower()
@@ -447,7 +482,7 @@ def filter_by_presence_rule(
         keep = keep_group
     elif rule == "and":
         keep = keep_all & keep_group
-    else: 
+    else:
         keep = keep_all | keep_group
 
     return out.loc[keep].copy()
@@ -455,23 +490,37 @@ def filter_by_presence_rule(
 def replace_zeros_rowwise_min_fraction(
     df: pd.DataFrame,
     sample_cols: list[str],
-    frac: float = 0.2,          
-    replace_nan: bool = True
+    frac: float = 0.2,
+    replace_nan: bool = True,
+    log2_scale: bool = False,
 ) -> pd.DataFrame:
+    """
+    Fill missing values with a fraction of each row's smallest measured value.
+
+    Raw scale:  fill = frac * row minimum (and 0 counts as missing).
+    Log2 scale: fill = row minimum + log2(frac), the same rule expressed in
+                log2 (frac=0.2 -> minimum - 2.32). Multiplying log2 values by
+                frac, as before, put the filled value near 0 (a raw intensity
+                of ~8) and created huge false fold changes.
+    """
     out = df.copy()
     cols = [c for c in sample_cols if c in out.columns]
     if not cols:
         return out
 
     X = out[cols].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
-    pos_mask = np.isfinite(X) & (X > 0)
+    pos_mask = np.isfinite(X) if log2_scale else (np.isfinite(X) & (X > 0))
     has_pos = pos_mask.any(axis=1)
 
     pos_vals = np.where(pos_mask, X, np.nan)
-    row_min_pos = np.nanmin(pos_vals, axis=1)   
-    fill = row_min_pos * float(frac)
+    with np.errstate(all="ignore"):
+        row_min_pos = np.nanmin(np.where(has_pos[:, None], pos_vals, np.inf), axis=1)
+    row_min_pos = np.where(has_pos, row_min_pos, np.nan)
+    fill = row_min_pos + np.log2(float(frac)) if log2_scale else row_min_pos * float(frac)
 
-    if replace_nan:
+    if log2_scale:
+        repl_mask = ~np.isfinite(X)
+    elif replace_nan:
         repl_mask = (X == 0) | (~np.isfinite(X))
     else:
         repl_mask = (X == 0)
@@ -485,8 +534,369 @@ def replace_zeros_rowwise_min_fraction(
     return out
 
 
+
 # -----------------------------------------------------------------------------
-# Differential Engine 
+# Matrix preprocessing: one pipeline, used by QC, statistics and the report.
+# Order: protein filters -> 0 as missing -> log2 -> batch correction ->
+# normalization. (Previously this ran only inside the Data Integrity panel,
+# so statistics could not run until QC had been opened.)
+# -----------------------------------------------------------------------------
+NORM_CHOICES = ["Quantile normalization", "Median normalization", "None"]
+
+PREPROCESS_DEFAULTS = {
+    "tp_pre_zero": True,
+    "tp_pre_log2": True,
+    "tp_pre_norm": "Quantile normalization",
+    "tp_min_unique_pep": 1,
+    "tp_high_conf_master": False,
+}
+
+
+def get_preprocessing_settings() -> dict:
+    cfg = {k: ss.get(k, v) for k, v in PREPROCESS_DEFAULTS.items()}
+    if cfg["tp_pre_norm"] not in NORM_CHOICES:
+        cfg["tp_pre_norm"] = NORM_CHOICES[0]
+    return cfg
+
+
+def median_normalize(df: pd.DataFrame, is_log2: bool) -> pd.DataFrame:
+    """Align sample medians (sample-loading normalization). Missing values stay missing."""
+    x = df.apply(pd.to_numeric, errors="coerce")
+    med = x.median(axis=0, skipna=True)
+    target = med.mean()
+    if is_log2:
+        return x.sub(med, axis=1).add(target)
+    return x.div(med, axis=1).mul(target)
+
+
+def describe_preprocessing(cfg: dict, batch_label: str) -> str:
+    parts = []
+    if int(cfg["tp_min_unique_pep"]) > 1:
+        parts.append(f">= {int(cfg['tp_min_unique_pep'])} unique peptides")
+    if cfg["tp_high_conf_master"]:
+        parts.append("high-confidence master proteins only")
+    parts.append("0 treated as missing" if cfg["tp_pre_zero"] else "0 kept as value")
+    parts.append("log2" if cfg["tp_pre_log2"] else "no log2")
+    parts.append(f"batch: {batch_label}")
+    parts.append(cfg["tp_pre_norm"].lower() if cfg["tp_pre_norm"] != "None" else "no normalization")
+    return "; ".join(parts)
+
+
+def build_processed_matrix(df: pd.DataFrame, pretty_labels: dict):
+    """
+    Build raw / pre-batch / processed matrices from the current settings and
+    store them in session state. Recomputed only when an input changes; when
+    it changes, earlier statistics are cleared because they no longer match.
+    """
+    all_groups = list(ss.get("global_all_groups") or [])
+    if not all_groups:
+        return None
+
+    cfg = get_preprocessing_settings()
+    batch_method = ss.get("batch_method_ui", "None")
+    batch_requested = bool(
+        ss.get("enable_batch_correction", False)
+        and ss.get("batch_correction_requested", False)
+        and batch_method != "None"
+    )
+    sig = repr((
+        ss.get("upload_sig"),
+        all_groups,
+        ss.get("global_group_samples"),
+        ss.get("global_group_labels"),
+        sorted(cfg.items()),
+        batch_requested,
+        (
+            batch_method,
+            sorted((k, list(v)) for k, v in (ss.get("batch_dict") or {}).items()),
+            sorted((ss.get("irs_ref_dict") or {}).items()),
+        ) if batch_requested else None,
+    ))
+    if ss.get("tp_matrix_sig") == sig and isinstance(ss.get("expr_processed"), pd.DataFrame):
+        return ss["expr_processed"]
+
+    src = df
+    if int(cfg["tp_min_unique_pep"]) > 1 and "# Unique Peptides" in src.columns:
+        n_pep = pd.to_numeric(src["# Unique Peptides"], errors="coerce").fillna(0)
+        src = src[n_pep >= int(cfg["tp_min_unique_pep"])]
+    if cfg["tp_high_conf_master"]:
+        if "Master" in src.columns:
+            m = src["Master"].astype(str).str.replace(" ", "", regex=False).str.lower()
+            src = src[m.isin(["masterprotein", "ismasterprotein"])]
+        conf_col = next((c for c in src.columns if str(c).lower().startswith("protein fdr confidence")), None)
+        if conf_col:
+            src = src[src[conf_col].astype(str).str.strip().str.lower() == "high"]
+    if src.empty:
+        st.error("No proteins are left after the protein filters. Relax them in Matrix Preprocessing.")
+        return None
+
+    expr_raw = (
+        src[["RowID"] + all_groups]
+        .groupby("RowID")
+        .mean()
+        .apply(pd.to_numeric, errors="coerce")
+    )
+    expr_raw.rename(columns=pretty_labels, inplace=True)
+
+    expr_base = expr_raw.copy()
+    if cfg["tp_pre_zero"]:
+        expr_base = expr_base.replace(0, np.nan)
+    if cfg["tp_pre_log2"]:
+        mn = expr_base.min().min()
+        if pd.notna(mn) and mn <= 0:
+            expr_base = expr_base + abs(mn) + 1e-6
+        expr_base = np.log2(expr_base)
+
+    expr_pre_batch = expr_base.copy()
+    expr_proc = expr_base.copy()
+    ss["batch_combat_info"] = None
+
+    if batch_requested:
+        translated_batch_dict = {
+            b_name: [pretty_labels.get(c, c) for c in b_cols]
+            for b_name, b_cols in (ss.get("batch_dict") or {}).items()
+        }
+        translated_irs_refs = {
+            k: pretty_labels.get(v, v) for k, v in (ss.get("irs_ref_dict") or {}).items()
+        }
+        group_map = {
+            pretty_labels.get(c, c): lbl
+            for lbl, cols in zip(ss.get("global_group_labels") or [], ss.get("global_group_samples") or [])
+            for c in (cols or [])
+        }
+        expr_proc = apply_batch_correction(
+            df=expr_proc,
+            batch_dict=translated_batch_dict,
+            method=batch_method,
+            is_log2=bool(cfg["tp_pre_log2"]),
+            irs_refs=translated_irs_refs,
+            group_map=group_map,
+        )
+        if ss.get("batch_correction_last_error"):
+            ss["batch_correction_applied"] = False
+            ss["batch_correction_applied_method"] = "None"
+        else:
+            ss["batch_correction_applied"] = True
+            ss["batch_correction_applied_method"] = batch_method
+    else:
+        ss["batch_correction_applied"] = False
+        ss["batch_correction_applied_method"] = "None"
+
+    # Same normalization on both matrices, so before/after QC differs only by
+    # the batch correction.
+    if cfg["tp_pre_norm"] == "Quantile normalization":
+        expr_pre_batch = quantile_normalize(expr_pre_batch)
+        expr_proc = quantile_normalize(expr_proc)
+    elif cfg["tp_pre_norm"] == "Median normalization":
+        expr_pre_batch = median_normalize(expr_pre_batch, bool(cfg["tp_pre_log2"]))
+        expr_proc = median_normalize(expr_proc, bool(cfg["tp_pre_log2"]))
+
+    if ss.get("tp_matrix_sig") is not None and ss.get("tp_matrix_sig") != sig:
+        # The matrix changed: earlier results were computed on a different one.
+        ss["diff_results"] = None
+        ss["filtered_df"] = None
+        ss["filtered_ready"] = False
+        ss.pop("stat_method_label", None)
+        ss.pop("diff_pair_labels", None)
+        ss.pop("final_pdf_bytes", None)
+        ss.pop("final_report_zip_bytes", None)
+
+    ss["expr_raw"] = expr_raw
+    ss["expr_pre_batch"] = expr_pre_batch
+    ss["expr_processed"] = expr_proc
+    ss["tp_preprocessing_label"] = describe_preprocessing(
+        cfg, ss.get("batch_correction_applied_method", "None") if ss.get("batch_correction_applied") else "none"
+    )
+    ss["tp_matrix_sig"] = sig
+    return expr_proc
+
+
+def render_preprocessing_settings(df: pd.DataFrame):
+    """Matrix preprocessing settings (shown in Data Filtering & Group Specification)."""
+    with st.container(border=True):
+        st.markdown("#### Matrix Preprocessing")
+        st.caption(
+            "Applied in this order: protein filters, 0 as missing, log2, batch correction, normalization. "
+            "The result is used by QC, statistics and the report."
+        )
+        with st.expander("What do these do?", icon=":material/help:"):
+            st.markdown(
+                "* **Treat 0 as missing:** in mass spectrometry a 0 usually means *not detected*, not *absent*. "
+                "Treating it as missing keeps it from dragging group means down.\n"
+                "* **Log2 transform:** turns fold changes into differences and evens out the variance between "
+                "high- and low-abundance proteins. Needed for t-tests, ANOVA and limma.\n"
+                "* **Normalization:** removes differences in how much material each sample had. "
+                "*Median normalization* shifts each sample so the medians line up; it is the usual choice for "
+                "TMT and copes well with missing values. *Quantile normalization* makes every sample's whole "
+                "distribution identical; it assumes all samples measured the same proteins, so it is less "
+                "reliable when samples differ a lot in missing values.\n"
+                "* **Minimum unique peptides:** drops proteins identified from too few peptides (often less "
+                "reliable). 1 keeps everything.\n"
+                "* **High-confidence master proteins only:** keeps Proteome Discoverer master proteins with "
+                "High protein FDR confidence and drops candidates and lower-confidence groups."
+            )
+
+        def _seed(widget_key, perm_key):
+            if widget_key not in ss:
+                ss[widget_key] = ss.get(perm_key, PREPROCESS_DEFAULTS[perm_key])
+
+        # Widget keys are temporary (Streamlit forgets them when this panel is
+        # hidden); the tp_pre_* keys keep the settings.
+        _seed("_tp_pre_zero", "tp_pre_zero")
+        _seed("_tp_pre_log2", "tp_pre_log2")
+        _seed("_tp_pre_norm", "tp_pre_norm")
+        colA, colB = st.columns(2)
+        with colA:
+            ss["tp_pre_zero"] = st.checkbox(
+                "Treat 0 as missing (NA)", key="_tp_pre_zero",
+                help="Recommended. A 0 usually means the protein was not detected in that sample.",
+            )
+        with colB:
+            ss["tp_pre_log2"] = st.checkbox(
+                "Log2 transform", key="_tp_pre_log2",
+                help="Recommended. Needed for t-tests, ANOVA and limma.",
+            )
+        ss["tp_pre_norm"] = st.radio(
+            "Normalization", NORM_CHOICES, key="_tp_pre_norm", horizontal=True,
+            help="Median normalization is the usual choice for TMT. Quantile normalization is less reliable "
+                 "when samples have very different numbers of missing values.",
+        )
+
+        if "# Unique Peptides" in df.columns:
+            _seed("_tp_min_unique_pep", "tp_min_unique_pep")
+            ss["tp_min_unique_pep"] = int(st.number_input(
+                "Minimum unique peptides per protein", min_value=1, max_value=10, step=1,
+                key="_tp_min_unique_pep",
+                help="Proteins with fewer unique peptides are dropped. 1 keeps everything.",
+            ))
+        has_pd_flags = "Master" in df.columns or any(
+            str(c).lower().startswith("protein fdr confidence") for c in df.columns
+        )
+        if has_pd_flags:
+            _seed("_tp_high_conf_master", "tp_high_conf_master")
+            ss["tp_high_conf_master"] = st.checkbox(
+                "High-confidence master proteins only", key="_tp_high_conf_master",
+                help="Keep Proteome Discoverer master proteins with High protein FDR confidence.",
+            )
+
+        if ss.get("tp_preprocessing_label"):
+            st.caption(f"Current matrix: {ss['tp_preprocessing_label']}")
+
+
+# -----------------------------------------------------------------------------
+# limma for the total proteome matrix (shared limma core in ge/diff_results_utility)
+# -----------------------------------------------------------------------------
+TP_TEST_HELP = dict(TEST_HELP)
+TP_TEST_HELP.update({
+    "Student's t-test (Independent, Equal Variance)":
+        "Classic two-sample t-test on the processed matrix (log2 if log2 is on). Assumes both groups have a similar spread.",
+    "Welch's t-test (Independent, Unequal Variance)":
+        "t-test on the processed matrix that does not assume equal spread. Safer than Student's when one group is more variable.",
+    CLASSIC_ANOVA:
+        "One-way ANOVA on the processed matrix: does any of the three groups differ?",
+    LIMMA_T:
+        "Recommended with few replicates (3-6 per group). Uses the processed log2 matrix and borrows variance "
+        "information from all proteins (empirical Bayes), which gives stable results. log2FC is the difference "
+        "of mean log2 abundance, the same definition as the t-tests here.",
+    LIMMA_F:
+        "limma's version of ANOVA on the log2 matrix, with empirical Bayes variances. The p/q-value says whether "
+        "any group differs. The table also gives log2FC and q-value for every pair of groups.",
+})
+
+_TP_META = ["RowID", "GeneID", "Genes", "Description", "Accession", "Master Protein Accessions"]
+
+
+def _tp_log2_values(df: pd.DataFrame, cols: list, is_log2: bool) -> np.ndarray:
+    vals = df[cols].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+    if is_log2:
+        return np.where(np.isfinite(vals), vals, np.nan)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(vals > 0, np.log2(vals), np.nan)
+
+
+def compute_diffexp_limma_tp(df, groups, labels, control_idx, test_idx,
+                             use_all_groups=True, is_log2=True) -> pd.DataFrame:
+    keep = [i for i, g in enumerate(groups) if g] if use_all_groups else [control_idx, test_idx]
+    cols, gvec = [], []
+    for k, gi in enumerate(keep):
+        for c in groups[gi]:
+            cols.append(c)
+            gvec.append(k)
+    C = np.zeros((len(keep), 1))
+    C[keep.index(test_idx), 0] = 1.0
+    C[keep.index(control_idx), 0] = -1.0
+    res = limma_group_test(_tp_log2_values(df, cols, is_log2), np.array(gvec), C)
+
+    out = df.copy()
+    ctrl, test = list(groups[control_idx]), list(groups[test_idx])
+    c_lab, t_lab = labels[control_idx], labels[test_idx]
+    out[c_lab] = out[ctrl].mean(axis=1)
+    out[t_lab] = out[test].mean(axis=1)
+    out["log2FC"] = res["logFC"][:, 0]
+    out["AveExpr"] = res["AveExpr"]
+    out["t"] = res["t"][:, 0]
+    out["p-value"] = res["p"][:, 0]
+    out["q-value"] = _bh_adjust(out["p-value"].to_numpy())
+
+    out["Regulation"] = "Not Significant"
+    out.loc[(out["q-value"] < 0.05) & (out["log2FC"] > 1), "Regulation"] = "Upregulated"
+    out.loc[(out["q-value"] < 0.05) & (out["log2FC"] < -1), "Regulation"] = "Downregulated"
+    out["__reg_sort__"] = out["Regulation"].map({"Upregulated": 0, "Downregulated": 1, "Not Significant": 2}).fillna(3)
+    keep_cols = [c for c in _TP_META if c in out.columns] + [
+        c_lab, t_lab, "log2FC", "AveExpr", "t", "p-value", "q-value", "Regulation"
+    ] + list(dict.fromkeys(ctrl + test))
+    out = out.sort_values(by=["__reg_sort__", "q-value"], ascending=[True, True], na_position="last")
+    return out[keep_cols]
+
+
+def compute_diffexp_limma_f_tp(df, groups, labels, control_idx=0, is_log2=True) -> pd.DataFrame:
+    keep = [i for i, g in enumerate(groups) if g]
+    if control_idx not in keep:
+        control_idx = keep[0]
+    cols, gvec = [], []
+    for k, gi in enumerate(keep):
+        for c in groups[gi]:
+            cols.append(c)
+            gvec.append(k)
+    others = [gi for gi in keep if gi != control_idx]
+    pairs = [(gi, control_idx) for gi in others]
+    pairs += [(others[b], others[a]) for a in range(len(others)) for b in range(a + 1, len(others))]
+
+    def _cm(pair_list):
+        C = np.zeros((len(keep), len(pair_list)))
+        for k, (num, den) in enumerate(pair_list):
+            C[keep.index(num), k] = 1.0
+            C[keep.index(den), k] = -1.0
+        return C
+
+    Y = _tp_log2_values(df, cols, is_log2)
+    gvec = np.array(gvec)
+    # Overall F from the non-redundant contrasts (as limma topTableF); pairs separately.
+    res = limma_group_test(Y, gvec, _cm(pairs[:len(others)]))
+    res_pairs = limma_group_test(Y, gvec, _cm(pairs))
+
+    out = df.copy()
+    for gi in keep:
+        out[labels[gi]] = out[list(groups[gi])].mean(axis=1)
+    out["AveExpr"] = res["AveExpr"]
+    out["F"] = res["F"]
+    out["p-value"] = res["F_p"]
+    out["q-value"] = _bh_adjust(out["p-value"].to_numpy())
+    out["Regulation"] = np.where(out["q-value"] < 0.05, "Significant", "Not Significant")
+    contrast_cols = []
+    for k, (num, den) in enumerate(pairs):
+        name = f"{labels[num]} vs {labels[den]}"
+        out[f"log2FC ({name})"] = res_pairs["logFC"][:, k]
+        out[f"q-value ({name})"] = _bh_adjust(res_pairs["p"][:, k])
+        contrast_cols += [f"log2FC ({name})", f"q-value ({name})"]
+    keep_cols = [c for c in _TP_META if c in out.columns] + [labels[gi] for gi in keep] + [
+        "AveExpr", "F", "p-value", "q-value", "Regulation"
+    ] + contrast_cols + list(dict.fromkeys(cols))
+    return out.sort_values("q-value", na_position="last")[keep_cols]
+
+
+# -----------------------------------------------------------------------------
+# Differential Engine
 # -----------------------------------------------------------------------------
 def compute_diffexp_tp(
     df: pd.DataFrame,
@@ -495,21 +905,27 @@ def compute_diffexp_tp(
     control_label: str = "Control",
     test_label: str = "Test",
     test_type: str = "Student's t-test (Independent, Equal Variance)",
-    min_n_per_group: int = 2
+    min_n_per_group: int = 2,
+    is_log2: bool = True,
 ) -> pd.DataFrame:
 
     df = df.copy()
     ctrl = [c for c in control_cols if c in df.columns]
     test = [c for c in test_cols if c in df.columns]
     all_cols = list(dict.fromkeys(ctrl + test))
-    
+
     if not ctrl or not test:
         raise ValueError("Need at least 1 valid sample column in both control and test groups.")
 
     df[control_label] = df[ctrl].mean(axis=1)
     df[test_label] = df[test].mean(axis=1)
-    
-    df["log2FC"] = df[test_label] - df[control_label]
+
+    if is_log2:
+        df["log2FC"] = df[test_label] - df[control_label]
+    else:
+        # Raw-scale matrix: a plain difference is not a log2 fold change.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            df["log2FC"] = np.log2(df[test_label].where(df[test_label] > 0)) - np.log2(df[control_label].where(df[control_label] > 0))
 
     pvals = []
     is_paired = "Paired" in test_type
@@ -525,7 +941,7 @@ def compute_diffexp_tp(
                 v1 = v1_raw[mask]
                 v2 = v2_raw[mask]
             else:
-                v1, v2 = [], [] 
+                v1, v2 = [], []
         else:
             v1 = v1_raw[~np.isnan(v1_raw)]
             v2 = v2_raw[~np.isnan(v2_raw)]
@@ -548,7 +964,7 @@ def compute_diffexp_tp(
                 pval = np.nan
         else:
             pval = np.nan
-            
+
         pvals.append(pval)
 
     df["p-value"] = pvals
@@ -1773,18 +2189,34 @@ def render_navigation_buttons() -> None:
 
     panels = [
         (c1, "show_global_select", "btn_global_select", "Data Filtering & Group Specification", "Assign samples to biological groups and set a control/baseline."),
-        (c2, "show_overview", "btn_overview", "Data Integrity Check & Sanity Profiling", "Review preprocessing steps and Quality Control (QC) visualizations."),
+        (c2, "show_overview", "btn_overview", "Data Integrity Check & Sanity Profiling", "Quality control: PCA, density, correlation, heatmap, boxplots and missing values."),
         (c3, "show_suite", "btn_suite", "Statistical Analysis Suite", "Perform differential expression testing and visualize results (Volcano, Heatmaps, etc.)."),
         (c4, "show_report", "btn_report", "Results Download", "Compile and export a comprehensive PDF report and ZIP bundle of your analysis."),
     ]
 
+    def _toggle(state_key):
+        # Runs as a callback (before the page is redrawn) so the ▸/▾ label always
+        # matches the open panel. Toggling inside "if st.button(...)" changed the
+        # label one run late, and Streamlit then dropped the next click.
+        if ss.get(state_key):
+            ss[state_key] = False
+        else:
+            _set_active_panel(state_key)
+
     for col, state_key, button_key, label, help_text in panels:
         prefix = "▸ " if not ss[state_key] else "▾ "
-        if col.button(prefix + label, use_container_width=True, key=button_key, help=help_text):
-            if ss[state_key]:
-                ss[state_key] = False
-            else:
-                _set_active_panel(state_key)
+        col.button(prefix + label, use_container_width=True, key=button_key, help=help_text,
+                   on_click=_toggle, args=(state_key,))
+
+    # Step guide: what each step needs and whether it is done.
+    n_ready = sum(1 for g in (ss.get("global_group_samples") or []) if g)
+    c1.caption(f"Step 1 · :green[✓ {n_ready} groups defined]" if n_ready >= 2
+               else "Step 1 · Start here: assign samples to at least 2 groups")
+    c2.caption("Step 2 · Check samples look as expected before testing")
+    done = ss.get("diff_results") is not None
+    c3.caption(f"Step 3 · :green[✓ {str(ss.get('stat_method_label', 'Statistics done')).split(';')[0]}]" if done
+               else ("Step 3 · Ready to run statistics" if n_ready >= 2 else "Step 3 · Needs groups from step 1"))
+    c4.caption("Step 4 · PDF report and ZIP of tables and figures" if done else "Step 4 · Available after statistics")
 
 
 def get_pairwise_group_labels(default_control: str = "Control", default_test: str = "Test") -> tuple[str, str]:
@@ -2297,10 +2729,27 @@ def main():
     render_navigation_buttons()
     st.markdown("<br>", unsafe_allow_html=True)
 
+    # One preprocessing pipeline for QC, statistics and the report.
+    if ss.get("global_all_groups"):
+        build_processed_matrix(df, pretty_labels)
+
     # =========================================================================
     # PILLAR 1: DATA FILTERING & Group Specification
     # =========================================================================
     if ss["show_global_select"]:
+
+        with st.expander("What do I set here?", icon=":material/help:"):
+            st.markdown(
+                "1. **Active samples**: the TMT channels to analyse. Leave out empty channels, and the "
+                "pool/reference channel unless you need it for IRS batch correction.\n"
+                "2. **Groups**: put every channel into a biological group (2 or 3 groups).\n"
+                "3. **Reference group**: the baseline, usually the control. log2FC is reported as "
+                "*other group vs reference*, so positive means higher than the reference.\n"
+                "4. **Matrix preprocessing**: protein filters, 0 as missing, log2 and normalization. "
+                "These define the matrix used everywhere downstream.\n"
+                "5. **Batch correction (optional)**: only if samples were run in more than one TMT plex. "
+                "Each batch should contain more than one group, otherwise batch and biology cannot be separated."
+            )
 
         left, right = st.columns([0.42, 0.58], gap="large")
 
@@ -2317,6 +2766,7 @@ def main():
                 sample_cols = st.multiselect(
                     "Active Samples",
                     options=numeric_cols,
+                    help="TMT channels used in QC, statistics and the report. Remove empty or pool channels.",
                     format_func=lambda x: pretty_labels.get(x, x),
                     key="global_sample_cols_ui",
                 )
@@ -2341,6 +2791,7 @@ def main():
                 n_groups = st.radio(
                     "Number of groups",
                     [2, 3],
+                    help="Choose 3 to unlock the three-group tests (limma F-test or ANOVA).",
                     index=0 if ss["global_n_groups_ui"] == 2 else 1,
                     horizontal=True,
                     key="global_n_groups_ui",
@@ -2437,6 +2888,7 @@ def main():
 
                     control_choice = st.selectbox(
                         "Global Reference (Baseline) Group",
+                        help="The baseline group, usually the control. log2FC = other group vs this group.",
                         options=valid_idxs,
                         format_func=lambda i: global_group_labels[i],
                         index=valid_idxs.index(current),
@@ -2446,6 +2898,9 @@ def main():
                 else:
                     ss["global_control_group_idx"] = 0
                     st.info("Assign samples to groups to select a global reference.")
+
+            # ---- MATRIX PREPROCESSING (moved here from the QC panel) ----
+            render_preprocessing_settings(df)
 
             # ---- BATCH CORRECTION UI ----
             with st.container(border=True):
@@ -2886,111 +3341,31 @@ def main():
             st.warning("Please assign groups in Data Filtering & Group Specification first.")
             st.stop()
 
+        expr_proc = build_processed_matrix(df, pretty_labels)
+        if expr_proc is None:
+            st.stop()
+        expr_raw = ss["expr_raw"]
+        cfg_now = get_preprocessing_settings()
+        pre_log2 = bool(cfg_now["tp_pre_log2"])
+        pre_quant = cfg_now["tp_pre_norm"] != "None"
+        batch_method = ss.get("batch_method_ui", "None")
+
         with st.container(border=True):
-            st.markdown("#### Global Matrix Preprocessing")
-            
-            st.markdown(
-                "<p class='subtitle-text'>Configure how raw intensities are cleaned and transformed "
-                "before generating Quality Control (QC) plots or passing data to the Statistical Suite.</p>",
-                unsafe_allow_html=True
-            )
-            
-            with st.expander("Preprocessing Parameter Definitions & Guide", expanded=False):
-                st.markdown("""
-                **Transformations (Adjusting the Data Shape):**
-                * **Treat 0 as missing (NA):** In mass spectrometry, a true "0" usually means the protein/peptide was below the instrument's limit of detection. Treating 0s as true missing values (NA) prevents them from artificially dragging down group means and skewing variance calculations.
-                * **Log2 transform:** Converts multiplicative intensity differences into additive, linear scales. This is a strict prerequisite for most parametric statistical tests (like t-tests and ANOVA) and helps stabilize variance between highly abundant and low-abundance proteins.
-                * **Quantile normalize:** Forces the overall intensity distribution of every sample to be statistically identical. This is highly recommended for TMT multiplexed datasets or label-free runs with visible technical batch effects to ensure true comparability.
-                """)
-            st.divider()
-
-            colA, colB = st.columns([0.5, 0.5])
-            with colA:
-                pre_zero = st.checkbox("Treat 0 as missing (NA)", value=ss.get("pre_treat_zero", True), key="pre_treat_zero")
-            with colB:
-                pre_log2 = st.checkbox("Log2 transform", value=ss.get("pre_log2", True), key="pre_log2")
-                pre_quant = st.checkbox("Quantile normalize", value=ss.get("pre_quantile", True), key="pre_quantile")
-
-            with st.spinner("Processing Matrix..."):
-                expr_raw = (
-                    df[["RowID"] + ss["global_all_groups"]]
-                    .groupby("RowID")
-                    .mean()
-                    .apply(pd.to_numeric, errors="coerce")
-                )
-                expr_raw.rename(columns=pretty_labels, inplace=True)
-
-                expr_base = expr_raw.copy()
-
-                # 1. Zero Handling
-                if pre_zero:
-                    expr_base = expr_base.replace(0, np.nan)
-
-                # 2. Log2 Transform
-                if pre_log2:
-                    mn = expr_base.min().min()
-                    if pd.notna(mn) and mn <= 0:
-                        expr_base = expr_base + abs(mn) + 1e-6
-                    expr_base = np.log2(expr_base)
-
-                batch_method = ss.get("batch_method_ui", "None")
-                batch_requested = (
-                    ss.get("enable_batch_correction", False)
-                    and ss.get("batch_correction_requested", False)
-                    and batch_method != "None"
-                )
-
-                expr_pre_batch = expr_base.copy()
-                expr_proc = expr_base.copy()
-
-                if batch_requested:
-                    translated_batch_dict = {}
-                    for b_name, b_cols in ss.get("batch_dict", {}).items():
-                        translated_batch_dict[b_name] = [
-                            pretty_labels.get(c, c)
-                            for c in b_cols
-                        ]
-
-                    translated_irs_refs = {
-                        k: pretty_labels.get(v, v)
-                        for k, v in ss.get("irs_ref_dict", {}).items()
-                    }
-
-                    expr_proc = apply_batch_correction(
-                        df=expr_proc,
-                        batch_dict=translated_batch_dict,
-                        method=batch_method,
-                        is_log2=pre_log2,
-                        irs_refs=translated_irs_refs
-                    )
-
-                    if ss.get("batch_correction_last_error"):
-                        ss["batch_correction_applied"] = False
-                    else:
-                        ss["batch_correction_applied"] = True
-                        ss["batch_correction_applied_method"] = batch_method
-                else:
-                    ss["batch_correction_applied"] = False
-                    ss["batch_correction_applied_method"] = "None"
-
-                # 4. Quantile Normalization
-                # Apply the same normalization to both matrices so Before/After
-                # PCA differs by batch correction rather than normalization.
-                if pre_quant:
-                    expr_pre_batch = quantile_normalize(expr_pre_batch)
-                    expr_proc = quantile_normalize(expr_proc)
-
-                ss["expr_raw"] = expr_raw
-                ss["expr_pre_batch"] = expr_pre_batch
-                ss["expr_processed"] = expr_proc
+            st.markdown("#### Matrix Used for QC and Statistics")
+            st.markdown(f"**{expr_proc.shape[0]:,} proteins** · {ss.get('tp_preprocessing_label', '')}")
+            st.caption("To change protein filters, log2, normalization or batch correction, open "
+                       "**Data Filtering & Group Specification**.")
 
             if ss.get("batch_correction_applied", False):
                 st.success(
                     f"{ss.get('batch_correction_applied_method', batch_method)} "
-                    "applied successfully. QC can compare before and after "
-                    "batch correction, and downstream analysis will use "
-                    "corrected abundances."
+                    "applied. QC can compare before and after batch correction, and downstream "
+                    "analysis uses the corrected abundances."
                 )
+                for _w in (ss.get("batch_combat_info") or {}).get("warnings", []):
+                    st.warning(_w)
+            elif ss.get("batch_correction_last_error"):
+                st.error(f"Batch correction was not applied: {ss['batch_correction_last_error']}")
             elif (
                 ss.get("enable_batch_correction", False)
                 and not ss.get("batch_correction_requested", False)
@@ -3001,11 +3376,6 @@ def main():
                     "**Run Batch Correction**."
                 )
 
-            st.success(
-                f"Matrix processed! Tracking "
-                f"{expr_proc.shape[0]} unique protein features."
-            )
-        
         st.divider()    
         st.markdown("#### Quality Control Plots")
         
@@ -3051,10 +3421,27 @@ def main():
                         qc_target = expr_proc
 
                 qc_mode = st.radio(
-                    "Select QC Plot:", 
+                    "Select QC Plot:",
                     ["PCA", "Density", "Correlation Matrix", "QC Heatmap", "Boxplot", "Missing Values"],
                     key="qc_plot_type"
                 )
+                _qc_help = {
+                    "PCA": "Each dot is a sample. Replicates of a group should sit together. A sample far from its "
+                           "group may be an outlier (labelling or loading problem). Separation by plex or batch "
+                           "instead of group suggests batch correction.",
+                    "Density": "Distribution of values per sample. After normalization the curves should overlap. "
+                               "Switch to the raw data to see loading differences between samples.",
+                    "Correlation Matrix": "Correlation between samples. Replicates should correlate highly; a sample "
+                                          "that correlates poorly with all others needs a closer look.",
+                    "QC Heatmap": "Clustered heatmap of the most variable proteins. Samples should group by biology "
+                                  "rather than by batch or run order.",
+                    "Boxplot": "Per-sample distributions. Medians should line up after normalization.",
+                    "Missing Values": "Missing values per sample. A sample with far more missing values than the "
+                                      "others may be failed or under-loaded, and it makes quantile normalization "
+                                      "less reliable (prefer median normalization then).",
+                }
+                if qc_mode in _qc_help:
+                    st.info(_qc_help[qc_mode], icon=":material/lightbulb:")
                 
                 if qc_mode == "PCA":
                     st.divider()
@@ -3298,8 +3685,8 @@ def main():
     # PILLAR 3: STATISTICAL ANALYSIS SUITE
     # =========================================================================
     if ss["show_suite"]:
-        if ss.get("expr_processed") is None or ss["expr_processed"].empty:
-            st.warning("Please verify your matrix in 'Data Integrity Check & Sanity Profiling' first.")
+        if build_processed_matrix(df, pretty_labels) is None or ss["expr_processed"].empty:
+            st.warning("Assign samples to at least two groups in 'Data Filtering & Group Specification' first.")
             st.stop()
 
         tabs = st.tabs(["Differential Analysis", "Results Visualizations"])
@@ -3326,145 +3713,253 @@ def main():
 
             with st.container(border=True):
                 st.markdown("#### Test Parameters and Execution")
-                st.markdown(
-                    "<p class='subtitle-text'>Configure the parameters for identifying differentially "
-                    "abundant proteins. Expand the guide below for a detailed explanation of each setting.</p>",
-                    unsafe_allow_html=True
-                )
-                
-                with st.expander("Parameter Definitions & Guide", expanded=False):
-                    st.markdown("""
-                    **Preprocessing (Handling Missing Data & Noise):**
-                    * **Replace 0/NA intensities (Zero-Imputation):** Log-fold calculations fail on true zeros. If enabled, the app calculates the minimum positive intensity for a given protein across all your samples, and replaces missing/zero values with 20% (1/5th) of that minimum value. 
-                    * **Filter by presence (Drop Sparse Rows):** Removes proteins that are barely detected across your dataset to improve statistical power.
-                    * **Presence threshold:** The minimum fraction of samples that must contain a valid intensity.
-                    * **Presence rule:** Determines how the threshold above is applied (e.g., 'At least one group only' preserves on/off markers).
 
-                    **Statistical Testing:**
-                    * **Experimental design:** Select **Pairwise** to compare exactly two groups against each other, or **Three-group ANOVA** to test for any significant variance across three distinct groups simultaneously.
-                    * **Statistical test (Pairwise only):** Choose between parametric (e.g., Student's t, Welch's t) or non-parametric tests (e.g., Mann-Whitney U, Wilcoxon).
-                    """)
+                with st.expander("Which test should I use?", icon=":material/help:"):
+                    st.markdown(
+                        "| Your design | Suggested test |\n"
+                        "|---|---|\n"
+                        "| 2 groups, independent samples, 3-6 replicates (typical TMT) | **limma moderated t-test** |\n"
+                        "| 2 groups, independent samples, 8+ replicates | Welch's t-test or limma |\n"
+                        "| Same subjects measured twice (matched channels) | Paired t-test |\n"
+                        "| 3 groups | **limma moderated F-test** (default), then read the pairwise q-values |\n\n"
+                        "**Why limma?** With few replicates, each protein's variance is estimated from only a "
+                        "handful of values, so ordinary t-tests produce many false hits (tiny variance by chance) "
+                        "and miss real ones. limma shrinks each variance towards the typical variance of all "
+                        "proteins, which makes the test both more reliable and more powerful.\n\n"
+                        "**Missing values:** the classical tests need a value in every sample, so by default they "
+                        "replace missing values with a low value (20% of the protein's smallest intensity; on the "
+                        "log2 scale that is the smallest value minus 2.32). limma does not need that: it fits each "
+                        "protein on the values that were measured. Proteins missing from a whole compared group "
+                        "then get no limma p-value.\n\n"
+                        "**q-value** is the Benjamini-Hochberg adjusted p-value (false discovery rate)."
+                    )
+
+                cfg_now = get_preprocessing_settings()
+                is_log2 = bool(cfg_now["tp_pre_log2"])
+                st.caption(
+                    f"Matrix: {ss.get('tp_preprocessing_label', '')}. "
+                    "Change it in Data Filtering & Group Specification."
+                )
 
                 can_pairwise = len(active) >= 2
                 can_anova    = (len(active) == 3 and ss["global_n_groups"] == 3)
+                labels_unique = len({lbl for lbl, _, _ in active}) == len(active)
 
-                with st.form("run_diff_form"):
-                    st.markdown("### Preprocessing (before statistics)")
+                # No st.form here on purpose: inside a form the options below
+                # would not update when the design or test is changed.
+                DESIGN_TWO = "Two groups (pairwise)"
+                DESIGN_THREE = "All three groups (limma F-test or ANOVA)"
+                comparison_choices = [
+                    DESIGN_TWO if can_pairwise else DESIGN_TWO + " — need ≥2 non-empty groups",
+                    DESIGN_THREE if can_anova else DESIGN_THREE + " — need exactly 3 non-empty groups",
+                ]
+                if ss.get("stat_design") not in comparison_choices:
+                    ss.pop("stat_design", None)
+                comparison_type = st.radio(
+                    "Select experimental design:",
+                    comparison_choices,
+                    index=1 if can_anova else 0,
+                    horizontal=True,
+                    key="stat_design",
+                    help="Two groups: compares one pair and gives a fold change (volcano, waterfall, MA). "
+                         "All three groups: tests whether any group differs; limma also reports every pair.",
+                )
+                is_pairwise_design = comparison_type.startswith(DESIGN_TWO)
 
-                    do_zero_impute = st.checkbox(
-                        "Replace 0/NA intensities before differential",
-                        value=True,
-                        help="Row-wise: for each row, 0/NA → (minimum positive intensity in that row) / 5"
-                    )
-                    
-                    do_presence_filter = st.checkbox("Filter by presence (drop sparse rows)", value=True)
-                    presence_min_frac = st.slider("Presence threshold (fraction)", 0.05, 1.00, 0.40, 0.05)
-                    
-                    presence_rule_ui = st.radio(
-                        "Presence rule",
-                        options=[
-                            "Total samples only",
-                            "At least one group only",
-                            "OR: Total samples OR one group",
-                            "AND: Total samples AND one group",
-                        ],
-                        index=2
-                    )
-                    presence_rule_key = {
-                        "Total samples only": "all_only",
-                        "At least one group only": "group_only",
-                        "OR: Total samples OR one group": "or",
-                        "AND: Total samples AND one group": "and",
-                    }[presence_rule_ui]
+                selected_pair = None
+                pairs = {}
+                specific_test = PAIRWISE_TESTS[0]
+                multigroup_test = MULTIGROUP_TESTS[0]
+                limma_all_groups = True
 
-                    st.divider()
-                    st.markdown("### Comparison")
-
-                    comparison_choices = []
-                    if can_pairwise: comparison_choices.append("Pairwise")
-                    else: comparison_choices.append("Pairwise — need ≥2 non-empty groups")
-                    
-                    if can_anova: comparison_choices.append("Three-group ANOVA")
-                    else: comparison_choices.append("Three-group ANOVA — need exactly 3 non-empty groups")
-
-                    comparison_type = st.radio("Select experimental design:", comparison_choices, index=0)
-                    selected_pair = None
-                    specific_test = "Welch's t-test (Independent, Unequal Variance)"
-
-                    if comparison_type.startswith("Pairwise"):
-                        if can_pairwise:
-                            pairs = {
-                                f"{active[i][0]} vs {active[j][0]}": (active[i][1], active[j][1], active[i][0], active[j][0])
-                                for i in range(len(active)) for j in range(i + 1, len(active))
-                            }
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                selected_pair = st.selectbox("Select pairwise comparison:", list(pairs.keys()))
-                            with col2:
-                                specific_test = st.selectbox("Select statistical test:", [
-                                    "Student's t-test (Independent, Equal Variance)",
-                                    "Welch's t-test (Independent, Unequal Variance)",
-                                    "Paired t-test (Matched Samples)",
-                                    "Mann-Whitney U (Non-parametric Independent)",
-                                    "Wilcoxon Signed-Rank (Non-parametric Paired)"
-                                ], index=1)
+                if is_pairwise_design:
+                    if can_pairwise:
+                        pairs = {
+                            f"{labels[i]} vs {labels[j]}": (i, j)
+                            for a, (_, _, i) in enumerate(active)
+                            for (_, _, j) in active[a + 1:]
+                        }
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            selected_pair = st.selectbox(
+                                "Select pairwise comparison:", list(pairs.keys()), key="stat_pair",
+                                help="log2FC is always reported as the other group versus the reference group.",
+                            )
+                        with col2:
+                            specific_test = st.selectbox(
+                                "Select statistical test:", PAIRWISE_TESTS, key="stat_test",
+                                help="Not sure? Open 'Which test should I use?' above.",
+                            )
+                        st.caption(TP_TEST_HELP.get(specific_test, ""))
+                        if specific_test == LIMMA_T and len(active) > 2:
+                            limma_all_groups = st.checkbox(
+                                "Use all groups to estimate variance (recommended)", value=True,
+                                key="stat_limma_all_groups",
+                                help="Standard limma practice: the third group adds information about measurement "
+                                     "noise and gives more power. Turn off to use only the two compared groups.",
+                            )
+                else:
+                    selected_pair = "Three-group ANOVA"
+                    if can_anova:
+                        multigroup_test = st.radio(
+                            "Select statistical test:", MULTIGROUP_TESTS, key="stat_multigroup_test",
+                            captions=[
+                                "Recommended. Stable with few replicates. Also gives log2FC and q-value for every pair of groups.",
+                                "Classical test. Only says whether any group differs.",
+                            ],
+                            help=TP_TEST_HELP[LIMMA_F],
+                        )
                     else:
-                        selected_pair = "Three-group ANOVA"
+                        st.warning("Define exactly three non-empty groups in Data Filtering & Group Specification.")
 
-                    run_button = st.form_submit_button(
-                        "Run Analysis", 
-                        type="primary", 
-                        help="Execute the selected statistical test on the grouped data."
+                uses_limma = (specific_test == LIMMA_T) if is_pairwise_design else (multigroup_test == LIMMA_F)
+                if uses_limma and not is_log2:
+                    st.info("Log2 is off in Matrix Preprocessing, so limma log2-transforms the values itself "
+                            "(zeros and negative values become missing).")
+
+                st.divider()
+                st.markdown("##### Preprocessing (before statistics)")
+                if uses_limma:
+                    do_zero_impute = st.checkbox(
+                        "Replace 0/NA intensities before differential", value=False, key="tp_impute_limma",
+                        help="Off is recommended for limma: it uses only measured values. Turn on to also test "
+                             "proteins missing from a whole group (their fold changes then depend on the filled value).",
                     )
+                else:
+                    do_zero_impute = st.checkbox(
+                        "Replace 0/NA intensities before differential", value=True, key="tp_impute_classic",
+                        help="Fills missing values with 20% of the protein's smallest intensity "
+                             "(on the log2 scale: smallest value minus 2.32). The classical tests need a value in every sample.",
+                    )
+                do_presence_filter = st.checkbox(
+                    "Filter by presence (drop sparse rows)", value=True, key="tp_presence_on",
+                    help="Drops proteins measured in too few samples before testing.",
+                )
+                presence_min_frac = st.slider(
+                    "Presence threshold (fraction)", 0.05, 1.00, 0.40, 0.05, key="tp_presence_frac",
+                    help="Fraction of samples that must have a measured value.",
+                )
+                presence_rule_ui = st.radio(
+                    "Presence rule",
+                    options=[
+                        "Total samples only",
+                        "At least one group only",
+                        "OR: Total samples OR one group",
+                        "AND: Total samples AND one group",
+                    ],
+                    index=2,
+                    key="tp_presence_rule",
+                    help="'At least one group' keeps proteins that are present in one condition and absent in another.",
+                )
+                presence_rule_key = {
+                    "Total samples only": "all_only",
+                    "At least one group only": "group_only",
+                    "OR: Total samples OR one group": "or",
+                    "AND: Total samples AND one group": "and",
+                }[presence_rule_ui]
+
+                run_button = st.button(
+                    "Run Analysis", type="primary", key="btn_run_diff_tp",
+                    help="Execute the selected statistical test on the grouped data.",
+                )
 
                 if run_button:
+                    ss["filtered_df"] = None
+                    ss["filtered_ready"] = False
+                    prep_note = (
+                        (f"presence >= {presence_min_frac:.0%} ({presence_rule_ui})" if do_presence_filter else "no presence filter")
+                        + ("; missing values filled" if do_zero_impute else "; no imputation")
+                    )
                     try:
-                        meta_df = df.drop_duplicates(subset="RowID").set_index("RowID")
-                        meta_cols = [c for c in ["GeneID", "Genes", "Description", "Accession", "Master Protein Accessions"] if c in meta_df.columns]
-                        analysis_df = meta_df[meta_cols].join(expr, how="right").reset_index()
-
-                        target_cols = [c for g in groups for c in g]
-                        if do_presence_filter:
-                            analysis_df = filter_by_presence_rule(
-                                analysis_df, target_cols, groups, presence_min_frac, presence_rule_key
-                            )
-                        if do_zero_impute:
-                            analysis_df = replace_zeros_rowwise_min_fraction(
-                                analysis_df, target_cols, frac=0.2, replace_nan=True
-                            )
-
-                        if comparison_type.startswith("Pairwise"):
-                            group1, group2, label1, label2 = pairs[selected_pair]
-                            
-                            if control_label == label1:
-                                control_cols, test_cols = group1, group2
-                                control_lab, test_lab = label1, label2
-                            elif control_label == label2:
-                                control_cols, test_cols = group2, group1
-                                control_lab, test_lab = label2, label1
-                            else:
-                                control_cols, test_cols = group1, group2
-                                control_lab, test_lab = label1, label2
-
-                            diff_df = compute_diffexp_tp(
-                                df=analysis_df, control_cols=control_cols, test_cols=test_cols,
-                                control_label=control_lab, test_label=test_lab, test_type=specific_test
-                            )
+                        if not labels_unique:
+                            st.error("Group labels must be different from each other. Rename the groups in Data Filtering & Group Specification.")
                         else:
-                            diff_df = compute_diffexp_anova_tp(
-                                df=analysis_df, 
-                                group1_cols=groups[0], group2_cols=groups[1], group3_cols=groups[2],
-                                group1_label=labels[0], group2_label=labels[1], group3_label=labels[2]
-                            )
-                        
-                        ss["diff_results"] = diff_df
-                        st.success(f"Differential analysis complete: {selected_pair}")
-                    
+                            meta_df = df.drop_duplicates(subset="RowID").set_index("RowID")
+                            meta_cols = [c for c in ["GeneID", "Genes", "Description", "Accession", "Master Protein Accessions"] if c in meta_df.columns]
+                            analysis_df = meta_df[meta_cols].join(expr, how="right").reset_index()
+
+                            target_cols = [c for g in groups for c in g]
+                            if do_presence_filter:
+                                analysis_df = filter_by_presence_rule(
+                                    analysis_df, target_cols, groups, presence_min_frac, presence_rule_key,
+                                    log2_scale=is_log2,
+                                )
+                            if do_zero_impute:
+                                analysis_df = replace_zeros_rowwise_min_fraction(
+                                    analysis_df, target_cols, frac=0.2, replace_nan=True, log2_scale=is_log2,
+                                )
+
+                            if is_pairwise_design:
+                                if not can_pairwise or not selected_pair:
+                                    raise ValueError("Define at least two non-empty groups and pick a comparison.")
+                                i, j = pairs[selected_pair]
+                                c_i, t_i = (j, i) if ctrl_idx == j else (i, j)
+                                control_lab, test_lab = labels[c_i], labels[t_i]
+                                with st.spinner(f"Running {specific_test}..."):
+                                    if specific_test == LIMMA_T:
+                                        diff_df = compute_diffexp_limma_tp(
+                                            analysis_df, groups, labels, c_i, t_i,
+                                            use_all_groups=limma_all_groups, is_log2=is_log2,
+                                        )
+                                    else:
+                                        diff_df = compute_diffexp_tp(
+                                            df=analysis_df, control_cols=groups[c_i], test_cols=groups[t_i],
+                                            control_label=control_lab, test_label=test_lab,
+                                            test_type=specific_test, is_log2=is_log2,
+                                        )
+                                method_label = f"{specific_test}: {test_lab} vs {control_lab}"
+                                if specific_test == LIMMA_T and limma_all_groups and len(active) > 2:
+                                    method_label += " (variance from all groups)"
+                                ss["diff_pair_labels"] = (control_lab, test_lab)
+                            else:
+                                if not can_anova:
+                                    raise ValueError("Provide exactly three non-empty groups for ANOVA.")
+                                with st.spinner(f"Running {multigroup_test}..."):
+                                    if multigroup_test == LIMMA_F:
+                                        diff_df = compute_diffexp_limma_f_tp(
+                                            analysis_df, groups, labels, ctrl_idx, is_log2=is_log2,
+                                        )
+                                    else:
+                                        diff_df = compute_diffexp_anova_tp(
+                                            df=analysis_df,
+                                            group1_cols=groups[0], group2_cols=groups[1], group3_cols=groups[2],
+                                            group1_label=labels[0], group2_label=labels[1], group3_label=labels[2]
+                                        )
+                                method_label = f"{multigroup_test}: {', '.join(labels[:3])}"
+                                ss.pop("diff_pair_labels", None)
+
+                            ss["diff_results"] = diff_df
+                            ss["stat_method_label"] = f"{method_label}; {prep_note}"
+
                     except Exception as e:
                         st.error(f"Differential analysis failed: {e}")
 
             if ss.get("diff_results") is not None:
-                st.success("Differential analysis complete. Results available below.")
+                _res = ss["diff_results"]
+                _q = pd.to_numeric(_res["q-value"], errors="coerce") if "q-value" in _res.columns else pd.Series(dtype=float)
+                st.success(
+                    f"**{ss.get('stat_method_label', 'Differential analysis complete')}**: "
+                    f"{len(_res):,} proteins in the results, {int((_q < 0.05).sum()):,} with q < 0.05."
+                )
+                if "AveExpr" in _res.columns:
+                    if "F" in _res.columns:
+                        st.caption(
+                            "limma columns: **AveExpr** = mean log2 abundance; **F** = moderated F statistic; "
+                            "**p-value / q-value** = does any group differ; **log2FC (B vs A)** and "
+                            "**q-value (B vs A)** = each pair of groups (moderated t-test)."
+                        )
+                    else:
+                        st.caption(
+                            "limma columns: **log2FC** = mean log2(test) − mean log2(reference); "
+                            "**AveExpr** = mean log2 abundance; **t** = moderated t statistic."
+                        )
+                    _n_untested = int(_q.isna().sum())
+                    if _n_untested:
+                        st.caption(
+                            f"{_n_untested:,} proteins have no limma p-value because they were not measured in a "
+                            "whole compared group. They are listed at the bottom. Tick *Replace 0/NA* and re-run "
+                            "to test them with filled-in values."
+                        )
                 st.dataframe(ss["diff_results"], use_container_width=True)
                 
                 with st.expander("Download Full Dataset (Unfiltered)", expanded=False):

@@ -40,11 +40,13 @@ def faq_section():
                 Go to **Data Filtering & Group Specification**.
 
                 Select:
-                - Active LFQ sample columns
+                - Active LFQ sample columns (LFQ columns are pre-selected)
                 - 2 or 3 groups
                 - Group labels
                 - Reference/control group
-                - Optional batch correction
+
+                Then open **Preprocessing, QC & Batch Correction**, pick the
+                imputation method and click **Run Normalization + Imputation**.
                 '''
             )
 
@@ -67,7 +69,9 @@ def faq_section():
             )
 
         st.info(
-            "Recommended workflow: upload matrix → define groups and reference group → run QC/preprocessing → run differential analysis → review volcano, MA, waterfall, heatmap, and protein profile plots → export report."
+            "Recommended workflow: upload matrix → define groups and reference group → normalize + impute (your choice of method) "
+            "→ check QC → optional batch correction → limma (recommended) or t-test → review volcano, MA, waterfall, heatmap "
+            "and protein profiles → export report."
         )
 
         st.markdown("### How to Interpret the Main Outputs")
@@ -158,8 +162,11 @@ def faq_section():
                 "Category": "Input Files",
                 "Question": "Which identifier columns are supported?",
                 "Answer": (
-                    "The app can use identifier columns such as `GeneID`, `Genes`, `Description`, `Accession`, `Protein ID`, "
-                    "`Protein.IDs`, or `Master Protein Accessions`. It creates internal `GeneID` and `RowID` fields for downstream plotting."
+                    "The app can use identifier columns such as `GeneID`, `Genes`, `Gene names`, `Description`, `Accession`, `Protein ID`, "
+                    "`Protein.IDs`, or `Master Protein Accessions`. It creates internal `GeneID` and `RowID` fields for downstream plotting.\n\n"
+                    "Common exports work directly: MaxQuant `proteinGroups.txt` (the `LFQ intensity` columns are pre-selected), "
+                    "FragPipe `combined_protein.tsv` (the `MaxLFQ Intensity` columns are pre-selected) and DIA-NN `pg_matrix.tsv` "
+                    "(file paths in column names are shortened to the file name)."
                 ),
             },
             {
@@ -185,7 +192,8 @@ def faq_section():
                 "Category": "Input Files",
                 "Question": "What does the example dataset do?",
                 "Answer": (
-                    "The sidebar example dataset is a small LFQ protein abundance matrix that can be used to test input formatting, grouping, QC, statistics, and exports."
+                    "The sidebar example (`Protein_abundance_LFQ.xlsx`) shows the expected layout: identifier columns followed by one "
+                    "intensity column per sample. It is very small (16 proteins), so use it to check formatting, not to judge statistics."
                 ),
             },
 
@@ -209,8 +217,8 @@ def faq_section():
                 "Category": "Sample Setup",
                 "Question": "Can I analyze three groups?",
                 "Answer": (
-                    "Yes. If three groups are selected, the app runs one-way ANOVA. ANOVA tests whether any group differs but does not provide one simple pairwise direction. "
-                    "Use pairwise comparisons when you need directional fold-change interpretation."
+                    "Yes. With three groups you can either test one pair at a time (volcano, waterfall and MA plots) or test all three "
+                    "together with the limma F-test or one-way ANOVA. The limma F-test also reports log2FC and q-value for every pair."
                 ),
             },
 
@@ -231,19 +239,85 @@ def faq_section():
                 ),
             },
             {
-                "Category": "Preprocessing",
-                "Question": "How does zero-imputation work?",
+                "Category": "Imputation",
+                "Question": "Which imputation method should I use?",
                 "Answer": (
-                    "During differential analysis, the app can replace zero or missing values using a row-wise low value. "
-                    "For each protein, it finds the minimum positive intensity and replaces missing/zero values with a small fraction, commonly 20%, of that value."
+                    "It depends on why values are missing. Open *Help: what each step does* in step 1: the bar chart shows the "
+                    "% missing for low- to high-intensity proteins.\n\n"
+                    "- **Missing mostly in low-intensity proteins** (typical for DDA label-free): a low-end method — "
+                    "Perseus (PI), MinProb, MinDet, QRILC, or the 1/5 minimum rule.\n"
+                    "- **Missing looks random** (often DIA, or few missing values): a similarity method — KNN, BPCA, SVD, LLS or RF.\n"
+                    "- **You use limma and prefer not to invent values:** choose *None*. limma uses only measured values.\n\n"
+                    "Avoid Zero, Column median and Row median for differential analysis; they distort fold changes."
+                ),
+            },
+            {
+                "Category": "Imputation",
+                "Question": "What is the '1/5 of protein minimum (previous default)' method?",
+                "Answer": (
+                    "Each missing value of a protein is set to 1/5 of that protein's smallest measured intensity (on the log2 scale: "
+                    "its smallest value minus 2.32), then shifted by the same normalization as the sample. It is what this app used "
+                    "before, so it is the default to keep results comparable.\n\n"
+                    "Its weakness: all filled values of a protein are the same number. If a protein is missing in a whole group, that "
+                    "group has zero spread and the t-test can look more significant than it is. Perseus (PI) or MinProb add realistic "
+                    "noise and avoid this."
+                ),
+            },
+            {
+                "Category": "Imputation",
+                "Question": "What do 'built-in' and 'needs R' mean?",
+                "Answer": (
+                    "**Built-in** methods (1/5 minimum, Perseus, MinProb, MinDet, medians, minimum, zero) run inside the app and work "
+                    "everywhere, including hosted servers. They follow the same formulas as NAguideR/imputeLCMD/Perseus; the deterministic "
+                    "ones give the same numbers as R. Perseus and MinProb draw random numbers with a fixed seed, so a re-run gives the same "
+                    "values, but not the same random numbers as R.\n\n"
+                    "**Needs R** methods (KNN, BPCA, SVD, QRILC, RF, ...) run the NAguideR code in R. The Windows, macOS and Docker builds "
+                    "include R and these packages. On a server without R these methods are shown as unavailable and the Run button is "
+                    "disabled; the app never replaces your choice with another method."
+                ),
+            },
+            {
+                "Category": "Imputation",
+                "Question": "Earlier results said 'Temporary RConnect mode'. What was that?",
+                "Answer": (
+                    "An earlier version always used the 1/5 minimum rule, whatever method was selected, because R was not available on "
+                    "the hosted server. That mode has been removed: the method you pick is the method that runs, and the report records "
+                    "it. To reproduce those earlier results, choose **1/5 of protein minimum (previous default)**."
+                ),
+            },
+            {
+                "Category": "Imputation",
+                "Question": "Can I run statistics without imputation?",
+                "Answer": (
+                    "Yes. Choose *None (leave missing values)*. limma and the t-tests then use only measured values; proteins with too few "
+                    "measured values in a compared group get no p-value. PCA and heatmaps fill gaps temporarily for drawing only. "
+                    "ComBat batch correction needs a complete matrix, so it is not possible without imputation."
+                ),
+            },
+            {
+                "Category": "Preprocessing",
+                "Question": "Are contaminants and decoys removed?",
+                "Answer": (
+                    "Yes, when the file marks them: MaxQuant `Reverse`, `Potential contaminant` and `Only identified by site` columns "
+                    "(value `+`), and protein IDs starting with `CON__`, `REV__`, `contam_` or `rev_`. The option appears in step 1 "
+                    "only when such rows exist, and it is on by default."
+                ),
+            },
+            {
+                "Category": "Preprocessing",
+                "Question": "In which order are the preprocessing steps applied?",
+                "Answer": (
+                    "Remove contaminants → 0 becomes missing → drop sparse proteins → log2 → normalize → impute. Then QC, then optional "
+                    "batch correction. Statistics use this final matrix and never re-impute or re-normalize."
                 ),
             },
             {
                 "Category": "Preprocessing",
                 "Question": "How does the presence filter work?",
                 "Answer": (
-                    "The presence filter removes sparse proteins before statistics. You can require a protein to be present in a minimum fraction of total samples, "
-                    "in at least one group, or by combined AND/OR rules."
+                    "The presence filter removes sparse proteins before imputation. You can require a protein to be present in a minimum fraction of total samples, "
+                    "in at least one group, or by combined AND/OR rules. 'At least one group' keeps proteins that are present in one "
+                    "condition and absent in another."
                 ),
             },
 
@@ -272,7 +346,8 @@ def faq_section():
                 "Category": "Batch Correction",
                 "Question": "How is batch correction applied in the LFQ app?",
                 "Answer": (
-                    "The app applies batch correction on log2-transformed abundance values, then converts corrected values back to the raw scale for downstream differential testing."
+                    "Batch correction runs after normalization, imputation and QC, on the log2 matrix. The corrected log2 matrix is used "
+                    "directly for statistics. ComBat keeps the biological group as a covariate so that group differences are not removed."
                 ),
             },
             {
@@ -310,7 +385,7 @@ def faq_section():
                 "Category": "QC",
                 "Question": "Why do some heatmaps show RowID?",
                 "Answer": (
-                    "`RowID` is the internal feature identifier. In updated plotting code, the RowID axis title should be removed while retaining useful gene/protein row labels."
+                    "`RowID` is the internal identifier (gene + accession). It keeps proteins with the same gene name apart."
                 ),
             },
 
@@ -319,16 +394,27 @@ def faq_section():
                 "Category": "Differential Analysis",
                 "Question": "What statistical tests are used?",
                 "Answer": (
-                    "For two groups, the app supports Student's t-test, Welch's t-test, paired t-test, Mann-Whitney U, and Wilcoxon signed-rank. "
-                    "For exactly three groups, it runs one-way ANOVA. P-values are adjusted to q-values using Benjamini-Hochberg FDR."
+                    "For two groups: the limma moderated t-test (recommended), Student's t-test, Welch's t-test, paired t-test, Mann-Whitney U "
+                    "and Wilcoxon signed-rank. For three groups: the limma moderated F-test (recommended) or one-way ANOVA. "
+                    "P-values are adjusted to q-values with Benjamini-Hochberg FDR over the proteins that could be tested."
+                ),
+            },
+            {
+                "Category": "Differential Analysis",
+                "Question": "Why is limma recommended?",
+                "Answer": (
+                    "Label-free studies usually have 3-6 samples per group. With so few values, an ordinary t-test often finds a tiny "
+                    "variance by chance (false hits) or a large one (missed hits). limma shrinks each protein's variance towards the typical "
+                    "variance of all proteins (empirical Bayes). This makes results more stable and more powerful. It also handles missing "
+                    "values by using only the measured ones. The app's limma code gives the same results as R limma."
                 ),
             },
             {
                 "Category": "Differential Analysis",
                 "Question": "How is log2FC calculated for LFQ?",
                 "Answer": (
-                    "For pairwise LFQ analysis, the app computes group means and calculates log2FC as log2(test mean + pseudo-count) minus "
-                    "log2(control mean + pseudo-count)."
+                    "The matrix is already log2, so log2FC = mean log2 abundance of the test group minus mean log2 abundance of the "
+                    "reference group. All tests use the same definition."
                 ),
             },
             {
@@ -343,8 +429,9 @@ def faq_section():
                 "Category": "Differential Analysis",
                 "Question": "What happens when I select three groups?",
                 "Answer": (
-                    "The app runs ANOVA, which tests whether any group differs. ANOVA does not provide one simple fold-change direction like a two-group comparison. "
-                    "Use pairwise comparisons for directionality."
+                    "Choose *Two groups (pairwise)* to compare one pair (with fold change and volcano), or *All three groups* for the "
+                    "limma F-test / ANOVA, which tests whether any group differs. The limma F-test table also includes each pair's "
+                    "log2FC and q-value."
                 ),
             },
 
@@ -462,8 +549,25 @@ def faq_section():
                 "Category": "Troubleshooting",
                 "Question": "Why did batch correction fail?",
                 "Answer": (
-                    "Batch correction can fail if batches are empty, if too few samples are assigned, if values are mostly missing, "
-                    "or if ComBat is selected but the `neuroCombat` package is not installed."
+                    "Batch correction can fail if batches are empty, if too few samples are assigned, if biological group and batch "
+                    "are the same split (confounded), or if ComBat is selected but the `neuroCombat` package is not installed. ComBat also "
+                    "needs a complete matrix: choose an imputation method other than *None*."
+                ),
+            },
+            {
+                "Category": "Troubleshooting",
+                "Question": "The Run Normalization + Imputation button is greyed out. Why?",
+                "Answer": (
+                    "The selected method needs R and R (or the method's R package) is not available here. The message under the button "
+                    "says which. Pick a built-in method, or use the Windows/macOS/Docker build, which includes R."
+                ),
+            },
+            {
+                "Category": "Troubleshooting",
+                "Question": "Statistics say 'Preprocessing settings changed'. What do I do?",
+                "Answer": (
+                    "You changed a step-1 setting after the last run. Click **Run Normalization + Imputation** again so the statistics "
+                    "use the matrix that matches the settings shown."
                 ),
             },
             {
@@ -522,6 +626,7 @@ def faq_section():
             "Input Files",
             "Sample Setup",
             "Preprocessing",
+            "Imputation",
             "Batch Correction",
             "QC",
             "Differential Analysis",

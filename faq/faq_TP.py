@@ -199,16 +199,19 @@ def faq_section():
                 "Category": "Sample Setup",
                 "Question": "Can I analyze three groups?",
                 "Answer": (
-                    "Yes. If three groups are selected, the app performs one-way ANOVA. ANOVA tests whether any group differs, "
-                    "but it does not provide a single pairwise log2FC direction like a two-group comparison."
+                    "Yes. Choose **All three groups** in the Statistical Analysis Suite and the limma moderated F-test "
+                    "(default) or one-way ANOVA. Both test whether any group differs. The limma F-test also reports log2FC "
+                    "and q-value for every pair of groups (B vs A, C vs A, C vs B) in the same table."
                 ),
             },
             {
                 "Category": "Preprocessing",
                 "Question": "What preprocessing options are available?",
                 "Answer": (
-                    "The app includes common total-protein preprocessing options such as treating zeros as missing, log2 transformation, "
-                    "row-wise zero/NA replacement, presence filtering, and optional normalization/QC views depending on the selected panel."
+                    "**Matrix Preprocessing** (in Data Filtering & Group Specification) defines the matrix used by QC, statistics "
+                    "and the report: minimum unique peptides, high-confidence master proteins only, treat 0 as missing, log2, "
+                    "batch correction and normalization (quantile, median or none), applied in that order.\n\n"
+                    "The Statistical Analysis Suite adds two test-time options: the presence filter and replacing missing values."
                 ),
             },
             {
@@ -231,8 +234,11 @@ def faq_section():
                 "Category": "Preprocessing",
                 "Question": "How does zero replacement or imputation work?",
                 "Answer": (
-                    "When enabled, the app can replace zero or missing values using a small fraction of the minimum positive value in that protein row. "
-                    "This helps avoid unstable fold-change and statistical calculations caused by zeros."
+                    "When enabled, missing values are replaced with 20% of the protein's smallest measured intensity. On the log2 "
+                    "scale this is the smallest log2 value minus 2.32 (log2 of 0.2). Earlier versions multiplied log2 values by 0.2, "
+                    "which put the filled value near 0 and created large false fold changes; this is fixed.\n\n"
+                    "For **limma** the option is off by default: limma fits each protein on the values that were measured. "
+                    "Proteins missing from a whole compared group then get no limma p-value."
                 ),
             },
             {
@@ -256,9 +262,10 @@ def faq_section():
                 "Question": "Which batch correction methods are available?",
                 "Answer": (
                     "The app provides batch correction options including:\n\n"
-                    "- **ComBat (Empirical Bayes)**\n"
-                    "- **Median Centering**\n"
-                    "- **Internal Reference Scaling (IRS)**\n\n"
+                    "- **ComBat (Empirical Bayes)**: keeps the biological groups in the model, so real group differences are "
+                    "not removed. It refuses designs where a batch contains only one group (batch and biology confounded).\n"
+                    "- **Internal Reference Scaling (IRS)**: for multi-plex TMT with a common pool/reference channel in every plex.\n"
+                    "- **Median / Mean Centering** and **Standardize**: simple per-batch shifts.\n\n"
                     "IRS is useful when each TMT batch/plex has a common pool/reference channel."
                 ),
             },
@@ -311,13 +318,18 @@ def faq_section():
                 "Category": "Differential Analysis",
                 "Question": "Which statistical tests are supported?",
                 "Answer": (
-                    "For two-group comparisons, the app supports:\n\n"
+                    "For two-group comparisons:\n\n"
+                    "- limma moderated t-test (default)\n"
                     "- Student's t-test\n"
                     "- Welch's t-test\n"
                     "- Paired t-test\n"
                     "- Mann-Whitney U test\n"
                     "- Wilcoxon signed-rank test\n\n"
-                    "For three groups, the app performs one-way ANOVA."
+                    "For three groups: limma moderated F-test (default) or one-way ANOVA.\n\n"
+                    "With the 3-6 replicates typical of TMT experiments, limma is usually the best choice: it borrows variance "
+                    "information from all proteins (empirical Bayes), which makes it more reliable and more powerful than an "
+                    "ordinary t-test. The implementation is a Python port of R limma's lmFit, contrasts.fit and eBayes and gives "
+                    "the same numbers as R limma."
                 ),
             },
             {
@@ -341,7 +353,8 @@ def faq_section():
                 "Category": "Differential Analysis",
                 "Question": "How is log2FC calculated?",
                 "Answer": (
-                    "For pairwise TMT-style total protein analysis, log2FC is calculated as the test-group mean minus the control-group mean. "
+                    "On the log2 matrix (default), log2FC is the test-group mean minus the reference-group mean of log2 values; limma "
+                    "uses the same definition. If log2 is turned off, log2FC is log2(test mean / reference mean). "
                     "Axis labels use the selected comparison format, for example `log2 fold-change (Case/Control)`."
                 ),
             },
@@ -349,8 +362,9 @@ def faq_section():
                 "Category": "Differential Analysis",
                 "Question": "What happens when I use ANOVA?",
                 "Answer": (
-                    "ANOVA tests whether any group differs across three groups. It does not produce a single pairwise direction, so pairwise-style "
-                    "volcano, MA, and waterfall interpretation should be used mainly for two-group comparisons."
+                    "ANOVA (or the limma F-test) tests whether any group differs across three groups. It does not produce a single "
+                    "pairwise direction, so volcano, MA and waterfall plots need a two-group comparison. The limma F-test table "
+                    "also lists log2FC and q-value for every pair of groups."
                 ),
             },
             {

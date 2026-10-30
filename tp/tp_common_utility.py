@@ -342,6 +342,11 @@ def get_pairwise_group_labels_common(
     default_test: str = "Test",
 ) -> tuple[str, str]:
     """Return control/test labels using the selected global reference group."""
+    # The pair that was actually tested (set when a pairwise test runs). Without
+    # this, a 3-group study tested as B vs C was labelled "A vs B" in the plots.
+    pair = ss.get("diff_pair_labels")
+    if isinstance(pair, (tuple, list)) and len(pair) == 2 and all(pair):
+        return str(pair[0]), str(pair[1])
     labels = ss.get("global_group_labels", []) or []
     control_idx = ss.get("global_control_group_idx", 0)
 

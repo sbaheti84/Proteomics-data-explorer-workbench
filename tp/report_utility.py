@@ -496,7 +496,10 @@ def generate_final_pdf():
     control_idx = ss.get("global_control_group_idx", 0)
     ref_grp = group_labels[control_idx] if group_labels and control_idx < len(group_labels) else "N/A"
     is_anova = isinstance(diff_df, pd.DataFrame) and "log2FC" not in diff_df.columns
-    stat_test = "Three-group ANOVA" if is_anova else "Pairwise differential test"
+    stat_test = ss.get("stat_method_label") or ("Three-group ANOVA" if is_anova else "Pairwise differential test")
+    # PDF fonts are Latin-1 only; replace anything else instead of failing.
+    stat_test = str(stat_test).encode("latin-1", "replace").decode("latin-1")
+    preprocessing = str(ss.get("tp_preprocessing_label") or "N/A").encode("latin-1", "replace").decode("latin-1")
 
     # ---------------------------------------------------------
     # 1. Experimental design
@@ -504,18 +507,26 @@ def generate_final_pdf():
     pdf.add_page()
     pdf.section_title("1. Experimental Design & Parameters")
 
-    batch_method = ss.get("batch_method_ui", ss.get("batch_method_ui_sel", "None"))
-    batch_status = "Applied/configured" if ss.get("enable_batch_correction", False) else "Not Applied"
-    if batch_status != "Not Applied" and batch_method:
-        batch_status = f"{batch_status} ({batch_method})"
+    batch_method = ss.get("batch_correction_applied_method") or ss.get("batch_method_ui", "None")
+    if ss.get("batch_correction_applied", False):
+        batch_status = f"Applied ({batch_method})"
+    elif ss.get("enable_batch_correction", False):
+        batch_status = "Configured but not applied"
+    else:
+        batch_status = "Not Applied"
 
     params = [
-        f"Analysis Type: Total Proteomics",
+        f"Analysis Type: {ss.get('report_analysis_type', 'Total Proteomics')}",
         f"Statistical Test Used: {stat_test}",
+        f"Matrix Preprocessing: {preprocessing}",
         f"Global Reference Group: {ref_grp}",
         f"Number of Groups: {ss.get('global_n_groups', 'N/A')}",
         f"Batch Effect Correction: {batch_status}",
-        f"Total Proteins Analyzed: {len(merged_df) if isinstance(merged_df, pd.DataFrame) else 'N/A'}",
+        (
+            f"Proteins in Analysis Matrix: {len(ss['expr_processed']):,} (of {len(merged_df):,} uploaded)"
+            if isinstance(ss.get("expr_processed"), pd.DataFrame) and isinstance(merged_df, pd.DataFrame)
+            else f"Total Proteins Analyzed: {len(merged_df) if isinstance(merged_df, pd.DataFrame) else 'N/A'}"
+        ),
         f"Differential Result Rows: {len(diff_df) if isinstance(diff_df, pd.DataFrame) else 'N/A'}",
     ]
     pdf.add_kv_lines([f"- {p}" for p in params], font_size=10)

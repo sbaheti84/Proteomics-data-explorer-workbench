@@ -855,6 +855,142 @@ def create_glycan_class_summary(df: pd.DataFrame, glycan_col: str = "GlycanClass
     return summary_df
 
 # =============================================================================
+# Glycan class breakdown of differential results
+# =============================================================================
+def _glycan_trait(glycan_str) -> str:
+    """Sialylation / fucosylation from a composition string "H N A F" or "H N A G F"."""
+    import re
+    nums = re.findall(r"\d+", str(glycan_str))
+    if len(nums) == 4:
+        _h, _n, a, f = map(int, nums)
+        sia = a
+    elif len(nums) == 5:
+        _h, _n, a, g, f = map(int, nums)
+        sia = a + g
+    else:
+        return "Unknown"
+    if sia > 0 and f > 0:
+        return "Sialylated + fucosylated"
+    if sia > 0:
+        return "Sialylated only"
+    if f > 0:
+        return "Fucosylated only"
+    return "No sialic acid or fucose"
+
+
+def render_glycan_class_breakdown(plot_df: pd.DataFrame, is_anova: bool, sig_col: str,
+                                  alpha: float, fc_thr: float, group_by: str):
+    """
+    Which glycan classes / traits are over-represented among significant glycoforms?
+    One-sided Fisher's exact test per class and direction, BH-adjusted.
+    """
+    import re
+    import plotly.express as px
+    from scipy.stats import fisher_exact
+    from statsmodels.stats.multitest import multipletests
+
+    df = plot_df.copy()
+    if group_by == "Glycan class":
+        if "GlycanClass" not in df.columns:
+            st.info("These results have no GlycanClass column.")
+            return
+        df["_class"] = df["GlycanClass"].fillna("Unknown").astype(str)
+    else:
+        if "Glycan" not in df.columns:
+            st.info("These results have no Glycan composition column.")
+            return
+        df["_class"] = df["Glycan"].apply(_glycan_trait)
+
+    sig = pd.to_numeric(df[sig_col], errors="coerce") < alpha
+    if is_anova:
+        df["_status"] = np.where(sig, "Significant", "Not significant")
+        directions = ["Significant"]
+    else:
+        lfc = pd.to_numeric(df["log2FC"], errors="coerce")
+        df["_status"] = "Not significant"
+        df.loc[sig & (lfc > fc_thr), "_status"] = "Up"
+        df.loc[sig & (lfc < -fc_thr), "_status"] = "Down"
+        directions = ["Up", "Down"]
+
+    counts = pd.crosstab(df["_class"], df["_status"])
+    for col in directions + ["Not significant"]:
+        if col not in counts.columns:
+            counts[col] = 0
+    counts = counts[directions + ["Not significant"]]
+    counts["Total"] = counts.sum(axis=1)
+    counts = counts.sort_values("Total", ascending=False)
+
+    total = int(counts["Total"].sum())
+    rows = []
+    for cls, r in counts.iterrows():
+        row = {"Class": cls, "Glycoforms": int(r["Total"])}
+        for d in directions:
+            in_cls_dir = int(r[d])
+            in_cls_not = int(r["Total"]) - in_cls_dir
+            out_dir = int(counts[d].sum()) - in_cls_dir
+            out_not = (total - int(r["Total"])) - out_dir
+            odds, pval = fisher_exact([[in_cls_dir, in_cls_not], [out_dir, out_not]], alternative="greater")
+            row[f"{d} (n)"] = in_cls_dir
+            row[f"{d} (% of class)"] = round(100.0 * in_cls_dir / max(1, int(r["Total"])), 1)
+            row[f"{d} enrichment p"] = pval
+        rows.append(row)
+    table = pd.DataFrame(rows)
+
+    pcols = [c for c in table.columns if c.endswith("enrichment p")]
+    if pcols and len(table):
+        allp = table[pcols].to_numpy().ravel()
+        q = multipletests(allp, method="fdr_bh")[1].reshape(table[pcols].shape)
+        for k, c in enumerate(pcols):
+            table[c.replace("enrichment p", "enrichment q")] = q[:, k]
+
+    n_hits = int(sum(counts[d].sum() for d in directions))
+    if n_hits == 0:
+        st.warning("No glycoform passes the current cutoffs, so there is nothing to compare. Loosen the cutoffs on the left.")
+
+    # 100% stacked bars: share of each class that is up / down / not significant
+    long = counts[directions + ["Not significant"]].reset_index().melt(
+        id_vars="_class", var_name="Status", value_name="Glycoforms"
+    )
+    long["Percent"] = long.apply(
+        lambda r: 100.0 * r["Glycoforms"] / max(1, int(counts.loc[r["_class"], "Total"])), axis=1
+    )
+    colors = {"Up": "#d62728", "Down": "#1f77b4", "Significant": "#8e44ad", "Not significant": "#d0d4da"}
+    fig = px.bar(
+        long, y="_class", x="Percent", color="Status", orientation="h",
+        color_discrete_map=colors, text="Glycoforms",
+        category_orders={"_class": list(counts.index), "Status": directions + ["Not significant"]},
+        labels={"_class": group_by, "Percent": "% of glycoforms in class"},
+    )
+    fig.update_layout(
+        barmode="stack", height=120 + 48 * len(counts), margin=dict(l=10, r=10, t=40, b=10),
+        legend_title_text="", title=f"Share of significant glycoforms per {group_by.lower()}",
+        plot_bgcolor="white",
+    )
+    fig.update_traces(textposition="inside")
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.caption(
+        "Enrichment: one-sided Fisher's exact test of whether a class holds more significant glycoforms than "
+        "expected from its size, Benjamini-Hochberg adjusted (q). It tells you which classes change more often "
+        "than others, not how much they change."
+    )
+    show_cols = ["Class", "Glycoforms"] + [c for c in table.columns if c.endswith("(n)") or c.endswith("% of class)") or c.endswith("enrichment q")]
+    st.dataframe(
+        table[show_cols].style.format({c: "{:.3g}" for c in show_cols if c.endswith("enrichment q")}),
+        use_container_width=True, hide_index=True,
+    )
+    csv_bytes = table.to_csv(index=False).encode("utf-8")
+    csv_name = f"glycan_{'class' if group_by == 'Glycan class' else 'trait'}_breakdown.csv"
+    try:
+        from download_utility import add_hosted_safe_file_download_button as _dl
+        _dl(label="Download table (CSV)", data=csv_bytes, file_name=csv_name,
+            key="download_glycan_breakdown_csv", use_container_width=False)
+    except Exception:
+        st.download_button("Download table (CSV)", csv_bytes, file_name=csv_name,
+                           mime="text/csv", key="download_glycan_breakdown_csv_fallback")
+
+
+# =============================================================================
 # Centralized browser-safe download overrides
 # =============================================================================
 try:

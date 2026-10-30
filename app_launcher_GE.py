@@ -118,49 +118,8 @@ ss.setdefault("waterfall_alpha", 0.05)
 ss.setdefault("waterfall_logfc", 1.0)
 ss.setdefault("waterfall_topn", 5)
 
-# -----------------------------------------------------------------------------
-# Statistical tests offered in the Statistical Analysis Suite
-# -----------------------------------------------------------------------------
-LIMMA_T = "limma moderated t-test (log2 scale)"
-LIMMA_F = "limma moderated F-test (log2 scale)"
-CLASSIC_ANOVA = "One-way ANOVA (classical F-test)"
-
-# limma is listed first, so it is the default choice.
-PAIRWISE_TESTS = [
-    LIMMA_T,
-    "Student's t-test (Independent, Equal Variance)",
-    "Welch's t-test (Independent, Unequal Variance)",
-    "Paired t-test (Matched Samples)",
-    "Mann-Whitney U (Non-parametric Independent)",
-    "Wilcoxon Signed-Rank (Non-parametric Paired)",
-]
-MULTIGROUP_TESTS = [LIMMA_F, CLASSIC_ANOVA]
-
-TEST_HELP = {
-    "Student's t-test (Independent, Equal Variance)":
-        "Classic two-sample t-test on raw abundances. Assumes both groups have a similar spread.",
-    "Welch's t-test (Independent, Unequal Variance)":
-        "t-test on raw abundances that does not assume equal spread. Safer than Student's when one group is more variable.",
-    "Paired t-test (Matched Samples)":
-        "For matched samples (e.g. the same patient before and after). Channels are paired in the order they are "
-        "listed in each group, so both groups need the same number of channels in matching order.",
-    "Mann-Whitney U (Non-parametric Independent)":
-        "Rank-based test with no normality assumption. With 3 vs 3 samples the smallest possible p-value is 0.1, "
-        "so nothing can pass a 0.05 cutoff. Use it only with larger groups.",
-    "Wilcoxon Signed-Rank (Non-parametric Paired)":
-        "Rank-based paired test. Needs at least 6 pairs before any p-value can fall below 0.05.",
-    LIMMA_T:
-        "Recommended for TMT with few replicates. Works on log2 abundances and borrows variance information from "
-        "all glycoforms (empirical Bayes), which gives stable results with 3-6 replicates. log2FC is the difference "
-        "of mean log2 abundance, so it can differ slightly from the log2FC of the other tests.",
-    CLASSIC_ANOVA:
-        "One-way ANOVA on raw abundances: does any of the three groups differ? Glycoforms with no variation "
-        "inside a group are skipped.",
-    LIMMA_F:
-        "limma's version of ANOVA on log2 abundances, with empirical Bayes variances. The p/q-value says whether "
-        "any group differs. The table also gives log2FC and q-value for every pair of groups (e.g. B vs A, C vs A, "
-        "C vs B), so one run answers which groups differ.",
-}
+# Test names, defaults and descriptions (LIMMA_T, PAIRWISE_TESTS, TEST_HELP, ...)
+# live in ge/diff_results_utility.py and are shared with the label-free app.
 
 
 
@@ -879,135 +838,7 @@ def add_hosted_safe_file_download_button(label, data, file_name, key, use_contai
     return False
 
 
-# =============================================================================
-# Glycan class breakdown of differential results
-# =============================================================================
-def _glycan_trait(glycan_str) -> str:
-    """Sialylation / fucosylation from a composition string "H N A F" or "H N A G F"."""
-    nums = re.findall(r"\d+", str(glycan_str))
-    if len(nums) == 4:
-        _h, _n, a, f = map(int, nums)
-        sia = a
-    elif len(nums) == 5:
-        _h, _n, a, g, f = map(int, nums)
-        sia = a + g
-    else:
-        return "Unknown"
-    if sia > 0 and f > 0:
-        return "Sialylated + fucosylated"
-    if sia > 0:
-        return "Sialylated only"
-    if f > 0:
-        return "Fucosylated only"
-    return "No sialic acid or fucose"
-
-
-def render_glycan_class_breakdown(plot_df: pd.DataFrame, is_anova: bool, sig_col: str,
-                                  alpha: float, fc_thr: float, group_by: str):
-    """
-    Which glycan classes / traits are over-represented among significant glycoforms?
-    One-sided Fisher's exact test per class and direction, BH-adjusted.
-    """
-    from scipy.stats import fisher_exact
-    from statsmodels.stats.multitest import multipletests
-
-    df = plot_df.copy()
-    if group_by == "Glycan class":
-        if "GlycanClass" not in df.columns:
-            st.info("These results have no GlycanClass column.")
-            return
-        df["_class"] = df["GlycanClass"].fillna("Unknown").astype(str)
-    else:
-        if "Glycan" not in df.columns:
-            st.info("These results have no Glycan composition column.")
-            return
-        df["_class"] = df["Glycan"].apply(_glycan_trait)
-
-    sig = pd.to_numeric(df[sig_col], errors="coerce") < alpha
-    if is_anova:
-        df["_status"] = np.where(sig, "Significant", "Not significant")
-        directions = ["Significant"]
-    else:
-        lfc = pd.to_numeric(df["log2FC"], errors="coerce")
-        df["_status"] = "Not significant"
-        df.loc[sig & (lfc > fc_thr), "_status"] = "Up"
-        df.loc[sig & (lfc < -fc_thr), "_status"] = "Down"
-        directions = ["Up", "Down"]
-
-    counts = pd.crosstab(df["_class"], df["_status"])
-    for col in directions + ["Not significant"]:
-        if col not in counts.columns:
-            counts[col] = 0
-    counts = counts[directions + ["Not significant"]]
-    counts["Total"] = counts.sum(axis=1)
-    counts = counts.sort_values("Total", ascending=False)
-
-    total = int(counts["Total"].sum())
-    rows = []
-    for cls, r in counts.iterrows():
-        row = {"Class": cls, "Glycoforms": int(r["Total"])}
-        for d in directions:
-            in_cls_dir = int(r[d])
-            in_cls_not = int(r["Total"]) - in_cls_dir
-            out_dir = int(counts[d].sum()) - in_cls_dir
-            out_not = (total - int(r["Total"])) - out_dir
-            odds, pval = fisher_exact([[in_cls_dir, in_cls_not], [out_dir, out_not]], alternative="greater")
-            row[f"{d} (n)"] = in_cls_dir
-            row[f"{d} (% of class)"] = round(100.0 * in_cls_dir / max(1, int(r["Total"])), 1)
-            row[f"{d} enrichment p"] = pval
-        rows.append(row)
-    table = pd.DataFrame(rows)
-
-    pcols = [c for c in table.columns if c.endswith("enrichment p")]
-    if pcols and len(table):
-        allp = table[pcols].to_numpy().ravel()
-        q = multipletests(allp, method="fdr_bh")[1].reshape(table[pcols].shape)
-        for k, c in enumerate(pcols):
-            table[c.replace("enrichment p", "enrichment q")] = q[:, k]
-
-    n_hits = int(sum(counts[d].sum() for d in directions))
-    if n_hits == 0:
-        st.warning("No glycoform passes the current cutoffs, so there is nothing to compare. Loosen the cutoffs on the left.")
-
-    # 100% stacked bars: share of each class that is up / down / not significant
-    long = counts[directions + ["Not significant"]].reset_index().melt(
-        id_vars="_class", var_name="Status", value_name="Glycoforms"
-    )
-    long["Percent"] = long.apply(
-        lambda r: 100.0 * r["Glycoforms"] / max(1, int(counts.loc[r["_class"], "Total"])), axis=1
-    )
-    colors = {"Up": "#d62728", "Down": "#1f77b4", "Significant": "#8e44ad", "Not significant": "#d0d4da"}
-    fig = px.bar(
-        long, y="_class", x="Percent", color="Status", orientation="h",
-        color_discrete_map=colors, text="Glycoforms",
-        category_orders={"_class": list(counts.index), "Status": directions + ["Not significant"]},
-        labels={"_class": group_by, "Percent": "% of glycoforms in class"},
-    )
-    fig.update_layout(
-        barmode="stack", height=120 + 48 * len(counts), margin=dict(l=10, r=10, t=40, b=10),
-        legend_title_text="", title=f"Share of significant glycoforms per {group_by.lower()}",
-        plot_bgcolor="white",
-    )
-    fig.update_traces(textposition="inside")
-    st.plotly_chart(fig, use_container_width=True)
-
-    st.caption(
-        "Enrichment: one-sided Fisher's exact test of whether a class holds more significant glycoforms than "
-        "expected from its size, Benjamini-Hochberg adjusted (q). It tells you which classes change more often "
-        "than others, not how much they change."
-    )
-    show_cols = ["Class", "Glycoforms"] + [c for c in table.columns if c.endswith("(n)") or c.endswith("% of class)") or c.endswith("enrichment q")]
-    st.dataframe(
-        table[show_cols].style.format({c: "{:.3g}" for c in show_cols if c.endswith("enrichment q")}),
-        use_container_width=True, hide_index=True,
-    )
-    add_hosted_safe_file_download_button(
-        label="Download table (CSV)",
-        data=table.to_csv(index=False).encode("utf-8"),
-        file_name=f"glycan_{'class' if group_by == 'Glycan class' else 'trait'}_breakdown.csv",
-        key="download_glycan_breakdown_csv",
-        use_container_width=False,
-    )
+# render_glycan_class_breakdown() lives in ge/qc_utils.py (shared with the label-free app).
 
 
 def main():
@@ -1379,66 +1210,38 @@ def main():
             "run_glycan_class": False
         })
 
+    _SECTIONS = ["show_global_select", "show_overview", "show_suite", "show_report"]
+
+    def _toggle_section(name):
+        # Runs as a button callback, i.e. before the page is redrawn, so the
+        # ▸/▾ labels below always match the open section. (Toggling inside
+        # "if st.button(...)" updated the label one run late; Streamlit then
+        # treated the relabelled button as a new one and dropped the next click.)
+        opening = not ss.get(name, False)
+        for _s in _SECTIONS:
+            ss[_s] = False
+        ss[name] = opening
+        _reset_overview_flags()
+
     c1, c2, c3, c4 = st.columns(4)
-
-    if c1.button(
-        ("▸ " if not ss["show_global_select"] else "▾ ") + "Data Filtering & Group Specification",
-        width='stretch',
-        key="btn_global_select",
-        help="Define experimental cohorts, map batches, and set the baseline reference group."
-    ):
-        ss["show_global_select"] = not ss["show_global_select"]
-        if ss["show_global_select"]:
-            ss["show_overview"] = False
-            ss["show_suite"] = False
-            ss["show_report"] = False
-            _reset_overview_flags()
-        else:
-            _reset_overview_flags()
-
-    if c2.button(
-        ("▸ " if not ss["show_overview"] else "▾ ") + "Data Integrity Check & Sanity Profiling",
-        width='stretch',
-        key="btn_overview",
-        help="Quality control before testing: PCA, sample correlation, sample clustering and per-sample abundance distributions."
-    ):
-        ss["show_overview"] = not ss["show_overview"]
-        if ss["show_overview"]:
-            ss["show_suite"] = False
-            ss["show_global_select"] = False
-            ss["show_report"] = False
-        else:
-            _reset_overview_flags()
-
-    if c3.button(
-        ("▸ " if not ss["show_suite"] else "▾ ") + "Statistical Analysis Suite",
-        width='stretch',
-        key="btn_suite",
-        help="Pairwise tests, ANOVA or limma, then volcano, waterfall, box, heatmap, lollipop and glycan class plots."
-    ):
-        ss["show_suite"] = not ss["show_suite"]
-        if ss["show_suite"]:
-            ss["show_overview"] = False
-            ss["show_global_select"] = False
-            ss["show_report"] = False
-            _reset_overview_flags()
-        else:
-            _reset_overview_flags()
-
-    if c4.button(
-        ("▸ " if not ss["show_report"] else "▾ ") + "Results Download",
-        width='stretch',
-        key="btn_report",
-        help="Generate a comprehensive PDF report and a ZIP bundle of all tables and figures."
-    ):
-        ss["show_report"] = not ss["show_report"]
-        if ss["show_report"]:
-            ss["show_overview"] = False
-            ss["show_global_select"] = False
-            ss["show_suite"] = False
-            _reset_overview_flags()
-        else:
-            _reset_overview_flags()
+    for _col, _name, _label, _help, _key in [
+        (c1, "show_global_select", "Data Filtering & Group Specification",
+         'Define experimental cohorts, map batches, and set the baseline reference group.', "btn_global_select"),
+        (c2, "show_overview", "Data Integrity Check & Sanity Profiling",
+         'Quality control before testing: PCA, sample correlation, sample clustering and per-sample abundance distributions.', "btn_overview"),
+        (c3, "show_suite", "Statistical Analysis Suite",
+         'Pairwise tests, ANOVA or limma, then volcano, waterfall, box, heatmap, lollipop and glycan class plots.', "btn_suite"),
+        (c4, "show_report", "Results Download",
+         'Generate a comprehensive PDF report and a ZIP bundle of all tables and figures.', "btn_report"),
+    ]:
+        _col.button(
+            ("▾ " if ss.get(_name) else "▸ ") + _label,
+            width="stretch",
+            key=_key,
+            help=_help,
+            on_click=_toggle_section,
+            args=(_name,),
+        )
 
     # Step guide under the four buttons: what each step needs and whether it is done.
     _n_groups_ready = sum(1 for g in (ss.get("global_group_samples") or []) if g)
@@ -2608,13 +2411,16 @@ def main():
                     ss.setdefault("compare_open", False)
                     ss.setdefault("filter_open", False)
 
-                    if st.button(
+                    def _toggle_compare():
+                        ss["compare_open"] = not ss.get("compare_open", False)
+
+                    st.button(
                         ("▸ " if not ss["compare_open"] else "▾ ") + "Select Statistical Test",
                         key="btn_toggle_compare",
-                        width='stretch',
-                        help="Open the configuration panel to select the statistical test type and specific comparisons."
-                    ):
-                        ss["compare_open"] = not ss["compare_open"]
+                        width="stretch",
+                        help="Open the panel to choose the design and test, then run the analysis.",
+                        on_click=_toggle_compare,
+                    )
 
                     if not ss["compare_open"]:
                         st.info("Click Select Statistical Test to choose pairwise or ANOVA and run the analysis.")
@@ -2831,7 +2637,7 @@ def main():
                         _n_sig = int((pd.to_numeric(_res.get("q-value"), errors="coerce") < 0.05).sum()) if "q-value" in _res.columns else 0
                         st.success(
                             f"**{ss.get('stat_method_label', 'Differential analysis complete')}**: "
-                            f"{len(_res):,} glycoforms tested, {_n_sig:,} with q < 0.05."
+                            f"{len(_res):,} glycoforms in the results, {_n_sig:,} with q < 0.05."
                         )
                         if "AveExpr" in _res.columns:
                             if "F" in _res.columns:
