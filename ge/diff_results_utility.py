@@ -481,8 +481,9 @@ def compute_diffexp_limma_f(df: pd.DataFrame,
                             control_idx: int = 0) -> pd.DataFrame:
     """
     Multi-group comparison with limma's moderated F-test (the limma
-    alternative to one-way ANOVA). Also reports, for every group, the
-    log2FC and BH-adjusted moderated-t q-value against the reference group.
+    alternative to one-way ANOVA). Also reports, for every pair of groups,
+    the log2FC and BH-adjusted moderated-t q-value (each group vs the
+    reference first, then the remaining pairs).
 
     The output deliberately has no plain "log2FC" column, so the app treats
     it like ANOVA results (box plots, heatmaps, gene box plots, lollipop).
@@ -501,13 +502,26 @@ def compute_diffexp_limma_f(df: pd.DataFrame,
             groups.append(new_i)
     groups = np.array(groups)
 
+    # Pairwise contrasts: every group vs the reference, then the remaining
+    # pairs (e.g. B-A, C-A, C-B).
     others = [gi for gi in keep if gi != control_idx]
-    C = np.zeros((len(keep), len(others)))
-    for k, gi in enumerate(others):
-        C[keep.index(gi), k] = 1.0
-        C[keep.index(control_idx), k] = -1.0
+    pairs = [(gi, control_idx) for gi in others]
+    pairs += [(others[b], others[a]) for a in range(len(others)) for b in range(a + 1, len(others))]
 
-    res = limma_group_test(_log2_matrix(df, sample_cols), groups, C)
+    def _contrast_matrix(pair_list):
+        C = np.zeros((len(keep), len(pair_list)))
+        for k, (num, den) in enumerate(pair_list):
+            C[keep.index(num), k] = 1.0
+            C[keep.index(den), k] = -1.0
+        return C
+
+    log2_vals = _log2_matrix(df, sample_cols)
+    # Overall F-test from the non-redundant set (each group vs reference), as in
+    # limma's topTableF. With missing values, adding redundant contrasts (C-B)
+    # would change F slightly, so the pairs are tested in a separate call.
+    # Moderated t for each pair does not depend on the other contrasts.
+    res = limma_group_test(log2_vals, groups, _contrast_matrix(pairs[:len(others)]))
+    res_pairs = limma_group_test(log2_vals, groups, _contrast_matrix(pairs))
 
     all_cols = []
     for gi in keep:
@@ -526,10 +540,10 @@ def compute_diffexp_limma_f(df: pd.DataFrame,
     df["Regulation"] = np.where(df["q-value"] < 0.05, "Significant", "Not Significant")
 
     contrast_cols = []
-    for k, gi in enumerate(others):
-        name = f"{group_labels[gi]} vs {ref}"
-        df[f"log2FC ({name})"] = res["logFC"][:, k]
-        df[f"q-value ({name})"] = _bh_adjust(res["p"][:, k])
+    for k, (num, den) in enumerate(pairs):
+        name = f"{group_labels[num]} vs {group_labels[den]}"
+        df[f"log2FC ({name})"] = res_pairs["logFC"][:, k]
+        df[f"q-value ({name})"] = _bh_adjust(res_pairs["p"][:, k])
         contrast_cols += [f"log2FC ({name})", f"q-value ({name})"]
 
     metadata_cols = ["Peptide", "Glycan", "Genes", "Proteins", "ProSites", "GlycanClass"]

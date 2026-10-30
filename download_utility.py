@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import uuid
 import mimetypes
 import inspect
@@ -210,6 +211,49 @@ def _filetypes_for_dialog(filename: str):
     return mapping.get(ext, []) + [("All files", "*.*")]
 
 
+def _ask_user_save_path_macos(safe_name: str) -> Optional[Path]:
+    """Native macOS Save dialog via osascript. Returns None if the user cancels."""
+    import subprocess
+
+    def _as_str(value: str) -> str:
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+    script = (
+        "set downloadsFolder to path to downloads folder\n"
+        "set f to choose file name with prompt "
+        + _as_str("Save file as")
+        + " default name "
+        + _as_str(safe_name)
+        + " default location downloadsFolder\n"
+        "POSIX path of f"
+    )
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+    except Exception as e:
+        raise RuntimeError(f"Could not open the macOS Save dialog: {e}") from e
+
+    if result.returncode != 0:
+        # Error -128 = user pressed Cancel.
+        if "-128" in (result.stderr or ""):
+            return None
+        raise RuntimeError(f"macOS Save dialog failed: {(result.stderr or '').strip()}")
+
+    selected = (result.stdout or "").strip()
+    if not selected:
+        return None
+    path = Path(selected).expanduser()
+    # The macOS dialog does not force an extension; keep the original one.
+    ext = Path(safe_name).suffix
+    if ext and not path.suffix:
+        path = path.with_suffix(ext)
+    return path
+
+
 def ask_user_save_path(default_filename: str) -> Optional[Path]:
     """Open a native Save As dialog for local executable mode."""
     if is_hosted_mode():
@@ -217,6 +261,12 @@ def ask_user_save_path(default_filename: str) -> Optional[Path]:
 
     safe_name = safe_filename(default_filename)
     ext = Path(safe_name).suffix
+
+    # macOS: Tk windows may only be created on the main thread, but Streamlit
+    # runs this code in a worker thread, so tkinter would crash the app.
+    # Use the native AppleScript "Save" dialog instead (works from any thread).
+    if sys.platform == "darwin":
+        return _ask_user_save_path_macos(safe_name)
 
     try:
         import tkinter as tk

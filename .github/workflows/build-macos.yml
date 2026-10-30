@@ -1,0 +1,218 @@
+name: Build macOS App
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed so the workflow can create a Release
+
+jobs:
+  build-macos:
+    name: Build macOS App (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Apple Silicon (M1/M2/M3/M4). Most Macs bought since 2021.
+          - runner: macos-15
+            arch: arm64
+          # Older Intel Macs. Delete these two lines if nobody needs Intel.
+          - runner: macos-15-intel
+            arch: x86_64
+
+    env:
+      GITHUB_PAT: ${{ secrets.GITHUB_TOKEN }}
+      RENV_CONFIG_AUTOLOADER_ENABLED: "false"
+      APP_NAME: ProteomicsWorkbench
+      ZIP_NAME: ProteomicsWorkbench-macOS-${{ matrix.arch }}.zip
+
+    steps:
+
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Verify required repository files
+        shell: bash
+        run: |
+          for f in requirements.txt build_macos.sh naguider_impute.R \
+                   install_naguider_r_dependencies.R \
+                   r_packages/GMSimpute_0.0.1.1.tar.gz \
+                   r_packages/SeqKnn_1.0.1.tar.gz; do
+            [ -f "$f" ] || { echo "Required file is missing: $f"; exit 1; }
+            echo "FOUND: $f"
+          done
+          echo "Runner architecture: $(uname -m)"
+
+      # ----------------------------------------------------
+      # Python
+      # ----------------------------------------------------
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12.8"
+          cache: "pip"
+          cache-dependency-path: requirements.txt
+
+      # ----------------------------------------------------
+      # R (used only to build the package library that ships
+      # inside the app; users install R 4.5.x themselves)
+      # ----------------------------------------------------
+      - name: Set up R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: "4.5.1"
+          use-public-rspm: false   # use CRAN's macOS binary packages
+
+      - name: Show R setup
+        shell: bash
+        run: |
+          Rscript --version
+          Rscript --vanilla -e 'print(R.version$arch); print(.libPaths())'
+          echo "R_LIBS_USER=$R_LIBS_USER"
+
+      - name: Cache R library
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.R_LIBS_USER }}
+          key: macos-${{ matrix.arch }}-r-4.5.1-v1-${{ hashFiles('install_naguider_r_dependencies.R', 'r_packages/**') }}
+
+      - name: Install NAguideR R dependencies
+        shell: bash
+        run: Rscript --vanilla install_naguider_r_dependencies.R
+
+      - name: Verify required R packages
+        shell: bash
+        run: |
+          Rscript --vanilla -e "pkgs <- c('NAguideR','e1071','impute','SeqKnn','pcaMethods','norm','imputeLCMD','VIM','rrcovNA','mice','missForest','GMSimpute','DreamAI','glmnet','ggplot2','reshape2','randomForest','foreach','itertools','iterators','Rcpp','shiny','shinyBS','shinyjs','shinyWidgets','DT','gdata','ggsci','openxlsx','data.table','tidyverse','ggExtra','cowplot','Amelia'); failed <- character(); for (p in pkgs) { ok <- tryCatch({loadNamespace(p); TRUE}, error=function(e) {cat(sprintf('%-20s LOAD ERROR: %s\n', p, conditionMessage(e))); FALSE}); if (ok) cat(sprintf('%-20s OK [%s]\n', p, as.character(packageVersion(p)))) else failed <- c(failed,p) }; if (length(failed)) stop(paste('R validation failed:', paste(failed, collapse=', '))); cat('\nALL REQUIRED R PACKAGES OK\n')"
+
+      # Copy ONLY the package library (not the R runtime).
+      # The macOS R runtime has hard-coded install paths, so a
+      # copied R would silently fall back to /Library/Frameworks.
+      - name: Stage R package library
+        shell: bash
+        run: |
+          RLIB="$(Rscript --vanilla -e 'cat(.libPaths()[1])')"
+          echo "R library: $RLIB"
+          rm -rf r_bundle
+          mkdir -p r_bundle/library
+          cp -R "$RLIB"/. r_bundle/library/
+          for pkg in NAguideR SeqKnn GMSimpute DreamAI missForest; do
+            [ -d "r_bundle/library/$pkg" ] || { echo "Package was installed but not staged: $pkg"; exit 1; }
+            echo "STAGED: $pkg"
+          done
+
+      # ----------------------------------------------------
+      # Python dependencies + build
+      # ----------------------------------------------------
+      - name: Install Python dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install -r requirements.txt
+          python -m pip install streamlit-desktop-app pyinstaller
+          python -m PyInstaller --version
+
+      - name: Build macOS app
+        shell: bash
+        run: |
+          chmod +x build_macos.sh
+          ./build_macos.sh
+
+      - name: Verify build output
+        shell: bash
+        run: |
+          APP="dist/$APP_NAME.app"
+          [ -d "$APP" ] || { echo "Expected $APP was not created."; ls -la dist || true; exit 1; }
+          [ -d "$APP/Contents/Frameworks/R_library/NAguideR" ] \
+            || { echo "R_library/NAguideR not found inside the app."; exit 1; }
+          [ -f "$APP/Contents/Frameworks/naguider_impute.R" ] || [ -f "$APP/Contents/Resources/naguider_impute.R" ] \
+            || { echo "naguider_impute.R not found inside the app."; exit 1; }
+          echo "App architecture:"
+          file "$APP/Contents/MacOS/$APP_NAME"
+          du -sh "$APP"
+
+      # Free "ad-hoc" signature. Apple Silicon refuses to run
+      # unsigned code at all, so this is required even without
+      # a paid Apple Developer account.
+      - name: Ad-hoc sign app
+        shell: bash
+        run: |
+          APP="dist/$APP_NAME.app"
+          # Sign the R package binaries we copied in after PyInstaller.
+          find "$APP/Contents/Resources/R_library" -type f \( -name "*.so" -o -name "*.dylib" \) \
+            -exec codesign --force --sign - {} \;
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP" \
+            || echo "::warning::codesign verify reported problems; test the app on a Mac."
+
+      # ditto keeps the symlinks and permissions inside the .app.
+      # A plain "zip -r" can break the app.
+      - name: Zip app
+        shell: bash
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent "dist/$APP_NAME.app" "$ZIP_NAME"
+          ls -lh "$ZIP_NAME"
+
+      - name: Upload macOS app
+        uses: actions/upload-artifact@v6
+        with:
+          name: ProteomicsWorkbench-macOS-${{ matrix.arch }}
+          path: ${{ env.ZIP_NAME }}
+          if-no-files-found: error
+          retention-days: 90
+
+  # ------------------------------------------------------
+  # One Release with both Mac builds. Uses a "mac-" tag so
+  # it never clashes with the Windows workflow's v1.0.N tags
+  # (each workflow has its own run_number counter).
+  # ------------------------------------------------------
+  release:
+    name: Publish to GitHub Releases
+    needs: build-macos
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download builds
+        uses: actions/download-artifact@v7
+        with:
+          path: out
+          pattern: ProteomicsWorkbench-macOS-*
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ls -lh out
+          for f in out/*.zip; do
+            size=$(stat -c %s "$f")
+            if [ "$size" -ge 2147483648 ]; then
+              echo "$f is over 2 GB. GitHub Releases allow max 2 GB per file."; exit 1
+            fi
+          done
+
+          TAG="mac-v1.0.${{ github.run_number }}"
+
+          cat > notes.md <<'EOF'
+          macOS build. Pick the right file:
+          - Apple Silicon (M1/M2/M3/M4): ProteomicsWorkbench-macOS-arm64.zip
+          - Intel Mac: ProteomicsWorkbench-macOS-x86_64.zip
+          (Apple menu > About This Mac > "Chip" tells you which one you have.)
+
+          One-time setup:
+          1. Install R 4.5.x from CRAN (must be 4.5, not 4.6). Use the same chip type as above:
+             - Apple Silicon: https://cran.r-project.org/bin/macosx/big-sur-arm64/base/R-4.5.3-arm64.pkg
+             - Intel: https://cran.r-project.org/bin/macosx/big-sur-x86_64/base/R-4.5.3-x86_64.pkg
+          2. Unzip, and drag ProteomicsWorkbench.app into Applications.
+          3. The app is not signed by Apple, so macOS will block it. Open Terminal and run:
+             xattr -dr com.apple.quarantine /Applications/ProteomicsWorkbench.app
+          4. Double-click the app. First launch can take 30+ seconds.
+          EOF
+
+          gh release create "$TAG" out/*.zip \
+            --repo "${{ github.repository }}" \
+            --target "${{ github.sha }}" \
+            --title "Proteomics Workbench $TAG (macOS)" \
+            --notes-file notes.md

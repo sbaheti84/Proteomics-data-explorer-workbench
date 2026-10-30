@@ -358,9 +358,9 @@ def faq_section():
                 "Category": "Differential Analysis",
                 "Question": "What happens when I select 3 groups?",
                 "Answer": (
-                    "The app offers one-way ANOVA or the limma moderated F-test. Both detect whether any group differs. "
-                    "The limma F-test also reports each group's log2FC and q-value against the reference group, but there "
-                    "is no single pairwise log2FC direction. Volcano and waterfall plots are mainly for two-group comparisons, "
+                    "Choose **All three groups** and the limma moderated F-test (default) or one-way ANOVA. Both test "
+                    "whether any group differs. The limma F-test also reports log2FC and q-value for every pair of groups "
+                    "(B vs A, C vs A, C vs B) in the same table. There is no single log2FC direction for the overall test. Volcano and waterfall plots are mainly for two-group comparisons, "
                     "so ANOVA mode focuses on box plots, heatmaps, gene-level box plots, and lollipop plots."
                 ),
             },

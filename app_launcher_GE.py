@@ -125,15 +125,16 @@ LIMMA_T = "limma moderated t-test (log2 scale)"
 LIMMA_F = "limma moderated F-test (log2 scale)"
 CLASSIC_ANOVA = "One-way ANOVA (classical F-test)"
 
+# limma is listed first, so it is the default choice.
 PAIRWISE_TESTS = [
+    LIMMA_T,
     "Student's t-test (Independent, Equal Variance)",
     "Welch's t-test (Independent, Unequal Variance)",
     "Paired t-test (Matched Samples)",
     "Mann-Whitney U (Non-parametric Independent)",
     "Wilcoxon Signed-Rank (Non-parametric Paired)",
-    LIMMA_T,
 ]
-MULTIGROUP_TESTS = [CLASSIC_ANOVA, LIMMA_F]
+MULTIGROUP_TESTS = [LIMMA_F, CLASSIC_ANOVA]
 
 TEST_HELP = {
     "Student's t-test (Independent, Equal Variance)":
@@ -156,8 +157,9 @@ TEST_HELP = {
         "One-way ANOVA on raw abundances: does any of the three groups differ? Glycoforms with no variation "
         "inside a group are skipped.",
     LIMMA_F:
-        "limma's version of ANOVA on log2 abundances, with empirical Bayes variances. Also reports each group's "
-        "log2FC and q-value against the reference group, so you can see which group differs.",
+        "limma's version of ANOVA on log2 abundances, with empirical Bayes variances. The p/q-value says whether "
+        "any group differs. The table also gives log2FC and q-value for every pair of groups (e.g. B vs A, C vs A, "
+        "C vs B), so one run answers which groups differ.",
 }
 
 
@@ -2627,7 +2629,7 @@ def main():
                                     "| 2 groups, independent samples, 3-6 replicates (typical TMT) | **limma moderated t-test** |\n"
                                     "| 2 groups, independent samples, 8+ replicates | Welch's t-test or limma |\n"
                                     "| Same subjects measured twice (matched channels) | Paired t-test |\n"
-                                    "| 3 groups | **limma moderated F-test**, then read the per-group q-values |\n\n"
+                                    "| 3 groups | **limma moderated F-test** (default), then read the pairwise q-values |\n\n"
                                     "**Why limma?** With few replicates, each glycoform's variance is estimated from only "
                                     "a handful of values, so ordinary t-tests produce many false hits (tiny variance by "
                                     "chance) and miss real ones. limma shrinks each variance towards the typical variance "
@@ -2646,19 +2648,27 @@ def main():
 
                             # No st.form here on purpose: inside a form the options below
                             # would not update when the design is changed.
+                            DESIGN_TWO = "Two groups (pairwise)"
+                            DESIGN_THREE = "All three groups (limma F-test or ANOVA)"
                             comparison_choices = [
-                                "Pairwise" if can_pairwise else "Pairwise — need ≥2 non-empty groups",
-                                "Three-group ANOVA" if can_anova else "Three-group ANOVA — need exactly 3 non-empty groups",
+                                DESIGN_TWO if can_pairwise else DESIGN_TWO + " — need ≥2 non-empty groups",
+                                DESIGN_THREE if can_anova else DESIGN_THREE + " — need exactly 3 non-empty groups",
                             ]
+                            # Labels change when groups change; drop a stale stored choice.
+                            if ss.get("stat_design") not in comparison_choices:
+                                ss.pop("stat_design", None)
                             comparison_type = st.radio(
                                 "Select experimental design:",
                                 comparison_choices,
-                                index=0,
+                                # With three groups defined, start on the three-group design.
+                                index=1 if can_anova else 0,
                                 horizontal=True,
                                 key="stat_design",
-                                help="Pairwise compares two groups and gives a fold change (volcano, waterfall). "
-                                     "Three-group tests whether any of three groups differs.",
+                                help="Two groups: compares one pair and gives a fold change (volcano, waterfall). "
+                                     "All three groups: tests whether any group differs, and limma also reports "
+                                     "every pairwise comparison in the same table.",
                             )
+                            is_pairwise_design = comparison_type.startswith(DESIGN_TWO)
 
                             selected_pair = None
                             pairs = {}
@@ -2666,7 +2676,7 @@ def main():
                             multigroup_test = MULTIGROUP_TESTS[0]
                             limma_all_groups = True
 
-                            if comparison_type.startswith("Pairwise"):
+                            if is_pairwise_design:
                                 if not can_pairwise:
                                     st.warning("Please define at least two non-empty groups in the Data Filtering tab.")
                                 else:
@@ -2705,13 +2715,19 @@ def main():
                             else:
                                 selected_pair = "Three-group ANOVA"
                                 if can_anova:
-                                    multigroup_test = st.selectbox(
+                                    multigroup_test = st.radio(
                                         "Select statistical test:",
                                         MULTIGROUP_TESTS,
                                         key="stat_multigroup_test",
-                                        help="Not sure? Open 'Which test should I use?' above.",
+                                        captions=[
+                                            "Recommended. log2 scale, stable with few replicates. Also gives log2FC "
+                                            "and q-value for every pair of groups.",
+                                            "Classical test on raw abundances. Only says whether any group differs.",
+                                        ],
+                                        help=TEST_HELP[LIMMA_F],
                                     )
-                                    st.caption(TEST_HELP.get(multigroup_test, ""))
+                                else:
+                                    st.warning("Define exactly three non-empty groups in Data Filtering & Group Specification.")
 
                             run_button = st.button(
                                 "Run Analysis",
@@ -2729,7 +2745,7 @@ def main():
                                 if not labels_unique:
                                     st.error("Group labels must be different from each other. Rename the groups in Data Filtering & Group Specification.")
 
-                                elif comparison_type.startswith("Pairwise"):
+                                elif is_pairwise_design:
                                     if not can_pairwise or not selected_pair:
                                         st.error("Define at least two non-empty groups and pick a comparison.")
                                     else:
@@ -2821,8 +2837,8 @@ def main():
                             if "F" in _res.columns:
                                 st.caption(
                                     "limma columns: **AveExpr** = mean log2 abundance; **F** = moderated F statistic; "
-                                    "**p-value / q-value** = does any group differ; **log2FC (X vs ref)** and "
-                                    "**q-value (X vs ref)** = each group against the reference group. "
+                                    "**p-value / q-value** = does any group differ; **log2FC (B vs A)** and "
+                                    "**q-value (B vs A)** = each pair of groups (moderated t-test). "
                                     "Group-name columns show the mean raw abundance."
                                 )
                             else:
