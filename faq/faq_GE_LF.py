@@ -45,7 +45,10 @@ def faq_section():
                 - Sample abundance columns
                 - Group labels
                 - Control/reference group
-                - Optional batch correction
+
+                Then open **Data Integrity Check**: presence filter,
+                normalization (default: median) and optional batch
+                correction are at the top.
                 """
             )
 
@@ -55,6 +58,8 @@ def faq_section():
                 ### 3. Review and Export
                 Check:
 
+                - Sample loading before / after normalization
+                - Missing values per sample
                 - PCA and correlation plots
                 - Sample clustering heatmap
                 - Glycan class summary
@@ -66,7 +71,7 @@ def faq_section():
             )
 
         st.info(
-            "Recommended workflow: compile the LFQ matrix → define groups → check QC → run statistics → review volcano/waterfall/heatmap → validate selected genes or sites with box and lollipop plots."
+            "Recommended workflow: compile the LFQ matrix → define groups → filter, normalize and check QC → run statistics → review volcano/waterfall/heatmap → validate selected genes or sites with box and lollipop plots."
         )
 
         st.markdown("### How to Interpret the Main Outputs")
@@ -133,7 +138,7 @@ def faq_section():
                 "Answer": (
                     "GlycoExplorer LFQ is a Streamlit application for label-free glycopeptide analysis. "
                     "It compiles pGlyco LFQ or MSFragger LFQ outputs into an abundance matrix, supports sample grouping, "
-                    "optional batch correction, QC, differential analysis, glycan visualization, waterfall plots, "
+                    "presence filtering, normalization, optional batch correction, QC, differential analysis, glycan visualization, waterfall plots, "
                     "box plots, heatmaps, lollipop plots, and report export."
                 ),
             },
@@ -278,42 +283,76 @@ def faq_section():
                 ),
             },
 
-            # ---------------- BATCH CORRECTION ----------------
+            # ---------------- NORMALIZATION & BATCH CORRECTION ----------------
             {
-                "Category": "Batch Correction",
+                "Category": "Normalization & Batch Correction",
+                "Question": "Where are filtering, normalization and batch correction?",
+                "Answer": (
+                    "At the top of **Data Integrity Check & Sanity Profiling**, in the block **Normalization & Batch "
+                    "Correction**. They run in this order: 1 presence filter, 2 normalization, 3 batch correction "
+                    "(optional). The QC plots below it, the statistics and the report all use the result. Changing a "
+                    "setting clears earlier statistics, so run them again."
+                ),
+            },
+            {
+                "Category": "Normalization & Batch Correction",
+                "Question": "Why is median normalization on by default?",
+                "Answer": (
+                    "In label-free data every sample is a separate injection, so the amount injected or enriched "
+                    "differs from run to run (often by 20-50%). Without normalization that difference goes straight "
+                    "into the fold changes. Median normalization shifts each sample so its median log2 intensity "
+                    "matches the others.\n\n"
+                    "It assumes most glycoforms do not change between groups. If your treatment changes glycosylation "
+                    "globally, part of that real effect is removed. Choose **None** only if your export is already "
+                    "normalized or the sample medians already line up (the plot shows this)."
+                ),
+            },
+            {
+                "Category": "Normalization & Batch Correction",
+                "Question": "Which glycoforms are used to compute the normalization?",
+                "Answer": (
+                    "The glycoforms measured in every sample (when there are at least 30 of them). Samples with more "
+                    "missing values lose mostly low-intensity glycoforms, so their median over all measured values is "
+                    "too high; using the same glycoforms in every sample avoids over-correcting them. The box plot shows "
+                    "exactly these glycoforms. Zeros (not measured) are never changed."
+                ),
+            },
+            {
+                "Category": "Normalization & Batch Correction",
+                "Question": "What does the presence filter do, and why is it in step 2?",
+                "Answer": (
+                    "It drops glycoforms measured in too few samples (default: at least 40% of all grouped samples OR of "
+                    "one group). Setting it once in step 2 means the QC plots, the statistics and the report use the "
+                    "same glycoforms. The statistics apply the same rule again to the groups being compared, so a "
+                    "glycoform kept only because of a third group is not tested on almost no values."
+                ),
+            },
+            {
+                "Category": "Normalization & Batch Correction",
                 "Question": "When should I use batch correction?",
                 "Answer": (
-                    "Use batch correction if samples were processed on different days, runs, preparation batches, or instruments "
-                    "and QC plots show separation by batch rather than biological group."
+                    "Only if runs were acquired in separate batches (days, columns, instruments) and PCA shows them "
+                    "separating by batch rather than by group. Every grouped sample must be in a batch, and each batch "
+                    "should contain more than one group; otherwise batch and biology cannot be separated."
                 ),
             },
             {
-                "Category": "Batch Correction",
+                "Category": "Normalization & Batch Correction",
                 "Question": "Which batch correction methods are available?",
                 "Answer": (
-                    "The LFQ app provides:\n\n"
-                    "- **ComBat (Empirical Bayes)**\n"
-                    "- **Median Centering**\n"
-                    "- **Mean Centering**\n"
-                    "- **Standardize (Mean + Variance)**\n\n"
-                    "ComBat requires the `neuroCombat` package."
+                    "- **ComBat (Empirical Bayes)** (recommended): keeps the biological groups in its model, so it "
+                    "removes the batch shift without removing group differences. Needs the `neuroCombat` package.\n"
+                    "- **Median Centering**: shifts each batch to the overall median for every glycoform. Only correct "
+                    "when every batch holds the same mix of groups; the app warns when it does not."
                 ),
             },
             {
-                "Category": "Batch Correction",
-                "Question": "How does batch correction work in this LFQ app?",
+                "Category": "Normalization & Batch Correction",
+                "Question": "Why does batch correction need to be run again after I change something?",
                 "Answer": (
-                    "The app applies batch correction on a log2-transformed version of the selected sample abundance matrix, "
-                    "then converts values back to the raw scale for downstream analysis. "
-                    "After correction, downstream QC and statistics use the corrected abundance values."
-                ),
-            },
-            {
-                "Category": "Batch Correction",
-                "Question": "What happens if I turn batch correction off?",
-                "Answer": (
-                    "The app restores or keeps the raw uncorrected LFQ matrix. "
-                    "This is appropriate when no strong batch effect is visible or all samples were processed together."
+                    "Batch correction is computed on the filtered, normalized matrix. When the presence filter, the "
+                    "normalization or the groups change, that matrix changes, so the earlier correction no longer "
+                    "applies. Click **Run Batch Correction** again."
                 ),
             },
 
@@ -322,19 +361,21 @@ def faq_section():
                 "Category": "QC",
                 "Question": "What QC modules are available?",
                 "Answer": (
-                    "The **Data Integrity Check & Sanity Profiling** section includes:\n\n"
-                    "- Principal Component Analysis (PCA)\n"
-                    "- Correlation Matrix\n"
-                    "- Sample Clustering\n"
-                    "- Glycan Classification Summary"
+                    "The **Data Integrity Check & Sanity Profiling** section has two blocks:\n\n"
+                    "- **Normalization & Batch Correction** (top): presence filter, normalization, optional batch "
+                    "correction, and the sample box plot before/after.\n"
+                    "- **Quality Control Plots** (below): PCA (processed or raw), Correlation Matrix, Sample "
+                    "Clustering, Intensity Distribution (per sample) and Missing Values (per sample)."
                 ),
             },
             {
                 "Category": "QC",
-                "Question": "What preprocessing options should I check before QC?",
+                "Question": "How should I read the Missing Values plot?",
                 "Answer": (
-                    "The app includes LFQ preprocessing options such as treating zeros as missing values and log2 transformation. "
-                    "These steps help avoid artificial zeros, stabilize variance, and make PCA, clustering, and statistical tests more interpretable."
+                    "Left: the share of glycoforms not measured in each sample. One sample with far more missing values "
+                    "than the rest of its group is a weak run (low injection, poor enrichment). Right: missing values by "
+                    "intensity quartile. If low-intensity glycoforms are missing most often, values are missing because "
+                    "they were below detection; replacing 0/NA with a small value in the statistics then makes sense."
                 ),
             },
             {
@@ -342,7 +383,8 @@ def faq_section():
                 "Question": "What does a good PCA look like?",
                 "Answer": (
                     "Replicates should usually cluster together. If samples separate mostly by batch instead of group, "
-                    "review the batch setup and consider batch correction."
+                    "use batch correction in the Normalization & Batch Correction block. Switch **Data source** to "
+                    "Raw to compare with the compiled matrix."
                 ),
             },
             {
@@ -405,9 +447,10 @@ def faq_section():
                 "Category": "Differential Analysis",
                 "Question": "What do the zero imputation and presence filters do?",
                 "Answer": (
-                    "Zero/NA imputation replaces missing or zero LFQ values using a row-wise small fraction of the observed minimum. "
-                    "Presence filtering keeps features that are observed in enough samples overall or within groups. "
-                    "These options reduce unstable statistics caused by sparse LFQ data.\n\n"
+                    "Zero/NA imputation (statistics panel) replaces missing or zero LFQ values using a row-wise small "
+                    "fraction of the observed minimum. The presence filter (set in Data Integrity Check) keeps "
+                    "glycoforms observed in enough samples overall or within groups. Both reduce unstable statistics "
+                    "caused by sparse LFQ data.\n\n"
                     "For **limma**, imputation is off by default: limma fits each glycoform on the values that were measured. "
                     "Glycoforms missing from a whole compared group then get no limma p-value. Turn imputation on to test them, "
                     "but their fold changes will depend on the imputed value."
@@ -561,7 +604,8 @@ def faq_section():
                 "Question": "Why did batch correction fail?",
                 "Answer": (
                     "Batch correction can fail if batches are empty, have too few samples, contain too many missing values, "
-                    "or if `neuroCombat` is not installed when using ComBat."
+                    "if a batch holds only one group (batch and group are then the same split), or if `neuroCombat` is "
+                    "not installed when using ComBat."
                 ),
             },
             {
@@ -592,7 +636,7 @@ def faq_section():
         with search_col:
             search = st.text_input(
                 "Search FAQ",
-                placeholder="Search: pGlyco, MSFragger, IsotopeArea, batch, PCA, volcano, waterfall, report...",
+                placeholder="Search: pGlyco, MSFragger, normalization, batch, missing, PCA, volcano, report...",
                 key="faq_search_lfq",
             )
 
@@ -628,7 +672,7 @@ def faq_section():
             "Input Files",
             "Processing",
             "Sample Setup",
-            "Batch Correction",
+            "Normalization & Batch Correction",
             "QC",
             "Differential Analysis",
             "Visualizations",

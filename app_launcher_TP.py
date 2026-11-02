@@ -14,6 +14,7 @@ import uuid
 import numpy as np
 import pandas as pd
 import streamlit as st
+from download_utility import help_popover  # help text behind a small button
 from download_utility import add_download_button, add_matplotlib_download_buttons, add_plotly_download_buttons
 import zipfile       
 import datetime      
@@ -715,12 +716,10 @@ def render_preprocessing_settings(df: pd.DataFrame):
     """Matrix preprocessing settings (shown in Data Filtering & Group Specification)."""
     with st.container(border=True):
         st.markdown("#### Matrix Preprocessing")
-        st.caption(
-            "Applied in this order: protein filters, 0 as missing, log2, batch correction, normalization. "
-            "The result is used by QC, statistics and the report."
-        )
         with st.expander("What do these do?", icon=":material/help:"):
             st.markdown(
+                "Applied in this order: protein filters, 0 as missing, log2, batch correction, normalization. "
+                "The result is used by QC, statistics and the report.\n\n"
                 "* **Treat 0 as missing:** in mass spectrometry a 0 usually means *not detected*, not *absent*. "
                 "Treating it as missing keeps it from dragging group means down.\n"
                 "* **Log2 transform:** turns fold changes into differences and evens out the variance between "
@@ -2820,7 +2819,7 @@ def main():
 
                 if "global_g1_label" not in ss:
                     ss["global_g1_label"] = g_labels[0] if len(g_labels) > 0 else "Group1"
-                g1_label = st.text_input("Group 1 label", value=ss["global_g1_label"], key="global_g1_label")
+                g1_label = st.text_input("Group 1 label", key="global_g1_label")
 
                 options_g2 = [c for c in sample_cols if c not in set(grp1)]
 
@@ -2839,7 +2838,7 @@ def main():
 
                 if "global_g2_label" not in ss:
                     ss["global_g2_label"] = g_labels[1] if len(g_labels) > 1 else "Group2"
-                g2_label = st.text_input("Group 2 label", value=ss["global_g2_label"], key="global_g2_label")
+                g2_label = st.text_input("Group 2 label", key="global_g2_label")
 
                 grp3, g3_label = [], None
                 if n_groups == 3:
@@ -2860,7 +2859,7 @@ def main():
 
                     if "global_g3_label" not in ss:
                         ss["global_g3_label"] = g_labels[2] if len(g_labels) > 2 else "Group3"
-                    g3_label = st.text_input("Group 3 label", value=ss["global_g3_label"], key="global_g3_label")
+                    g3_label = st.text_input("Group 3 label", key="global_g3_label")
                 else:
                     ss.pop("global_grp3", None)
                     ss.pop("global_g3_label", None)
@@ -3440,7 +3439,7 @@ def main():
                                       "less reliable (prefer median normalization then).",
                 }
                 if qc_mode in _qc_help:
-                    st.info(_qc_help[qc_mode], icon=":material/lightbulb:")
+                    help_popover(_qc_help[qc_mode])
                 
                 if qc_mode == "PCA":
                     st.divider()
@@ -3517,10 +3516,6 @@ def main():
                     elif selected_source == "Raw (Un-transformed)":
                         pca_title = "PCA of Raw TMT Abundances"
 
-                    st.caption(
-                        "Use **Data Source** on the left to switch between "
-                        "Before Batch Correction and After Batch Correction."
-                    )
 
                 # Keep exactly one PCA plot on the page. create_pca_plot()
                 # creates its own download buttons, so this avoids duplicate
@@ -3787,9 +3782,9 @@ def main():
                         with col2:
                             specific_test = st.selectbox(
                                 "Select statistical test:", PAIRWISE_TESTS, key="stat_test",
-                                help="Not sure? Open 'Which test should I use?' above.",
+                                help="\n\n".join(f"**{_t}**: {TP_TEST_HELP.get(_t, '')}" for _t in PAIRWISE_TESTS)
+                                     + "\n\nNot sure? Open **Which test should I use?** above.",
                             )
-                        st.caption(TP_TEST_HELP.get(specific_test, ""))
                         if specific_test == LIMMA_T and len(active) > 2:
                             limma_all_groups = st.checkbox(
                                 "Use all groups to estimate variance (recommended)", value=True,
@@ -3942,15 +3937,15 @@ def main():
                 )
                 if "AveExpr" in _res.columns:
                     if "F" in _res.columns:
-                        st.caption(
+                        help_popover(
                             "limma columns: **AveExpr** = mean log2 abundance; **F** = moderated F statistic; "
                             "**p-value / q-value** = does any group differ; **log2FC (B vs A)** and "
-                            "**q-value (B vs A)** = each pair of groups (moderated t-test)."
+                            "**q-value (B vs A)** = each pair of groups (moderated t-test).", label="Column guide"
                         )
                     else:
-                        st.caption(
+                        help_popover(
                             "limma columns: **log2FC** = mean log2(test) − mean log2(reference); "
-                            "**AveExpr** = mean log2 abundance; **t** = moderated t statistic."
+                            "**AveExpr** = mean log2 abundance; **t** = moderated t statistic.", label="Column guide"
                         )
                     _n_untested = int(_q.isna().sum())
                     if _n_untested:

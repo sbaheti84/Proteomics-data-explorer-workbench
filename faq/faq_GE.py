@@ -46,7 +46,9 @@ def faq_section():
                 - Sample/abundance columns
                 - Group labels
                 - Control/reference group
-                - Optional batch correction
+
+                Then open **Data Integrity Check** and look at
+                **Channel Loading & Normalization** (default: none).
 
                 Only assigned samples are used downstream.
                 """
@@ -85,7 +87,7 @@ def faq_section():
                 Good signs:
                 - Replicates cluster together
                 - No obvious outlier sample
-                - Groups separate by biology rather than batch
+                - Channel medians line up (Channel Loading & Normalization)
                 """
             )
 
@@ -137,7 +139,7 @@ def faq_section():
                 "Answer": (
                     "GlycoExplorer is a Streamlit tool for integrating glycopeptide identification results "
                     "with quantitative TMT abundance data. It supports file merging, species-aware glycan parsing, "
-                    "sample grouping, optional batch correction, QC, differential analysis, glycan visualization, "
+                    "sample grouping, a channel-loading check with optional normalization, QC, differential analysis, glycan visualization, "
                     "waterfall plots, box plots, lollipop plots, and PDF/ZIP export."
                 ),
             },
@@ -253,60 +255,70 @@ def faq_section():
                 "Question": "What happens if samples are unassigned?",
                 "Answer": (
                     "Unassigned samples are not used in the downstream grouped analysis. The sample mapping summary shows "
-                    "which samples are assigned, unassigned, assigned to batches, and marked as the reference group."
+                    "which samples are assigned, unassigned, and marked as the reference group."
                 ),
             },
             {
-                "Category": "Batch Correction",
-                "Question": "When should I use batch correction?",
+                "Category": "Normalization",
+                "Question": "Is there batch correction?",
                 "Answer": (
-                    "Use batch correction when samples were processed across different TMT plexes, preparation days, "
-                    "instrument runs, or acquisition batches and PCA/correlation suggests that batch is stronger than biology."
+                    "No. GlycoExplorer (TMT) analyses **one TMT plex at a time**: all channels of a plex are labelled, pooled "
+                    "and measured together, so there is no batch effect between them to correct. The merge adds up each "
+                    "glycoform over all raw files of the upload, so every file must come from the same plex (fractions of "
+                    "one plex are fine). If a study spans several plexes, analyse each plex separately."
                 ),
             },
             {
-                "Category": "Batch Correction",
-                "Question": "Which batch correction methods are available?",
+                "Category": "Normalization",
+                "Question": "Do I need to normalize?",
                 "Answer": (
-                    "The app supports:\n\n"
-                    "- **ComBat (Empirical Bayes)**: useful for multi-batch correction when assumptions are met.\n"
-                    "- **Median Centering**: a simpler global centering approach.\n"
-                    "- **Internal Reference Scaling (IRS)**: useful when each batch/plex contains a reference or pooled channel."
+                    "Often not. Open **Data Integrity Check → Channel Loading & Normalization**. Each box is one channel. "
+                    "If the boxes line up, keep the default **None**. If one channel is clearly higher or lower, that "
+                    "sample had more or less material loaded and the app shows a warning; normalizing removes that "
+                    "difference. **Per-channel details** under the plot lists each channel's median and whether a whole "
+                    "group is offset from the reference group (such an offset shifts every fold change of that group)."
                 ),
             },
             {
-                "Category": "Batch Correction",
-                "Question": "How do I enable batch correction?",
+                "Category": "Normalization",
+                "Question": "Which normalization should I choose?",
                 "Answer": (
-                    "Turn on **Apply Batch Effect Correction**, select the method, choose the number of batches, and assign "
-                    "each grouped sample to exactly one batch. For IRS, select the reference/pool sample for each batch."
+                    "- **None** (default): abundances as exported.\n"
+                    "- **Median normalization (glycopeptides)**: makes the channel medians equal. Assumes most glycoforms do "
+                    "not change; a real global change (for example more sialylation everywhere) would be removed too.\n"
+                    "- **Total intensity (sample loading)**: classic TMT normalization to equal total signal; same assumption, "
+                    "more influenced by the brightest glycoforms.\n"
+                    "- **Factors from a total-proteome table (same TMT pool)**: the safest choice when you have it. Loading "
+                    "factors come from the proteins of the same labelled samples, so glycosylation changes are kept. Upload "
+                    "the protein table with the same TMT channel names.\n\n"
+                    "The plot shows the channels before and after. Zeros (not quantified) are never changed."
                 ),
             },
             {
-                "Category": "Batch Correction",
-                "Question": "What happens if batch correction is turned off?",
+                "Category": "Normalization",
+                "Question": "What happens to my results when I change the normalization?",
                 "Answer": (
-                    "The app uses the original abundance values. This is recommended when all samples were processed together "
-                    "or no batch effect is visible."
+                    "QC plots update straight away and earlier statistics are cleared, so they cannot be mixed up with the new "
+                    "matrix. Run the statistics again. The method used is printed in the statistics panel and in the PDF report."
                 ),
             },
             {
                 "Category": "QC",
                 "Question": "What QC modules are available?",
                 "Answer": (
-                    "The **Data Integrity Check & Sanity Profiling** section currently includes:\n\n"
-                    "- Principal Component Analysis (PCA)\n"
-                    "- Correlation Matrix\n"
-                    "- Sample Clustering\n"
-                    "- Glycan Classification Summary"
+                    "The **Data Integrity Check & Sanity Profiling** section has two blocks:\n\n"
+                    "- **Channel Loading & Normalization** (top): channel box plot before/after and the "
+                    "normalization choice (default: none)\n"
+                    "- **Quality Control Plots** (below): PCA, Correlation Matrix, Sample Clustering and "
+                    "Abundance Distribution (per sample). These use the normalization chosen above."
                 ),
             },
             {
                 "Category": "QC",
                 "Question": "What does a good PCA look like?",
                 "Answer": (
-                    "Replicates should usually cluster together. Strong separation by batch instead of group suggests "
-                    "a technical effect that should be reviewed before interpreting biological results."
+                    "Replicates should usually cluster together. A sample far from its group may be an outlier (failed "
+                    "labelling, wrong channel or unequal loading) and should be reviewed before interpreting results."
                 ),
             },
             {
@@ -512,10 +524,10 @@ def faq_section():
             },
             {
                 "Category": "Troubleshooting",
-                "Question": "Why did batch correction fail?",
+                "Question": "Total-proteome normalization says channels do not match. Why?",
                 "Answer": (
-                    "Common reasons include too few samples per batch, unassigned samples, duplicated sample assignments, "
-                    "missing IRS reference channels, or `neuroCombat` not being installed when using ComBat."
+                    "The protein table must have one abundance column for every glyco channel, with the same TMT channel "
+                    "names (126, 127N, ...). Check that it comes from the same TMT pool and that no channel was removed."
                 ),
             },
         ])
@@ -530,7 +542,7 @@ def faq_section():
         with search_col:
             search = st.text_input(
                 "Search FAQ",
-                placeholder="Search: species, batch, PCA, volcano, waterfall, MSFragger, report...",
+                placeholder="Search: species, normalization, PCA, volcano, waterfall, MSFragger, report...",
                 key="faq_search",
             )
 
@@ -566,7 +578,7 @@ def faq_section():
             "Input Files",
             "Merging",
             "Sample Setup",
-            "Batch Correction",
+            "Normalization",
             "QC",
             "Differential Analysis",
             "Visualizations",

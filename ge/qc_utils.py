@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+import re
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -9,6 +10,7 @@ from matplotlib.patches import Ellipse
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 import streamlit as st
+from download_utility import help_popover  # help text behind a small button
 
 # Import the centralized helper
 from ge.misc_utility import *
@@ -660,8 +662,11 @@ def create_sample_corr_heatmap(df: pd.DataFrame, sample_cols: list[str]):
     rename_map = dict(zip(sample_cols, clean_cols))
     df = df.rename(columns=rename_map)
 
-    # Compute correlation
-    corr = df[clean_cols].corr()
+    # Pearson correlation of log2 values. Zeros mean "not measured" and are left out
+    # (pairwise), so a few very bright glycoforms or many zeros cannot dominate.
+    _vals = df[clean_cols].apply(pd.to_numeric, errors="coerce")
+    _vals = np.log2(_vals.where(_vals > 0))
+    corr = _vals.corr(min_periods=3)
     
     # --- DYNAMIC FONT SIZING FIX ---
     num_samples = len(clean_cols)
@@ -706,9 +711,10 @@ def create_abundance_density(df: pd.DataFrame, abundance_cols: list[str]):
     df = df.rename(columns=renamed_cols)
     sample_cols = list(renamed_cols.values())
 
-    # Convert to numeric and Log2 transform
+    # Convert to numeric and log2 transform. Zeros mean "not measured" and are left
+    # out; with log2(x + 1) they formed a false peak at 0 that squashed the real curves.
     df_clean = df[sample_cols].apply(pd.to_numeric, errors='coerce')
-    df_log = np.log2(df_clean + 1)
+    df_log = np.log2(df_clean.where(df_clean > 0))
 
     # Melt for long-form plotting
     df_long = df_log.melt(var_name='Sample', value_name='Log2 Abundance')
@@ -733,7 +739,7 @@ def create_abundance_density(df: pd.DataFrame, abundance_cols: list[str]):
         ax=ax
     )
     
-    ax.set_title("Log2 Abundance Density per Sample", fontsize=14, fontweight='bold', pad=15)
+    ax.set_title("Log2 Abundance Density per Sample (measured values)", fontsize=14, fontweight='bold', pad=15)
     ax.set_xlabel("Log2 Abundance", fontsize=12, fontweight='bold')
     ax.set_ylabel("Density", fontsize=12, fontweight='bold')
     
@@ -765,7 +771,10 @@ def create_abundance_density(df: pd.DataFrame, abundance_cols: list[str]):
 
 def create_glycan_class_summary(df: pd.DataFrame, glycan_col: str = "GlycanClass") -> pd.DataFrame:
     """
-    Generate a summary table and bar chart for Glycan Classes.
+    Compact glycan class composition: one table with an in-cell percentage bar.
+
+    A small bar chart is still built for the PDF report and the download buttons,
+    but it is not drawn on the page (it used to fill the whole width).
     """
     class_counts = df[glycan_col].value_counts(dropna=False)
     class_percent = class_counts / class_counts.sum() * 100
@@ -776,81 +785,44 @@ def create_glycan_class_summary(df: pd.DataFrame, glycan_col: str = "GlycanClass
         "Percent (%)": class_percent.values.round(2)
     })
 
-    st.dataframe(summary_df, use_container_width=True, hide_index=True)
-
-    sns.set_style("white")
-    fig, ax = plt.subplots(figsize=(8, 5))
-
-    sns.barplot(
-        data=summary_df,
-        x="Glycan Class",
-        y="Count",
-        color="#005a9c",
-        ax=ax
-    )
-
-    ax.grid(False)
-    sns.despine(ax=ax)
-
-    for container in ax.containers:
-        ax.bar_label(
-            container,
-            padding=3,
-            fontsize=10,
-            color="#333333",
-            fontweight="bold"
+    table_col, _ = st.columns([0.62, 0.38])
+    with table_col:
+        st.dataframe(
+            summary_df,
+            hide_index=True,
+            use_container_width=True,
+            height=min(35 * (len(summary_df) + 1) + 3, 360),
+            column_config={
+                "Count": st.column_config.NumberColumn("Glycoforms", format="%d"),
+                "Percent (%)": st.column_config.ProgressColumn(
+                    "Share of glycoforms", format="%.1f%%", min_value=0, max_value=100,
+                ),
+            },
         )
 
-    ax.set_xlabel("Glycan Class", fontsize=12, fontweight="bold")
-    ax.set_ylabel("Count", fontsize=12, fontweight="bold")
-
-    # X-axis ticks
-    ax.tick_params(
-        axis="x",
-        which="major",
-        bottom=True,
-        top=False,
-        labelbottom=True,
-        length=5,
-        width=1.2,
-        labelsize=12,
-        rotation=45
-    )
-
-    for tick in ax.get_xticklabels():
-        tick.set_horizontalalignment("right")
-
-    # Y-axis ticks
-    ax.tick_params(
-        axis="y",
-        which="major",
-        left=True,
-        right=False,
-        labelleft=True,
-        length=5,
-        width=1.2,
-        labelsize=12
-    )
-
-    # Keep only x and y axis lines
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    ax.spines["left"].set_visible(True)
-    ax.spines["bottom"].set_visible(True)
-
-    ax.spines["left"].set_linewidth(1.2)
-    ax.spines["bottom"].set_linewidth(1.2)
-
+    # Small figure for the report and for downloads only.
+    sns.set_style("white")
+    plot_df = summary_df.iloc[::-1]
+    fig, ax = plt.subplots(figsize=(5.2, 0.42 * len(plot_df) + 0.9))
+    ax.barh(plot_df["Glycan Class"], plot_df["Count"], color="#005a9c", height=0.6)
+    for y, (cnt, pct) in enumerate(zip(plot_df["Count"], plot_df["Percent (%)"])):
+        ax.text(cnt, y, f"  {cnt} ({pct:.1f}%)", va="center", fontsize=8, color="#333333")
+    ax.set_xlabel("Glycoforms", fontsize=9)
+    ax.set_ylabel("")
+    ax.tick_params(axis="both", labelsize=8)
+    ax.set_xlim(0, plot_df["Count"].max() * 1.3 if len(plot_df) else 1)
+    sns.despine(ax=ax)
+    ax.grid(False)
     plt.tight_layout()
-    st.pyplot(fig)
-
     st.session_state["report_glycan_class_fig"] = fig
 
-    add_plot_download_buttons(
-        fig,
-        base_filename="glycan_class_distribution",
-        key_suffix="static_glycan_class"
-    )
+    with table_col:
+        with st.popover("Download as figure", icon=":material/download:"):
+            add_plot_download_buttons(
+                fig,
+                base_filename="glycan_class_distribution",
+                key_suffix="static_glycan_class"
+            )
 
     return summary_df
 
@@ -969,10 +941,10 @@ def render_glycan_class_breakdown(plot_df: pd.DataFrame, is_anova: bool, sig_col
     fig.update_traces(textposition="inside")
     st.plotly_chart(fig, use_container_width=True)
 
-    st.caption(
+    help_popover(
         "Enrichment: one-sided Fisher's exact test of whether a class holds more significant glycoforms than "
         "expected from its size, Benjamini-Hochberg adjusted (q). It tells you which classes change more often "
-        "than others, not how much they change."
+        "than others, not how much they change.", label="How to read this"
     )
     show_cols = ["Class", "Glycoforms"] + [c for c in table.columns if c.endswith("(n)") or c.endswith("% of class)") or c.endswith("enrichment q")]
     st.dataframe(
@@ -1024,3 +996,303 @@ try:
     )
 except Exception:
     pass
+
+
+# =============================================================================
+# TMT channel loading check and optional normalization (GlycoExplorer TMT)
+# =============================================================================
+GE_NORM_NONE = "None (raw abundances)"
+GE_NORM_MEDIAN = "Median normalization (glycopeptides)"
+GE_NORM_TOTAL = "Total intensity (sample loading)"
+GE_NORM_PROTEOME = "Factors from a total-proteome table (same TMT pool)"
+GE_NORM_METHODS = [GE_NORM_NONE, GE_NORM_MEDIAN, GE_NORM_TOTAL, GE_NORM_PROTEOME]
+GE_NORM_HELP = {
+    GE_NORM_NONE: "Statistics use the abundances exactly as exported. Fine when the channel medians already line up.",
+    GE_NORM_MEDIAN: "Scales each channel so its median glycoform abundance matches the others. Assumes most "
+                    "glycoforms do not change; a real global shift (for example more sialylation everywhere) "
+                    "would be removed too.",
+    GE_NORM_TOTAL: "Classic TMT sample-loading normalization: scales each channel to the same total signal. "
+                   "Same assumption as median normalization, and more influenced by the few brightest glycoforms.",
+    GE_NORM_PROTEOME: "Uses loading factors measured on the proteins of the same TMT pool (for example the "
+                      "unenriched or total-proteome run of the same labelled samples). Does not assume that "
+                      "glycosylation is unchanged. Upload the protein table with the same TMT channels.",
+}
+
+
+def ge_channel_key(col) -> str:
+    """TMT channel code (126, 127N, ... 135N) if present in a column name, else the cleaned name."""
+    s = str(col)
+    m = re.search(r"(?<![0-9])(12[6-9]|13[0-5])[NC]?(?![0-9A-Za-z])", s)
+    if m:
+        return m.group(0).upper()
+    s = re.sub(r"(?i)^\s*abundances?\s*(\(grouped\))?\s*:?\s*", "", s)
+    return s.strip().lower()
+
+
+def _log2_positive(df: pd.DataFrame, cols: list) -> pd.DataFrame:
+    X = df[cols].apply(pd.to_numeric, errors="coerce").astype(float)
+    return np.log2(X.where(X > 0))
+
+
+def _rows_for_loading(L: pd.DataFrame, min_rows: int = 30) -> tuple:
+    """Rows quantified in every non-empty channel (fair comparison); falls back to all rows."""
+    nonempty = [c for c in L.columns if L[c].notna().sum() >= 10]
+    complete = L[nonempty].dropna() if nonempty else L.iloc[0:0]
+    if len(complete) >= min_rows:
+        return L.loc[complete.index], len(complete), True
+    return L, len(complete), False
+
+
+def ge_channel_medians(df: pd.DataFrame, cols: list) -> pd.Series:
+    """Median log2 abundance per channel, on glycoforms quantified in all channels."""
+    L = _log2_positive(df, cols)
+    base, _, _ = _rows_for_loading(L)
+    return base.median(axis=0)
+
+
+def compute_ge_norm_factors(raw_df: pd.DataFrame, cols: list, method: str,
+                            proteome_df: "pd.DataFrame | None" = None) -> tuple:
+    """Linear multiplier per channel (1.0 = unchanged) and a short description.
+
+    Zeros stay zero (they mean 'not quantified'), so only measured values are scaled.
+    """
+    factors = pd.Series(1.0, index=list(cols), dtype=float)
+    info = {"rows_used": 0, "complete_rows": False, "unmatched": [], "message": ""}
+    if method == GE_NORM_NONE or not cols:
+        info["message"] = "no normalization"
+        return factors, info
+
+    if method in (GE_NORM_MEDIAN, GE_NORM_TOTAL):
+        L = _log2_positive(raw_df, cols)
+        base, n_complete, used_complete = _rows_for_loading(L)
+        info["rows_used"] = int(len(base))
+        info["complete_rows"] = bool(used_complete)
+        if method == GE_NORM_MEDIAN:
+            med = base.median(axis=0)
+            target = float(np.nanmean(med.to_numpy()))
+            f = np.power(2.0, target - med)
+        else:
+            lin = np.power(2.0, base)
+            tot = lin.sum(axis=0, min_count=1)
+            target = float(np.nanmean(tot.to_numpy()))
+            f = target / tot
+        factors = f.replace([np.inf, -np.inf], np.nan).fillna(1.0).astype(float)
+        info["message"] = (f"{'median' if method == GE_NORM_MEDIAN else 'total intensity'} of "
+                          f"{info['rows_used']:,} glycoforms"
+                          + (" quantified in every channel" if used_complete else " (all quantified values)"))
+        return factors.reindex(cols).fillna(1.0), info
+
+    if method == GE_NORM_PROTEOME:
+        if proteome_df is None or proteome_df.empty:
+            raise ValueError("Upload the total-proteome table first.")
+        prot_num = [c for c in proteome_df.columns
+                    if pd.to_numeric(proteome_df[c], errors="coerce").notna().sum() > 0
+                    and not re.search(r"(?i)normalized|scaled|ratio|grouped cv|count|p-value|q-value|score|coverage|length|mw|\[kda\]", str(c))]
+        key_to_prot = {}
+        for c in prot_num:
+            k = ge_channel_key(c)
+            if re.fullmatch(r"(12[6-9]|13[0-5])[NC]?", k) or re.search(r"(?i)abundance", str(c)):
+                key_to_prot.setdefault(k, c)
+        mapping = {}
+        # Empty glyco channels (nothing quantified) keep factor 1.0 and need no protein partner.
+        live = [c for c in cols if (pd.to_numeric(raw_df[c], errors="coerce") > 0).any()]
+        for c in live:
+            k = ge_channel_key(c)
+            if k in key_to_prot:
+                mapping[c] = key_to_prot[k]
+            else:
+                info["unmatched"].append(str(c))
+        if info["unmatched"]:
+            raise ValueError(
+                "These glyco channels have no matching channel in the protein table: "
+                + ", ".join(info["unmatched"][:12])
+                + ". Both tables must use the same TMT channel names (126, 127N, ...)."
+            )
+        P = _log2_positive(proteome_df, list(dict.fromkeys(mapping.values())))
+        empty_prot = [c for c in P.columns if P[c].notna().sum() == 0]
+        if empty_prot:
+            raise ValueError("These channels have no values in the protein table: "
+                             + ", ".join(map(str, empty_prot[:12])) + ".")
+        P = P.dropna()
+        if len(P) < 50:
+            raise ValueError(f"Only {len(P)} proteins are quantified in every channel; at least 50 are needed.")
+        ratio = P.sub(P.mean(axis=1), axis=0)
+        med_ratio = ratio.median(axis=0)
+        info["rows_used"] = int(len(P))
+        info["complete_rows"] = True
+        for c, pc in mapping.items():
+            factors[c] = float(2.0 ** (-med_ratio[pc]))
+        info["message"] = f"median protein ratio of {len(P):,} proteins quantified in every channel"
+        return factors, info
+
+    raise ValueError(f"Unknown normalization method: {method}")
+
+
+def apply_ge_normalization(raw_df: pd.DataFrame, factors: pd.Series) -> pd.DataFrame:
+    out = raw_df.copy()
+    for c, f in factors.items():
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce") * float(f)
+    return out
+
+
+def ge_loading_summary(raw_df: pd.DataFrame, norm_df: pd.DataFrame, cols: list, fmt=None,
+                       group_of: "dict | None" = None, factors: "pd.Series | None" = None,
+                       unit_label: str = "Channel") -> pd.DataFrame:
+    fmt = fmt or (lambda x: str(x))
+    group_of = group_of or {}
+    before = ge_channel_medians(raw_df, cols)
+    after = ge_channel_medians(norm_df, cols)
+    ref = float(np.nanmean(before.to_numpy()))
+    rows = []
+    for c in cols:
+        rows.append({
+            unit_label: fmt(c),
+            "Group": group_of.get(c, ""),
+            "Median log2 before": round(float(before.get(c, np.nan)), 3),
+            "Offset before (log2)": round(float(before.get(c, np.nan) - ref), 3),
+            "Factor applied": round(float(factors.get(c, 1.0)) if factors is not None else 1.0, 3),
+            "Median log2 after": round(float(after.get(c, np.nan)), 3),
+        })
+    return pd.DataFrame(rows)
+
+
+def ge_group_offsets(df: pd.DataFrame, group_samples: list, group_labels: list, ref_idx: int) -> pd.DataFrame:
+    """Mean channel median per group, relative to the reference group (log2)."""
+    med_all = ge_channel_medians(df, [c for g in group_samples for c in (g or [])])
+    means = {}
+    for lbl, cols in zip(group_labels, group_samples):
+        cols = [c for c in (cols or []) if c in med_all.index]
+        if cols:
+            means[lbl] = float(med_all[cols].mean())
+    if not means or ref_idx >= len(group_labels) or group_labels[ref_idx] not in means:
+        return pd.DataFrame()
+    ref = means[group_labels[ref_idx]]
+    return pd.DataFrame([{"Group": k, "Offset vs reference (log2)": round(v - ref, 3),
+                          "Same as % change": f"{(2 ** (v - ref) - 1) * 100:+.0f}%"} for k, v in means.items()])
+
+
+def ge_norm_boxplot_figure(raw_df: pd.DataFrame, norm_df: "pd.DataFrame | None", cols: list, fmt=None,
+                           group_of: "dict | None" = None, palette: "dict | None" = None, after_title: str = "",
+                           panels: "list | None" = None, ylabel: str = "log2 abundance"):
+    """Per-channel log2 abundance boxplots: before, and after normalization when one is applied.
+
+    `panels` (list of (title, DataFrame)) replaces the default before/after pair, e.g. to add
+    an "after batch correction" panel in the label-free app.
+    """
+    fmt = fmt or (lambda x: str(x))
+    group_of = group_of or {}
+    groups = list(dict.fromkeys(group_of.get(c, "") for c in cols))
+    default_cols = ["#8dd3c7", "#fdb462", "#bebada", "#fb8072", "#80b1d3", "#b3de69"]
+    palette = palette or {g: default_cols[i % len(default_cols)] for i, g in enumerate(groups)}
+    if not panels:
+        panels = [("Before normalization (raw abundances)", raw_df)]
+        if norm_df is not None:
+            panels.append((after_title or "After normalization", norm_df))
+    width = max(6.0, 0.42 * len(cols) + 1.8)
+    fig, axes = plt.subplots(len(panels), 1, figsize=(width, 2.6 * len(panels) + 0.4), sharex=True, squeeze=False)
+    for ax, (title, data) in zip(axes[:, 0], panels):
+        # Same rows as the medians and the normalization factors: glycoforms measured in
+        # every sample when there are enough, so the boxes line up exactly when the medians do.
+        L, _n_complete, _used_complete = _rows_for_loading(_log2_positive(data, cols))
+        vals = [L[c].dropna().to_numpy() for c in cols]
+        bp = ax.boxplot(vals, showfliers=False, patch_artist=True, widths=0.6)
+        for patch, c in zip(bp["boxes"], cols):
+            patch.set_facecolor(palette.get(group_of.get(c, ""), "#d9d9d9"))
+            patch.set_edgecolor("#555555")
+        for med in bp["medians"]:
+            med.set_color("#222222")
+        overall = float(np.nanmedian(np.concatenate([v for v in vals if len(v)]))) if any(len(v) for v in vals) else np.nan
+        if np.isfinite(overall):
+            ax.axhline(overall, color="#c0392b", linestyle="--", linewidth=0.8)
+        ax.set_title(title, fontsize=9, loc="left")
+        ax.set_ylabel(ylabel, fontsize=8)
+        ax.tick_params(axis="both", labelsize=7)
+        sns.despine(ax=ax)
+        ax.grid(False)
+    axes[-1, 0].set_xticks(range(1, len(cols) + 1))
+    axes[-1, 0].set_xticklabels([fmt(c) for c in cols], rotation=45, ha="right", fontsize=7)
+    if groups and any(groups):
+        from matplotlib.patches import Patch
+        handles = [Patch(facecolor=palette[g], edgecolor="#555555", label=g) for g in groups if g]
+        axes[0, 0].legend(handles=handles, fontsize=7, frameon=False, loc="upper left", bbox_to_anchor=(1.0, 1.0))
+    plt.tight_layout()
+    return fig
+
+
+# =============================================================================
+# Missing values (label-free QC)
+# =============================================================================
+def missing_value_table(df: pd.DataFrame, cols: list, fmt=None, group_of: "dict | None" = None) -> pd.DataFrame:
+    """Per-sample count and percent of glycoforms not measured (0 or empty)."""
+    fmt = fmt or (lambda x: str(x))
+    group_of = group_of or {}
+    X = df[cols].apply(pd.to_numeric, errors="coerce")
+    miss = ~(X > 0)
+    rows = []
+    for c in cols:
+        rows.append({
+            "Sample": fmt(c),
+            "Group": group_of.get(c, ""),
+            "Measured": int((~miss[c]).sum()),
+            "Missing": int(miss[c].sum()),
+            "Missing (%)": round(100.0 * float(miss[c].mean()), 1) if len(X) else np.nan,
+        })
+    return pd.DataFrame(rows)
+
+
+def missing_values_figure(df: pd.DataFrame, cols: list, fmt=None, group_of: "dict | None" = None,
+                          palette: "dict | None" = None):
+    """Left: % of glycoforms missing in each sample. Right: % missing by intensity quartile.
+
+    In label-free data, low-intensity glycoforms are missing far more often. A rising curve on the
+    right means values are mostly missing because they were below detection, which is what a
+    minimum-value replacement assumes.
+    """
+    fmt = fmt or (lambda x: str(x))
+    group_of = group_of or {}
+    X = df[cols].apply(pd.to_numeric, errors="coerce")
+    miss = ~(X > 0)
+    pct = 100.0 * miss.mean(axis=0)
+    groups = list(dict.fromkeys(group_of.get(c, "") for c in cols))
+    default_cols = ["#8dd3c7", "#fdb462", "#bebada", "#fb8072", "#80b1d3", "#b3de69"]
+    palette = palette or {g: default_cols[i % len(default_cols)] for i, g in enumerate(groups)}
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(max(6.4, 0.26 * len(cols) + 3.8), 3.4),
+                                   gridspec_kw={"width_ratios": [max(2.0, 0.26 * len(cols)), 1.9]})
+    ax1.bar(range(len(cols)), pct.values,
+            color=[palette.get(group_of.get(c, ""), "#d9d9d9") for c in cols], edgecolor="#555555", linewidth=0.6)
+    ax1.set_xticks(range(len(cols)))
+    ax1.set_xticklabels([fmt(c) for c in cols], rotation=45, ha="right", fontsize=7)
+    ax1.set_ylabel("Glycoforms missing (%)", fontsize=8)
+    ax1.margins(x=0.01)
+    ax1.set_title(f"Missing values per sample  ·  overall {100.0 * float(miss.values.mean()):.1f}%",
+                  fontsize=9, loc="left")
+    ax1.tick_params(axis="y", labelsize=7)
+    ax1.set_ylim(0, max(5.0, float(pct.max()) * 1.35 if len(pct) else 5.0))
+    if groups and any(groups):
+        from matplotlib.patches import Patch
+        ax1.legend(handles=[Patch(facecolor=palette[g], edgecolor="#555555", label=g) for g in groups if g],
+                   fontsize=7, frameon=False, loc="upper left", ncol=min(3, len([g for g in groups if g])))
+
+    L = np.log2(X.where(X > 0))
+    mean_int = L.mean(axis=1)
+    ok = mean_int.notna()
+    if ok.sum() >= 8:
+        q = pd.qcut(mean_int[ok], 4, labels=["Q1\n(lowest)", "Q2", "Q3", "Q4\n(highest)"], duplicates="drop")
+        frac = miss[ok].mean(axis=1).groupby(q, observed=False).mean() * 100.0
+        ax2.plot(range(len(frac)), frac.values, marker="o", color="#2c3e50")
+        ax2.set_xticks(range(len(frac)))
+        ax2.set_xticklabels([str(i) for i in frac.index], fontsize=7)
+        ax2.set_ylim(0, max(5.0, float(np.nanmax(frac.values)) * 1.2))
+    else:
+        ax2.text(0.5, 0.5, "Too few glycoforms", ha="center", va="center", transform=ax2.transAxes, fontsize=8)
+    ax2.set_title("Missing vs intensity", fontsize=9, loc="left")
+    ax2.set_xlabel("Quartile of mean log2 intensity", fontsize=8)
+    ax2.set_ylabel("Missing (%)", fontsize=8)
+    ax2.tick_params(axis="y", labelsize=7)
+    for ax in (ax1, ax2):
+        sns.despine(ax=ax)
+        ax.grid(False)
+    plt.tight_layout()
+    return fig

@@ -21,6 +21,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import streamlit as st
+from download_utility import help_popover  # help text behind a small button
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
@@ -1915,8 +1916,8 @@ def render_glycoproteome_first_summary(
 ):
     """Module 1: start with glycoprotein/glycopeptide evidence before protein integration."""
     st.markdown("### Glycoproteome-first discovery")
-    st.caption(
-        "Start here: identify altered glycopeptides, glycans, and glycosites before asking whether total protein abundance explains the signal."
+    help_popover(
+        "Start here: identify altered glycopeptides, glycans, and glycosites before asking whether total protein abundance explains the signal.", label="About this view"
     )
     feature_df = build_glycoproteome_first_feature_table(
         glyco_df, g_gene_col, g_peptide_col, g_lfc_col, g_metric_col, glyco_alpha, glyco_lfc_thr
@@ -1976,9 +1977,9 @@ def render_glycoproteome_first_summary(
     with right:
         with st.container(border=True):
             st.markdown("#### Glycosite-centric glycoform map")
-            st.caption(
+            help_popover(
                 "This view avoids collapsing by glycan composition alone. Each point keeps the protein, site, peptide, and glycan annotation context. "
-                "When a matching total-protein row exists, the same total-protein log2FC is mapped to every glycoform from that gene, and the app calculates Glyco minus Protein log2FC for each row."
+                "When a matching total-protein row exists, the same total-protein log2FC is mapped to every glycoform from that gene, and the app calculates Glyco minus Protein log2FC for each row.", label="How to read this plot"
             )
 
             if glycan_col and glycan_col in feature_df.columns:
@@ -2146,7 +2147,7 @@ def render_glycoproteome_first_summary(
 def render_protein_matching_qc(glyco_df: pd.DataFrame, prot_df: pd.DataFrame, merged_gene: pd.DataFrame):
     """Module 2: check whether glycoproteome IDs and total protein IDs are matched enough for integration."""
     st.markdown("### Protein data matching and integration QC")
-    st.caption("Before interpretation, confirm that the glycoproteome and total protein tables overlap well and are matched by the expected identifier.")
+    help_popover("Before interpretation, confirm that the glycoproteome and total protein tables overlap well and are matched by the expected identifier.", label="About this view")
 
     glyco_ids = set(glyco_df.get("GeneKey", pd.Series(dtype=str)).dropna().astype(str))
     prot_ids = set(prot_df.get("GeneKey", pd.Series(dtype=str)).dropna().astype(str))
@@ -2240,8 +2241,8 @@ def render_protein_normalized_integration_overview(
 ):
     """Module 3: protein-normalized integrated interpretation and visualization."""
     st.markdown("### Protein-normalized glycoprotein integration")
-    st.caption(
-        "This section asks whether glyco changes are explained by total protein abundance or remain glycosylation-specific after protein context."
+    help_popover(
+        "This section asks whether glyco changes are explained by total protein abundance or remain glycosylation-specific after protein context.", label="About this view"
     )
 
     if "Biological_Interpretation" not in merged_gene.columns:
@@ -2400,7 +2401,7 @@ def render_protein_normalized_integration_overview(
             plt.tight_layout()
             st.pyplot(fig_ratio)
             add_plot_download_buttons(fig_ratio, "gpi_protein_normalized_ratio_heatmap")
-            st.caption("This is a relative signal ratio, not absolute glycan occupancy. Use it as supporting evidence only.")
+            help_popover("This is a relative signal ratio, not absolute glycan occupancy. Use it as supporting evidence only.", label="How to read this plot")
 
 
 def render_differential_input_qc(
@@ -2421,9 +2422,9 @@ def render_differential_input_qc(
 ):
     """QC panel for input differential result behavior before integration."""
     st.markdown("### Input differential-result QC")
-    st.caption(
+    help_popover(
         "This panel checks whether the two differential-result files are numerically comparable enough for interpretation. "
-        "It does not change calls; it exposes normalization, scale, and threshold issues."
+        "It does not change calls; it exposes normalization, scale, and threshold issues.", label="About this view"
     )
 
     qc = build_differential_qc_table(
@@ -2967,9 +2968,9 @@ def render_protein_normalized_glycopeptide_volcano(
     st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
     add_plotly_download_buttons(fig, "protein_normalized_glycopeptide_volcano")
 
-    st.caption(
+    help_popover(
         "This view is often more useful than a standard volcano because each glycopeptide is adjusted by matched total-protein log2FC. "
-        "It does not prove occupancy; it ranks glycoform changes that are larger than the protein abundance change."
+        "It does not prove occupancy; it ranks glycoform changes that are larger than the protein abundance change.", label="How to read this view"
     )
     show_cols = [c for c in [
         "GeneKey", g_gene_col, g_peptide_col, "Glycosite", glycan_col,
@@ -3134,7 +3135,7 @@ def render_targeted_site_glycan_matrix(
     plt.tight_layout()
     st.pyplot(fig)
     add_plot_download_buttons(fig, f"{chosen_gene}_site_glycan_matrix")
-    st.caption("Asterisks mark glycopeptide rows passing the selected glyco significance and fold-change thresholds. Empty cells mean no observed row for that site/glycan combination.")
+    help_popover("Asterisks mark glycopeptide rows passing the selected glyco significance and fold-change thresholds. Empty cells mean no observed row for that site/glycan combination.", label="How to read this plot")
 
     export_cols = [c for c in ["Site_Label", "Glycan_Label", g_lfc_col, "Total_Protein_log2FC", "Glyco_minus_Protein_log2FC", g_metric_col, "Significant"] if c in df.columns]
     st.dataframe(df[export_cols].sort_values(["Site_Label", "Glycan_Label"]), use_container_width=True, hide_index=True)
@@ -4388,13 +4389,13 @@ def main():
                             pe["Evidence_Strength"] = -np.log10(pe[g_metric_col].clip(lower=1e-300))
                             pe["Point_Size"] = np.clip(pe["Evidence_Strength"] * 24, 45, 260)
 
-                            st.markdown(
-                                f"""
-                                **How to read this plot:** each dot is one glycopeptide for **{gene_name}**.  
-                                Dots to the **right** are increased glycopeptides; dots to the **left** are decreased glycopeptides.  
-                                The shaded center region is below the selected fold-change cutoff and should be treated as small-change/noise region.  
-                                Larger dots have stronger statistical evidence because size is based on `-log10({g_metric_col})`.
-                                """
+                            help_popover(
+                                f"Each dot is one glycopeptide for **{gene_name}**. Dots to the **right** are increased "
+                                "glycopeptides; dots to the **left** are decreased glycopeptides. The shaded center "
+                                "region is below the selected fold-change cutoff and should be treated as "
+                                "small-change/noise. Larger dots have stronger statistical evidence (size = "
+                                f"-log10({g_metric_col})). When total protein is matched, Glyco minus protein log2FC "
+                                "is calculated for each glycopeptide row."
                             )
 
                             fig_pep, ax_pep = plt.subplots(figsize=(10.5, max(4.0, 0.46 * len(pe))))
@@ -4488,8 +4489,7 @@ def main():
                             add_plot_download_buttons(fig_pep, f"{chosen_gene}_peptide_evidence")
                             st.caption(
                                 f"Significant up: {n_sig_up} | Significant down: {n_sig_down} | "
-                                f"Not significant: {n_not_sig}. Dot size represents -log10({g_metric_col}). "
-                                "When total protein is matched, Glyco minus protein log2FC is calculated for each glycopeptide row."
+                                f"Not significant: {n_not_sig}."
                             )
                             targeted_export_cols = [c for c in [
                                 peptide_col, "Glycosite", "GlycositeKey", detect_glycan_col(glyco_sub),
@@ -4528,9 +4528,12 @@ def main():
                             ratio_consistency = directional_consistency(ratio_df["log2Ratio"])
                             ratio_cv = ratio_df["log2Ratio"].std() / abs(ratio_df["log2Ratio"].mean()) if ratio_df["log2Ratio"].mean() != 0 else np.nan
                             st.caption(
-                                f"Relative signal ratio only — not glycan occupancy. "
-                                f"Sample-direction consistency: {ratio_consistency:.2f}; CV on log2 ratios: {ratio_cv:.2f}. "
-                                "Interpret cautiously because peptide detectability, ionization, and missingness can change this value."
+                                f"Sample-direction consistency: {ratio_consistency:.2f}; CV on log2 ratios: {ratio_cv:.2f}."
+                            )
+                            help_popover(
+                                "Relative signal ratio only, not glycan occupancy. Interpret cautiously: peptide "
+                                "detectability, ionization and missing values can change this value. "
+                                "Sample-direction consistency near 1 means all samples agree on the direction."
                             )
 
                 with tabs[2]:
@@ -4626,7 +4629,7 @@ def main():
                             UpSet(from_contents(sets), show_counts=True, facecolor="black", shading_color="lightgray").plot(fig=fig_up)
                             st.pyplot(fig_up, use_container_width=True)
                             add_plot_download_buttons(fig_up, "directional_upset")
-                            st.caption("Direction-aware set overlap is often more informative than a simple binary significant/non-significant overlap.")
+                            help_popover("Direction-aware set overlap is often more informative than a simple binary significant/non-significant overlap.", label="How to read this plot")
 
                 elif vis_choice == "Hierarchical Clustermap":
                     hm_subset = merged_gene[merged_gene["Status"] != "Non-significant"].dropna(subset=["log2FC_glyco", "log2FC_prot"]).copy()
@@ -4659,9 +4662,9 @@ def main():
                         st.pyplot(fig_occ)
                         add_plot_download_buttons(fig_occ, "relative_ratio_heatmap")
                         ratio_stats = build_ratio_consistency_table(ratio_mat)
-                        st.caption(
+                        help_popover(
                             "Positive values indicate relatively stronger glyco signal than protein signal for that gene/channel. "
-                            "This is not glycan occupancy; it is a relative signal ratio after filtering likely non-glycopeptide rows where annotations permit."
+                            "This is not glycan occupancy; it is a relative signal ratio after filtering likely non-glycopeptide rows where annotations permit.", label="How to read this plot"
                         )
                         with st.expander("Per-gene sample consistency table", expanded=False):
                             st.dataframe(ratio_stats, use_container_width=True, hide_index=True)
@@ -4697,13 +4700,13 @@ def main():
                         fig_rc.update_layout(plot_bgcolor="white", paper_bgcolor="white")
                         st.plotly_chart(fig_rc, use_container_width=True, config={"displaylogo": False})
                         add_plotly_download_buttons(fig_rc, "ratio_consistency_dotplot")
-                        st.caption("This view flags genes where the average ratio hides sample disagreement. Values near 0.5 mean samples split between up and down.")
+                        help_popover("This view flags genes where the average ratio hides sample disagreement. Values near 0.5 mean samples split between up and down.", label="How to read this plot")
                         st.dataframe(ratio_stats.sort_values(["sample_direction_consistency", "sd_log2Ratio"], ascending=[True, False]), use_container_width=True, hide_index=True)
                         add_dataframe_download_buttons(ratio_stats, "ratio_consistency_table", key_suffix="ratio_consistency")
 
                 elif vis_choice == "Protein/Gene Set Enrichment":
                     st.markdown("#### Simple protein/gene-set enrichment")
-                    st.caption("Upload a GMT file or a two-column CSV/TSV where column 1 is pathway/gene-set name and column 2 is gene symbol. Uses Fisher's exact test against genes present in the integrated table.")
+                    help_popover("Upload a GMT file or a two-column CSV/TSV where column 1 is pathway/gene-set name and column 2 is gene symbol. Uses Fisher's exact test against genes present in the integrated table.", label="File format")
                     gene_set_file = st.file_uploader("Gene set file (.gmt, .csv, .tsv, .txt)", type=["gmt", "csv", "tsv", "txt"], key="gpi_gene_set_file")
                     enrich_class = st.selectbox(
                         "Protein/gene IDs to test",
@@ -4723,7 +4726,7 @@ def main():
                         selected = set(merged_gene.loc[merged_gene["Biological_Interpretation"] != "Not significant", "Gene"].dropna().astype(str).str.upper())
                     gene_sets = parse_gene_set_file(gene_set_file)
                     if gene_set_file is None:
-                        st.info("Upload a gene set file to run enrichment. This avoids hard-coding pathway databases and makes the result reproducible offline.")
+                        st.info("Upload a gene set file to run enrichment.")
                     elif not gene_sets:
                         st.warning("Could not parse any gene sets from the uploaded file.")
                     elif not selected:

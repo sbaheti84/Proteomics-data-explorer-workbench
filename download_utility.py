@@ -631,3 +631,15 @@ def save_profile_pdf_to_downloads_tp(profile_figs, gene_names, filename: str = "
 
 def save_profile_pdf_to_downloads_tp_lf(profile_figs, gene_names, filename: str = "top_protein_profiles.pdf"):
     return save_profile_pdf_to_downloads_tp(profile_figs, gene_names, filename)
+
+
+# -----------------------------------------------------------------------------
+# Small shared UI helper (every app imports this module)
+# -----------------------------------------------------------------------------
+def help_popover(text: str, label: str = "How to read this plot") -> None:
+    """Help text kept behind a small button, so plots and settings stay uncluttered.
+
+    The text is only shown when the user clicks the button.
+    """
+    with st.popover(label, icon=":material/help:"):
+        st.markdown(text)

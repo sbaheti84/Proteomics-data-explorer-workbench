@@ -17,6 +17,7 @@ import base64
 import plotly.express as px
 
 import streamlit as st
+from download_utility import help_popover  # help text behind a small button
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -35,7 +36,6 @@ from ge.boxplot import *
 from ge.heatmap import *
 from ge.lollipop import *
 from ge.report_utility import *
-from ge.batch_correcttion import *
 from faq.faq_GE import *
 from ge.waterfall import *
 
@@ -57,8 +57,6 @@ ss.setdefault("global_group_labels", [])
 ss.setdefault("global_n_groups", 2)
 ss.setdefault("global_control_group_idx", 0)
 ss.setdefault("global_all_groups", [])
-ss.setdefault("batch_dict", {})
-ss.setdefault("batch_corrected", False)
 
 # One-time session defaults
 ss.setdefault("merged_ready", False)
@@ -72,16 +70,16 @@ ss.setdefault("show_global_select", False)
 ss.setdefault("upload_sig", None)
 ss.setdefault("show_report", False)
 
-ss.setdefault("merged_df_before_batch", None)
-ss.setdefault("enable_batch_correction", False)
-
-# Permanent batch-configuration state.
-# These keys are deliberately separate from Streamlit widget keys so the
-# configuration survives when the Data Filtering panel is not rendered.
-ss.setdefault("batch_method_selected", "ComBat (Empirical Bayes)")
-ss.setdefault("batch_num_selected", 2)
-ss.setdefault("batch_config", {})
-ss.setdefault("irs_ref_config", {})
+# Channel normalization. merged_df_raw keeps the matrix exactly as merged;
+# merged_df is the matrix used by QC and statistics (raw or normalized).
+# This app analyses one TMT plex at a time, so there is no batch correction.
+ss.setdefault("merged_df_raw", None)
+ss.setdefault("ge_norm_method", GE_NORM_NONE)
+ss.setdefault("ge_norm_factors", None)
+ss.setdefault("ge_norm_sig", None)
+ss.setdefault("ge_norm_info", "no normalization")
+ss.setdefault("ge_norm_proteome_df", None)
+ss.setdefault("ge_norm_proteome_name", None)
 
 # Explore tab flags
 for k in [
@@ -190,29 +188,29 @@ def _save_file_to_downloads(source_path, filename=None):
 
 def _calculate_prosite(row):
     start_col = 'Protein Start' if 'Protein Start' in row else 'Start'
-    
+
     if pd.isna(row.get('Assigned Modifications')) or pd.isna(row.get(start_col)):
         return "Unknown"
-    
+
     try:
         start_pos = int(row[start_col])
     except ValueError:
         return "Unknown"
-        
+
     matches = re.findall(r'(\d+)N\(([\d\.]+)\)', str(row['Assigned Modifications']))
-    
+
     valid_sites = []
     for pos, mass in matches:
         if float(mass) > 300:
             prosite = start_pos + int(pos) - 1
             valid_sites.append(prosite)
-            
+
     if not valid_sites:
         return "Unknown"
-        
+
     valid_sites = sorted(list(set(valid_sites)))
     return "; ".join(map(str, valid_sites))
-    
+
 def glycan_to_composition(glycan_str):
     if pd.isna(glycan_str): return None
     glycan_part = str(glycan_str).split('%')[0].strip()
@@ -232,7 +230,7 @@ def detect_tmt_channels(psm_df):
 
 def build_glyco_id_table(psm_df, peptide_df, tmt_channels):
     glyco = psm_df[psm_df['Glycan_Composition'].notna()].copy()
-    
+
     agg_dict = {
         'Glycan_Composition': ('Glycan_Composition', 'first'),
         'PSM_Count':          ('Peptide', 'count'),
@@ -240,7 +238,7 @@ def build_glyco_id_table(psm_df, peptide_df, tmt_channels):
         'Best_Glycan_Qvalue': ('Glycan q-value', 'min'),
         'ProSites':           ('ProSites', 'first')
     }
-    
+
     for col in tmt_channels:
         ge_col_name = col.replace('Intensity ', 'Abundance: ')
         agg_dict[ge_col_name] = (col, 'mean')
@@ -257,7 +255,7 @@ def build_glyco_id_table(psm_df, peptide_df, tmt_channels):
 
     if 'Gene' in glycoform_table.columns:
         glycoform_table.rename(columns={'Gene': 'Genes'}, inplace=True)
-    
+
     glycoform_table.rename(columns={'Glycan_Composition_Clean': 'Glycan(H,N,A,F)'}, inplace=True)
     glycoform_table['Glycan'] = glycoform_table['Glycan(H,N,A,F)']
     glycoform_table['GlycanClass'] = glycoform_table['Glycan(H,N,A,F)'].apply(classify_glycan)
@@ -267,9 +265,9 @@ def build_glyco_id_table(psm_df, peptide_df, tmt_channels):
         'ProSites', 'Glycan(H,N,A,F)', 'Glycan', 'GlycanClass',
         'Glycan_Composition', 'PSM_Count', 'Best_Glycan_Score', 'Best_Glycan_Qvalue'
     ]
-    
+
     intensity_cols = [c for c in glycoform_table.columns if c.startswith('Abundance:')]
-    
+
     return (glycoform_table[front_cols + intensity_cols]
             .sort_values('PSM_Count', ascending=False)
             .reset_index(drop=True))
@@ -282,24 +280,7 @@ def _reset_all_data(clear_cache: bool = False):
     ss["global_n_groups"] = 2
     ss["global_control_group_idx"] = 0
     ss["global_all_groups"] = []
-    ss["batch_dict"] = {}
-    ss["batch_config"] = {}
-    ss["irs_ref_config"] = {}
-    ss["batch_corrected"] = False
-    ss["enable_batch_correction"] = False
-    ss["batch_method_selected"] = "ComBat (Empirical Bayes)"
-    ss["batch_num_selected"] = 2
-    ss["merged_df_before_batch"] = None
-
-    # Clear temporary Streamlit batch widget keys.
-    for _k in list(ss.keys()):
-        if (
-            str(_k).startswith("_ge_batch_")
-            or str(_k).startswith("_ge_irs_ref_")
-            or str(_k).startswith("batch_sel_")
-            or str(_k).startswith("irs_ref_")
-        ):
-            ss.pop(_k, None)
+    _reset_normalization()
 
     ss["show_report"] = False
     ss["merged_ready"] = False
@@ -346,6 +327,66 @@ def _reset_all_data(clear_cache: bool = False):
             pass
 
 
+def _reset_normalization():
+    """Back to raw abundances (new data, or Reset session)."""
+    ss["ge_norm_method"] = GE_NORM_NONE
+    ss["ge_norm_factors"] = None
+    ss["ge_norm_sig"] = None
+    ss["ge_norm_info"] = "no normalization"
+    ss["ge_norm_proteome_df"] = None
+    ss["ge_norm_proteome_name"] = None
+    ss.pop("_w_ge_norm_method", None)
+    ss.pop("ge_norm_proteome_upload", None)
+    if isinstance(ss.get("merged_df_raw"), pd.DataFrame):
+        ss["merged_df"] = ss["merged_df_raw"].copy()
+
+
+def _set_new_merged_matrix(merged: pd.DataFrame):
+    """A freshly merged matrix: keep an untouched copy and start without normalization."""
+    ss["merged_df_raw"] = merged.copy()
+    _reset_normalization()
+
+
+def _ge_abundance_cols(df: pd.DataFrame) -> list:
+    return [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
+
+
+def _apply_normalization_if_changed(method: str, sample_cols: list):
+    """Recompute merged_df from the raw matrix when the method or its inputs change.
+
+    Returns True when the matrix actually changed (statistics are then cleared).
+    """
+    raw = ss.get("merged_df_raw")
+    if not isinstance(raw, pd.DataFrame):
+        raw = ss["merged_df"].copy()
+        ss["merged_df_raw"] = raw
+    cols = _ge_abundance_cols(raw)
+    sig = (method, tuple(cols), ss.get("ge_norm_proteome_name"), raw.shape)
+    if sig == ss.get("ge_norm_sig"):
+        return False
+    factors, info = compute_ge_norm_factors(raw, cols, method, ss.get("ge_norm_proteome_df"))
+    old = ss.get("ge_norm_factors")
+    old = old.reindex(cols).fillna(1.0) if isinstance(old, pd.Series) else pd.Series(1.0, index=cols)
+    changed = not np.allclose(old.to_numpy(dtype=float), factors.reindex(cols).fillna(1.0).to_numpy(dtype=float))
+    ss["merged_df"] = apply_ge_normalization(raw, factors) if method != GE_NORM_NONE else raw.copy()
+    ss["ge_norm_factors"] = factors
+    ss["ge_norm_method"] = method
+    ss["ge_norm_sig"] = sig
+    lo, hi = float(factors.min()), float(factors.max())
+    ss["ge_norm_info"] = (
+        "no normalization" if method == GE_NORM_NONE
+        else f"{method}; factors {lo:.2f}-{hi:.2f}; based on {info.get('message', '')}"
+    )
+    if changed:
+        # Earlier statistics were computed on a different matrix.
+        ss["diffexp_df"] = None
+        ss["filtered_df"] = None
+        ss["diff_done"] = False
+        ss["filtered_ready"] = False
+        ss.pop("stat_method_label", None)
+    return changed
+
+
 def _make_upload_sig(*files):
     if any(f is None for f in files):
         return None
@@ -360,7 +401,6 @@ def init_session_state_defaults():
         "diffexp_df": None,
         "design_df": None,
         "group_col": None,
-        "batch_col": None,
         "tool_usage": {},
     }
     for k, v in defaults.items():
@@ -404,17 +444,17 @@ def _reset_merge_state():
 def _msfragger_to_pglyco(glycan_str):
     if pd.isna(glycan_str): return None
     clean_str = str(glycan_str).split('%')[0].strip()
-    
+
     h = re.search(r'Hex\((\d+)\)', clean_str)
     n = re.search(r'HexNAc\((\d+)\)', clean_str)
     a = re.search(r'NeuAc\((\d+)\)', clean_str)
     f = re.search(r'Fuc\((\d+)\)', clean_str)
-    
+
     h_count = h.group(1) if h else "0"
     n_count = n.group(1) if n else "0"
     a_count = a.group(1) if a else "0"
     f_count = f.group(1) if f else "0"
-    
+
     return f"{h_count} {n_count} {a_count} {f_count}"
 
 
@@ -848,6 +888,10 @@ def main():
     st.sidebar.divider()
 
     species = st.sidebar.radio("Select Species", ["Human", "Mouse"], index=0)
+    ss["ge_species"] = species
+    # Report: this app has no batch correction; it records the channel normalization instead.
+    ss["report_no_batch_correction"] = True
+    ss["report_normalization_label"] = ss.get("ge_norm_info", "no normalization")
     version_label = "v3"
 
     pipeline_choice = st.sidebar.radio(
@@ -883,7 +927,7 @@ def main():
             key="pd_csv",
             help=pd_help
         )
-        
+
         merge_disabled = not (pglyco_upload and pd_upload)
         new_sig = _make_upload_sig(pglyco_upload, pd_upload)
     else:
@@ -898,7 +942,7 @@ def main():
             key="msf_psm",
             help=psm_help
         )
-        
+
         pep_help = """
         **Required Columns:**
         - `Peptide`
@@ -911,7 +955,7 @@ def main():
             key="msf_pep",
             help=pep_help
         )
-        
+
         merge_disabled = not (psm_upload and pep_upload)
         new_sig = _make_upload_sig(psm_upload, pep_upload)
 
@@ -1035,7 +1079,7 @@ def main():
                             missing_pglyco = [c for c in required_pglyco_cols_m if c not in pglyco_df.columns]
                         else:
                             missing_pglyco = [c for c in required_pglyco_cols_h if c not in pglyco_df.columns]
-                        
+
                         if missing_pglyco:
                             st.error(f"pGlyco file is missing required columns: {', '.join(missing_pglyco)}")
                             st.stop()
@@ -1050,7 +1094,7 @@ def main():
                             if re.match(r"(?i)^abundance[s]?:\s*\d+", str(c))
                             and not re.search(r"(?i)normalized|scaled|s/n|corr", str(c))
                         ]
-                        
+
                         if not abundance_cols:
                             st.warning("No 'Abundance' columns detected in PD file. Please confirm PD export settings.")
 
@@ -1062,7 +1106,7 @@ def main():
                             pd_df = pd_df[required_pd_cols + abundance_cols]
                         else:
                             pd_df = pd_df[required_pd_cols]
-                            
+
                         merged = merge_pglyco_pd(pglyco_df, pd_df, version_label, species)
 
                         ss["merged_df"] = merged
@@ -1071,7 +1115,7 @@ def main():
                         ss["diffexp_df"] = None
                         ss["filtered_df"] = None
                         ss["filtered_ready"] = False
-                        ss["batch_corrected"] = False
+                        _set_new_merged_matrix(merged)
 
                     except Exception as e:
                         st.error(f"Merge failed: {e}")
@@ -1088,10 +1132,10 @@ def main():
                             psm_df['Glycan_Composition'] = psm_df['Total Glycan Composition'].apply(glycan_to_composition)
                             psm_df['Glycan_Composition_Clean'] = psm_df['Total Glycan Composition'].apply(_msfragger_to_pglyco)
                             psm_df['ProSites'] = psm_df.apply(_calculate_prosite, axis=1)
-                            
+
                             tmt_channels = detect_tmt_channels(psm_df)
                             merged = build_glyco_id_table(psm_df, peptide_df, tmt_channels)
-                            
+
                             abundance_cols = [c for c in merged.columns if c.startswith('Abundance:')]
 
                         if merged.empty:
@@ -1103,7 +1147,7 @@ def main():
                             ss["diffexp_df"] = None
                             ss["filtered_df"] = None
                             ss["filtered_ready"] = False
-                            ss["batch_corrected"] = False
+                            _set_new_merged_matrix(merged)
                             st.success(f"Successfully processed {len(merged)} unique MSFragger glycoforms!")
                     except Exception as e:
                         st.error(f"MSFragger Processing failed: {e}")
@@ -1116,7 +1160,7 @@ def main():
     )
 
     if not downstream_active and ss.get("merged_ready") and not df_is_empty(ss.get("merged_df")):
-        merged_display_df = ss["merged_df"]
+        merged_display_df = ss["merged_df_raw"] if isinstance(ss.get("merged_df_raw"), pd.DataFrame) else ss["merged_df"]
 
         abundance_cols_display = [
             c for c in merged_display_df.columns
@@ -1173,10 +1217,10 @@ def main():
                 show_grid(merged_display_df, page_size=15, height=450)
             with tab_classes:
                 if "GlycanClass" in merged_display_df.columns:
-                    st.caption(
+                    help_popover(
                         "How the identified glycoforms are spread across glycan classes. This describes what was "
                         "identified, not data quality. To see which classes change between groups, run the "
-                        "statistics and open **Glycan class breakdown** in Results Visualizations."
+                        "statistics and open **Glycan class breakdown** in Results Visualizations.", label="About this table"
                     )
                     create_glycan_class_summary(merged_display_df, "GlycanClass")
                 else:
@@ -1227,9 +1271,9 @@ def main():
     c1, c2, c3, c4 = st.columns(4)
     for _col, _name, _label, _help, _key in [
         (c1, "show_global_select", "Data Filtering & Group Specification",
-         'Define experimental cohorts, map batches, and set the baseline reference group.', "btn_global_select"),
+         'Choose the TMT channels, define the groups and set the baseline reference group.', "btn_global_select"),
         (c2, "show_overview", "Data Integrity Check & Sanity Profiling",
-         'Quality control before testing: PCA, sample correlation, sample clustering and per-sample abundance distributions.', "btn_overview"),
+         'Check channel loading (optional normalization), then PCA, correlation, clustering and abundance distributions.', "btn_overview"),
         (c3, "show_suite", "Statistical Analysis Suite",
          'Pairwise tests, ANOVA or limma, then volcano, waterfall, box, heatmap, lollipop and glycan class plots.', "btn_suite"),
         (c4, "show_report", "Results Download",
@@ -1250,7 +1294,11 @@ def main():
         f"Step 1 · :green[✓ {_n_groups_ready} groups defined]" if _n_groups_ready >= 2
         else "Step 1 · Start here: assign samples to at least 2 groups"
     )
-    c2.caption("Step 2 · Check samples look as expected before testing")
+    c2.caption(
+        "Step 2 · Normalization: " + ("none" if ss.get("ge_norm_method", GE_NORM_NONE) == GE_NORM_NONE
+                                      else ":green[" + ss.get("ge_norm_method", "") + "]")
+        + " · check channel loading and QC"
+    )
     c3.caption(
         f"Step 3 · :green[✓ {ss.get('stat_method_label', 'Statistics done')}]" if ss.get("diff_done")
         else ("Step 3 · Ready to run statistics" if _n_groups_ready >= 2 else "Step 3 · Needs groups from step 1")
@@ -1280,15 +1328,17 @@ def main():
 
         with st.expander("What do I set here?", icon=":material/help:"):
             st.markdown(
-                "1. **Sample columns**: the TMT channels to analyse. Leave out empty channels. Leave out the "
-                "pool/reference channel too, unless you need it for IRS batch correction.\n"
+                "1. **Sample columns**: the TMT channels to analyse. Leave out empty channels and the "
+                "pool/reference channel.\n"
                 "2. **Groups**: put every channel into a biological group (2 or 3 groups). The statistics "
                 "compare these groups.\n"
                 "3. **Reference group**: the baseline, usually the control. Fold changes are reported as "
                 "*other group vs reference*, so a positive log2FC means higher than the reference.\n"
-                "4. **Batch correction (optional)**: only if your samples were run in more than one TMT plex "
-                "or batch. Every grouped channel must be in a batch, and each batch should contain more than "
-                "one group. If a batch holds only one group, batch and biology cannot be separated."
+                "4. **One TMT plex per analysis.** The merge adds up each glycoform over all raw files of the "
+                "upload, so the files must come from one plex (fractions of one plex are fine). Analyse each "
+                "plex separately.\n"
+                "5. **Normalization** (optional, default none) is set in **Data Integrity Check**, where you can "
+                "see the channel loading before and after."
             )
 
         def _uniq(seq):
@@ -1432,7 +1482,7 @@ def main():
 
                 grp1 = _sanitize(grp1, sample_cols)
                 grp2 = _sanitize([c for c in grp2 if c not in set(grp1)], sample_cols)
-                
+
                 if n_groups == 3:
                     grp3 = _sanitize([c for c in grp3 if c not in set(grp1) and c not in set(grp2)], sample_cols)
 
@@ -1448,12 +1498,12 @@ def main():
                     for i, (lbl, cols) in enumerate(zip(global_group_labels, global_group_samples))
                     if cols
                 ]
-                
+
                 if nonempty_groups:
                     ss.setdefault("global_control_group_idx", nonempty_groups[0][0])
                     valid_idxs = [i for i, _, _ in nonempty_groups]
                     current = ss.get("global_control_group_idx", valid_idxs[0])
-                    
+
                     if current not in valid_idxs:
                         current = valid_idxs[0]
 
@@ -1471,376 +1521,6 @@ def main():
                     ss["global_control_group_idx"] = 0
                     st.info("Select at least one column in any group to set a global reference.")
 
-            with st.container(border=True):
-                st.markdown("#### Batch Effect Correction")
-
-                batch_allowed_samples = ss.get("global_all_groups", [])
-                batch_allowed_samples = _sanitize(batch_allowed_samples, sample_cols)
-
-                if not batch_allowed_samples:
-                    st.info("Assign samples to Group 1/2/3 first before enabling batch correction.")
-                else:
-                    # -------------------------------------------------------------
-                    # Persistent toggle
-                    # -------------------------------------------------------------
-                    # A temporary widget key is used because Streamlit may remove
-                    # widget keys when this panel is hidden. The permanent setting
-                    # remains in ss["enable_batch_correction"].
-                    if "_ge_batch_toggle" not in ss:
-                        ss["_ge_batch_toggle"] = bool(
-                            ss.get("enable_batch_correction", False)
-                        )
-
-                    apply_batch = st.toggle(
-                        "Apply Batch Effect Correction",
-                        key="_ge_batch_toggle"
-                    )
-                    ss["enable_batch_correction"] = bool(apply_batch)
-
-                    if apply_batch:
-                        with st.container(border=True):
-                            st.markdown("##### Batch Setup")
-
-                            # -----------------------------------------------------
-                            # Persistent batch method
-                            # -----------------------------------------------------
-                            batch_methods = [
-                                "ComBat (Empirical Bayes)",
-                                "Median Centering",
-                                "Internal Reference Scaling (IRS)"
-                            ]
-
-                            saved_method = ss.get(
-                                "batch_method_selected",
-                                batch_methods[0]
-                            )
-                            if saved_method not in batch_methods:
-                                saved_method = batch_methods[0]
-
-                            if "_ge_batch_method" not in ss:
-                                ss["_ge_batch_method"] = saved_method
-
-                            batch_method = st.selectbox(
-                                "Batch Correction Method",
-                                options=batch_methods,
-                                help=(
-                                    "ComBat requires neuroCombat. "
-                                    "IRS requires a common pool channel across multiplexes."
-                                ),
-                                key="_ge_batch_method"
-                            )
-                            ss["batch_method_selected"] = batch_method
-
-                            # -----------------------------------------------------
-                            # Persistent number of batches
-                            # -----------------------------------------------------
-                            batch_count_options = [2, 3, 4]
-                            saved_num_batches = int(
-                                ss.get("batch_num_selected", 2)
-                            )
-                            if saved_num_batches not in batch_count_options:
-                                saved_num_batches = 2
-
-                            if "_ge_num_batches" not in ss:
-                                ss["_ge_num_batches"] = saved_num_batches
-
-                            num_batches = st.radio(
-                                "Number of Batches",
-                                batch_count_options,
-                                horizontal=True,
-                                key="_ge_num_batches"
-                            )
-                            ss["batch_num_selected"] = int(num_batches)
-
-                            # -----------------------------------------------------
-                            # Persistent batch sample assignments
-                            # -----------------------------------------------------
-                            # Prefer saved UI configuration. If this is an older
-                            # session, fall back to the batches used for the last
-                            # successful correction.
-                            stored_batch_config = (
-                                ss.get("batch_config", {})
-                                or ss.get("batch_dict", {})
-                                or {}
-                            )
-
-                            batch_dict = {}
-                            selected_so_far = []
-
-                            for b in range(num_batches):
-                                batch_name = f"Batch {b+1}"
-                                widget_key = f"_ge_batch_sel_{b}"
-
-                                if widget_key in ss:
-                                    prev_source = ss.get(widget_key, [])
-                                else:
-                                    prev_source = stored_batch_config.get(
-                                        batch_name, []
-                                    )
-
-                                prev_selected = _sanitize(
-                                    prev_source,
-                                    batch_allowed_samples
-                                )
-
-                                available_for_batch = [
-                                    c for c in batch_allowed_samples
-                                    if c not in selected_so_far
-                                    or c in prev_selected
-                                ]
-
-                                prev_selected = _sanitize(
-                                    prev_selected,
-                                    available_for_batch
-                                )
-
-                                # Seed the widget from permanent state when the
-                                # Data Filtering panel is rebuilt.
-                                ss[widget_key] = prev_selected
-
-                                b_cols = st.multiselect(
-                                    f"{batch_name} Samples",
-                                    options=available_for_batch,
-                                    format_func=fmt,
-                                    key=widget_key
-                                )
-
-                                b_cols = _sanitize(
-                                    b_cols,
-                                    batch_allowed_samples
-                                )
-                                batch_dict[batch_name] = b_cols
-                                selected_so_far = _uniq(
-                                    selected_so_far + b_cols
-                                )
-
-                            # Save assignments immediately, not only after the
-                            # correction button is clicked.
-                            ss["batch_config"] = {
-                                k: list(v) for k, v in batch_dict.items()
-                            }
-
-                            assigned_samples = _uniq(
-                                [
-                                    c
-                                    for cols in batch_dict.values()
-                                    for c in cols
-                                ]
-                            )
-
-                            unassigned_batch_samples = [
-                                c
-                                for c in batch_allowed_samples
-                                if c not in assigned_samples
-                            ]
-
-                            if unassigned_batch_samples:
-                                st.warning(
-                                    "These grouped samples are not assigned to any batch: "
-                                    + ", ".join(
-                                        [fmt(c) for c in unassigned_batch_samples]
-                                    )
-                                )
-
-                            # -----------------------------------------------------
-                            # Persistent IRS reference channels
-                            # -----------------------------------------------------
-                            irs_ref_dict = {}
-                            if batch_method == "Internal Reference Scaling (IRS)":
-                                nonempty_batches_irs = {
-                                    k: v for k, v in batch_dict.items() if v
-                                }
-
-                                if nonempty_batches_irs:
-                                    st.markdown(
-                                        "**Select the Reference/Pool Sample for each batch:**"
-                                    )
-
-                                    saved_irs_refs = ss.get(
-                                        "irs_ref_config", {}
-                                    ) or {}
-
-                                    for b_idx, (b_name, b_cols) in enumerate(
-                                        nonempty_batches_irs.items()
-                                    ):
-                                        irs_widget_key = f"_ge_irs_ref_{b_idx}"
-
-                                        saved_ref = saved_irs_refs.get(b_name)
-                                        if saved_ref not in b_cols:
-                                            saved_ref = b_cols[0]
-
-                                        if irs_widget_key not in ss:
-                                            ss[irs_widget_key] = saved_ref
-                                        elif ss[irs_widget_key] not in b_cols:
-                                            ss[irs_widget_key] = saved_ref
-
-                                        irs_ref_dict[b_name] = st.selectbox(
-                                            f"{b_name} Reference Channel",
-                                            options=b_cols,
-                                            format_func=fmt,
-                                            key=irs_widget_key
-                                        )
-
-                                    ss["irs_ref_config"] = dict(irs_ref_dict)
-
-                            # -----------------------------------------------------
-                            # Run correction
-                            # -----------------------------------------------------
-                            if st.button(
-                                "Run Batch Correction",
-                                type="primary",
-                                key="run_batch_correction_btn"
-                            ):
-                                assigned_samples = _uniq(
-                                    [
-                                        c
-                                        for cols in batch_dict.values()
-                                        for c in cols
-                                    ]
-                                )
-                                nonempty_batches = {
-                                    k: v
-                                    for k, v in batch_dict.items()
-                                    if v
-                                }
-
-                                duplicated = [
-                                    c
-                                    for c in assigned_samples
-                                    if sum(
-                                        c in cols
-                                        for cols in batch_dict.values()
-                                    ) > 1
-                                ]
-
-                                if duplicated:
-                                    st.error(
-                                        "A sample cannot be assigned to more than one batch: "
-                                        + ", ".join(
-                                            [fmt(c) for c in duplicated]
-                                        )
-                                    )
-
-                                elif len(nonempty_batches) < 2:
-                                    st.error(
-                                        "Please assign samples to at least two non-empty batches."
-                                    )
-
-                                elif set(assigned_samples) != set(batch_allowed_samples):
-                                    st.error(
-                                        "Please assign every grouped sample to one batch before running correction."
-                                    )
-
-                                else:
-                                    try:
-                                        # Always retain the original uncorrected
-                                        # matrix for PCA-before comparison and for
-                                        # restoring the data if correction is turned off.
-                                        if (
-                                            ss.get("merged_df_before_batch") is None
-                                            or not ss.get("batch_corrected", False)
-                                        ):
-                                            ss["merged_df_before_batch"] = (
-                                                ss["merged_df"].copy()
-                                            )
-
-                                        input_df_for_batch = (
-                                            ss["merged_df_before_batch"].copy()
-                                        )
-
-                                        if batch_method == "ComBat (Empirical Bayes)":
-                                            # ComBat must know each sample's biological group,
-                                            # otherwise it removes real group differences.
-                                            group_map = {
-                                                col: lbl
-                                                for lbl, cols in zip(
-                                                    ss.get("global_group_labels", []),
-                                                    ss.get("global_group_samples", []),
-                                                )
-                                                for col in (cols or [])
-                                            }
-                                            corrected_df, combat_info = apply_combat_batch_correction(
-                                                input_df_for_batch,
-                                                nonempty_batches,
-                                                batch_allowed_samples,
-                                                group_map=group_map,
-                                            )
-                                            for _w in combat_info.get("warnings", []):
-                                                st.warning(_w)
-
-                                        elif batch_method == "Internal Reference Scaling (IRS)":
-                                            corrected_df = apply_irs_batch_correction(
-                                                input_df_for_batch,
-                                                nonempty_batches,
-                                                irs_ref_dict,
-                                                batch_allowed_samples
-                                            )
-
-                                        else:
-                                            corrected_df = apply_median_centering_batch_correction(
-                                                input_df_for_batch,
-                                                nonempty_batches,
-                                                batch_allowed_samples
-                                            )
-
-                                        ss["merged_df"] = corrected_df
-                                        ss["batch_dict"] = {
-                                            k: list(v)
-                                            for k, v in nonempty_batches.items()
-                                        }
-                                        ss["batch_config"] = {
-                                            k: list(v)
-                                            for k, v in batch_dict.items()
-                                        }
-                                        ss["batch_method_selected"] = batch_method
-                                        ss["batch_num_selected"] = int(num_batches)
-                                        ss["batch_corrected"] = True
-
-                                        ss["diffexp_df"] = None
-                                        ss["filtered_df"] = None
-                                        ss["diff_done"] = False
-                                        ss["filtered_ready"] = False
-
-                                        st.success(
-                                            f"{batch_method} applied successfully. "
-                                            "QC PCA will show before and after batch correction, "
-                                            "and downstream analysis will use corrected abundances."
-                                        )
-
-                                    except ImportError as ie:
-                                        st.error(str(ie))
-                                    except Exception as e:
-                                        st.error(
-                                            f"Batch correction failed: {e}"
-                                        )
-
-                    else:
-                        # If correction had already been applied, turning the
-                        # toggle OFF should restore the original data rather than
-                        # merely changing the flag while leaving corrected values.
-                        if (
-                            ss.get("batch_corrected", False)
-                            and isinstance(
-                                ss.get("merged_df_before_batch"),
-                                pd.DataFrame
-                            )
-                            and not ss["merged_df_before_batch"].empty
-                        ):
-                            ss["merged_df"] = (
-                                ss["merged_df_before_batch"].copy()
-                            )
-                            ss["diffexp_df"] = None
-                            ss["filtered_df"] = None
-                            ss["diff_done"] = False
-                            ss["filtered_ready"] = False
-
-                        ss["batch_dict"] = {}
-                        ss["batch_corrected"] = False
-
-                        # Keep batch_config and merged_df_before_batch so the
-                        # user's assignments can be restored if correction is
-                        # turned back on during this session.
-
         with right:
             with st.container(border=True):
                 st.markdown("#### Sample Mapping Summary")
@@ -1849,11 +1529,6 @@ def main():
                 group_samples = ss.get("global_group_samples", [])
                 group_labels  = ss.get("global_group_labels", [])
                 control_idx   = ss.get("global_control_group_idx", 0)
-                batch_dict = (
-                    ss.get("batch_config", {})
-                    if ss.get("enable_batch_correction", False)
-                    else ss.get("batch_dict", {})
-                )
 
                 rows = []
                 for col in sample_cols:
@@ -1865,17 +1540,10 @@ def main():
                             grp_num = i + 1
                             break
 
-                    batch_name = "Unassigned"
-                    for b_name, b_cols in batch_dict.items():
-                        if col in b_cols:
-                            batch_name = b_name
-                            break
-
                     rows.append({
                         "Column": col,
                         "Sample": fmt(col),
                         "Group": grp_name,
-                        "Batch": batch_name if ss.get("batch_corrected") else "N/A",
                         "Group_Number": grp_num,
                         "Is_Reference": (grp_num is not None and (grp_num - 1) == control_idx)
                     })
@@ -1943,21 +1611,137 @@ def main():
             if not all_groups:
                 all_groups = sample_cols
 
+            # ---------- Block 1: channel loading & normalization (always shown first) ----------
+            n_left, n_right = st.columns([0.42, 0.58], gap="large")
+            with n_left:
+                with st.container(border=True):
+                    st.markdown("#### Channel Loading & Normalization")
+                    help_popover(
+                        "Each box in the plot is one TMT channel. If one channel sits higher or lower than the "
+                        "rest, more or less material was loaded for that sample.\n\n"
+                        "Choose a normalization only if the channels clearly differ; the default is none. "
+                        "The QC plots below and the statistics use what you choose here.\n\n"
+                        "**Methods**\n\n"
+                        + "\n".join(f"- **{m}**: {GE_NORM_HELP[m]}" for m in GE_NORM_METHODS)
+                        + "\n\n**Per-channel details** (under the plot) lists each channel's median and the "
+                        "factor applied.",
+                        label="How this works",
+                    )
+                    st.markdown("**Normalization method**")
+                    if "_w_ge_norm_method" not in ss:
+                        ss["_w_ge_norm_method"] = ss.get("ge_norm_method", GE_NORM_NONE)
+                    norm_choice = st.selectbox(
+                        "Normalization method", GE_NORM_METHODS, key="_w_ge_norm_method",
+                        label_visibility="collapsed",
+                        help="Default: none. Normalize only when the channels clearly differ. "
+                             "**How this works** above describes each method.",
+                    )
+                    if norm_choice == GE_NORM_PROTEOME:
+                        prot_up = st.file_uploader(
+                            "Total-proteome table of the same TMT pool (CSV, TSV or Excel)",
+                            type=["csv", "tsv", "txt", "xlsx"], key="ge_norm_proteome_upload",
+                            help="For example the Proteome Discoverer protein export of the unenriched or "
+                                 "total-proteome run. It needs one abundance column per TMT channel (126, 127N, ...).",
+                        )
+                        if prot_up is not None and prot_up.name != ss.get("ge_norm_proteome_name"):
+                            try:
+                                if prot_up.name.lower().endswith(".csv"):
+                                    _pdf = pd.read_csv(prot_up)
+                                elif prot_up.name.lower().endswith((".tsv", ".txt")):
+                                    _pdf = pd.read_csv(prot_up, sep="\t")
+                                else:
+                                    _pdf = pd.read_excel(prot_up)
+                                ss["ge_norm_proteome_df"] = _pdf
+                                ss["ge_norm_proteome_name"] = prot_up.name
+                            except Exception as _e:
+                                st.error(f"Could not read the protein table: {_e}")
+                        if ss.get("ge_norm_proteome_name"):
+                            st.caption(f"Protein table in use: **{ss['ge_norm_proteome_name']}**")
+                    _ready = norm_choice != GE_NORM_PROTEOME or isinstance(ss.get("ge_norm_proteome_df"), pd.DataFrame)
+                    if _ready:
+                        try:
+                            _changed = _apply_normalization_if_changed(norm_choice, all_groups)
+                            if _changed:
+                                # Rerun once so every caption on the page shows the new method.
+                                ss["_ge_norm_flash"] = "raw" if norm_choice == GE_NORM_NONE else "applied"
+                                st.rerun()
+                            df = ss["merged_df"]
+                        except ValueError as _e:
+                            st.error(str(_e))
+                    else:
+                        st.info("Upload the protein table to compute the factors.")
+                    _flash = ss.pop("_ge_norm_flash", None)
+                    if _flash == "applied":
+                        st.success("Normalization applied. QC plots and statistics now use the normalized "
+                                   "abundances; earlier statistics were cleared.")
+                    elif _flash == "raw":
+                        st.info("Back to raw abundances; earlier statistics were cleared.")
+
+            with n_right:
+                _cols = [c for c in all_groups if c in df.columns]
+                _raw = ss.get("merged_df_raw") if isinstance(ss.get("merged_df_raw"), pd.DataFrame) else df
+                _group_of = {c: lbl for lbl, gcols in zip(group_labels, group_samples) for c in (gcols or [])}
+                _method = ss.get("ge_norm_method", GE_NORM_NONE)
+                if len(_cols) < 2:
+                    st.info("Assign at least two channels to groups in Data Filtering & Group Specification.")
+                else:
+                    _norm = None if _method == GE_NORM_NONE else ss["merged_df"]
+                    _mb = ge_channel_medians(_raw, _cols)
+                    _spread_b = float(_mb.max() - _mb.min())
+                    _spread_a = None
+                    if _norm is not None:
+                        _ma = ge_channel_medians(_norm, _cols)
+                        _spread_a = float(_ma.max() - _ma.min())
+                    _offs = ge_group_offsets(_raw, group_samples, group_labels, int(ss.get("global_control_group_idx", 0) or 0))
+                    if _method == GE_NORM_NONE and _spread_b > 0.26:
+                        st.warning("Some channels were loaded unequally. Consider a normalization "
+                                   "(see **How this works**).")
+                    elif _spread_a is not None and _spread_a > _spread_b + 0.05:
+                        st.warning(
+                            "The channels line up worse after this normalization. "
+                            + ("Check that the protein table comes from the same TMT pool. "
+                               if _method == GE_NORM_PROTEOME else "")
+                            + "If in doubt, go back to None."
+                        )
+                    _fig = ge_norm_boxplot_figure(
+                        _raw, _norm, _cols, fmt=fmt, group_of=_group_of,
+                        palette=ss.get("pca_palette") or None,
+                        after_title=f"After: {_method}",
+                    )
+                    st.pyplot(_fig)
+                    plt.close(_fig)  # still saved for the report; avoids piling up open figures
+                    ss["report_norm_fig"] = _fig
+                    add_plot_download_buttons(_fig, base_filename="channel_loading_normalization",
+                                              key_suffix="ge_norm")
+                    with st.expander("Per-channel details", expanded=False):
+                        st.dataframe(
+                            ge_loading_summary(_raw, _norm if _norm is not None else _raw, _cols, fmt=fmt,
+                                               group_of=_group_of, factors=ss.get("ge_norm_factors")),
+                            hide_index=True, use_container_width=True,
+                        )
+                        if not _offs.empty:
+                            st.markdown("**Group offsets before normalization** (a group-wide offset shifts "
+                                        "every log2FC of that group by about this much)")
+                            st.dataframe(_offs, hide_index=True, use_container_width=True)
+
+            st.divider()
+
+            # ---------- Block 2: quality control plots ----------
             left, right = st.columns([0.42, 0.58], gap="large")
 
             with left:
                 with st.container(border=True):
+                    st.markdown("#### Quality Control Plots")
 
                     with st.expander("Assigned Sample Mapping", expanded=False):
                         sample_cols = ss.get("global_sample_cols", [])
-                        
+
                         if not sample_cols:
                             st.info("No samples selected in Data Filtering & Group Specification.")
                         else:
                             group_samples = ss.get("global_group_samples", [])
                             group_labels  = ss.get("global_group_labels", [])
                             control_idx   = ss.get("global_control_group_idx", None)
-                            batch_dict    = ss.get("batch_dict", {})
 
                             rows = []
                             for col in sample_cols:
@@ -1971,18 +1755,11 @@ def main():
                                         grp_num  = i + 1
                                         is_ctrl  = (control_idx is not None and i == control_idx)
                                         break
-                                        
-                                batch_name = "Unassigned"
-                                for b_name, b_cols in batch_dict.items():
-                                    if col in b_cols:
-                                        batch_name = b_name
-                                        break
 
                                 rows.append({
                                     "Sample": fmt(col),
                                     "Group": grp_name,
                                     "Group #": grp_num,
-                                    "Batch": batch_name if ss.get("batch_corrected") else "N/A",
                                     "Is Reference": is_ctrl
                                 })
 
@@ -2020,24 +1797,25 @@ def main():
                     _qc_help = {
                         "Principal Component Analysis (PCA)":
                             "Each dot is a sample. Samples of the same group should sit together. A sample far from "
-                            "its group may be an outlier (failed labelling, wrong channel). If samples separate by "
-                            "batch or plex instead of by group, consider batch correction.",
+                            "its group may be an outlier (failed labelling, wrong channel, unequal loading; see the "
+                            "Channel Loading & Normalization block above).",
                         "Correlation Matrix":
-                            "Correlation of raw abundances between samples. Replicates of one group should correlate "
-                            "highly. A sample that correlates poorly with all others needs a closer look before testing.",
+                            "Correlation of log2 abundances between samples (zeros, i.e. not quantified, are left "
+                            "out). Replicates of one group should correlate highly. A sample that correlates poorly "
+                            "with all others needs a closer look before testing.",
                         "Sample Clustering":
                             "Clusters samples on the most variable glycoforms without using the group labels. If "
-                            "samples cluster by group, biology dominates. If they cluster by batch or run order, "
-                            "check for batch effects.",
+                            "samples cluster by group, biology dominates. If they cluster by run order or labelling day, "
+                            "look for a technical problem before testing. Group colours only colour the labels.",
                         "Abundance Density":
                             "log2 abundance distribution of each sample. In TMT data the curves should overlap. A curve "
-                            "shifted left or right means that channel had less or more material loaded. The statistics "
-                            "in this app do not correct for that, so check this before testing.",
+                            "shifted left or right means that channel had less or more material loaded. To correct for "
+                            "that, use the Channel Loading & Normalization block above.",
                     }
                     if mode in _qc_help:
-                        st.info(_qc_help[mode], icon=":material/lightbulb:")
+                        help_popover(_qc_help[mode])
                     else:
-                        st.caption("Pick a check above. Look at PCA first: it shows most problems at a glance.")
+                        st.caption("Pick a plot above. PCA is a good first check.")
 
                     top_n_peptides = st.session_state.get("topn_pf", 20)
                     if (mode or "").strip().lower() == "feature frequency profiling":
@@ -2046,13 +1824,13 @@ def main():
                     if mode == "Principal Component Analysis (PCA)":
                         st.markdown("**PCA Display Options**")
                         data_for_pca = df[all_groups].dropna()
-                        
+
                         if not data_for_pca.empty and len(data_for_pca.columns) > 0:
                             n_comps = min(10, data_for_pca.shape[0], data_for_pca.shape[1])
                             pc_cols = [f"PC{i+1}" for i in range(n_comps)]
                         else:
                             pc_cols = ["PC1", "PC2"]
-                        
+
                         col_x, col_y = st.columns(2)
                         with col_x:
                             ss["pca_x"] = st.selectbox(
@@ -2068,7 +1846,7 @@ def main():
                                 index=1 if len(pc_cols) > 1 else 0,
                                 key="pca_y_ui"
                             )
-                            
+
                         ss["pca_draw_ellipses"] = st.checkbox(
                             "Draw confidence ellipses",
                             value=True,
@@ -2105,7 +1883,7 @@ def main():
                         default_palette = ["#b3e2cd", "#fdcdac", "#cbd5e8", "#decbe4", "#ccebc5", "#fed9a6"]
                         ss["pca_palette"] = {}
                         cols = st.columns(len(group_labels))
-                        
+
                         for i, label in enumerate(group_labels):
                             with cols[i % len(cols)]:
                                 ss["pca_palette"][label] = st.color_picker(
@@ -2127,7 +1905,6 @@ def main():
                             key="overview_hm_norm_ui",
                             horizontal=True
                         )
-                        st.caption("Samples are clustered without using group labels. Group colors are used only to color sample labels.")
 
                         st.markdown("**Customize Group Colors**")
                         default_cluster_palette = ["#b3e2cd", "#fdcdac", "#cbd5e8", "#decbe4", "#ccebc5", "#fed9a6"]
@@ -2168,13 +1945,13 @@ def main():
                             run_peptide_freq=False, run_abundance=False, run_glycan_class=True
                         ),
                     }
-                    
+
                     for k in [
                         "run_pca", "run_corr", "run_overview_heatmap",
                         "run_peptide_freq", "run_abundance", "run_glycan_class"
                     ]:
                         ss[k] = False
-                        
+
                     if mode is not None:
                         ss.update(flags[mode])
 
@@ -2183,91 +1960,21 @@ def main():
                 if ss.get("run_pca", False):
                     if len(all_groups) >= 1:
 
-                        batch_was_applied = (
-                            ss.get("batch_corrected", False)
-                            and isinstance(ss.get("merged_df_before_batch"), pd.DataFrame)
-                            and not ss["merged_df_before_batch"].empty
+                        create_pca_plot(
+                            df=df,
+                            group_samples=group_samples,
+                            group_labels=group_labels,
+                            title="PCA",
+                            pc_x=ss.get("pca_x", "PC1"),
+                            pc_y=ss.get("pca_y", "PC2"),
+                            draw_ellipses=ss.get("pca_draw_ellipses", False),
+                            hide_outliers=ss.get("pca_hide_outliers", False),
+                            label_outliers=ss.get("pca_label_outliers", True),
+                            zoom_q=ss.get("pca_zoom_q", 1.0),
+                            palette=ss.get("pca_palette", None),
+                            quant_mode="TMT",
+                            key_suffix="single_pca"
                         )
-
-                        if batch_was_applied:
-                            st.caption(
-                                "Compare the same grouped samples before and after batch correction. "
-                                "A useful correction should reduce technical batch separation without "
-                                "removing the expected biological group structure."
-                            )
-                            st.markdown(
-                                """
-                                <span style="
-                                    background-color:#e8f4ff;
-                                    color:#005a9c;
-                                    padding:5px 10px;
-                                    border-radius:999px;
-                                    font-size:0.85rem;
-                                    font-weight:600;
-                                ">
-                                Batch correction applied
-                                </span>
-                                """,
-                                unsafe_allow_html=True
-                            )
-
-                            st.markdown("<br>", unsafe_allow_html=True)
-
-                            pca_col1, pca_col2 = st.columns(2, gap="large")
-
-                            with pca_col1:
-                                st.markdown("PCA Before Batch Correction")
-                                create_pca_plot(
-                                    df=ss["merged_df_before_batch"],
-                                    group_samples=group_samples,
-                                    group_labels=group_labels,
-                                    title="PCA Before Batch Correction",
-                                    pc_x=ss.get("pca_x", "PC1"),
-                                    pc_y=ss.get("pca_y", "PC2"),
-                                    draw_ellipses=ss.get("pca_draw_ellipses", False),
-                                    hide_outliers=ss.get("pca_hide_outliers", False),
-                                    label_outliers=ss.get("pca_label_outliers", True),
-                                    zoom_q=ss.get("pca_zoom_q", 1.0),
-                                    palette=ss.get("pca_palette", None),
-                                    quant_mode="TMT",
-                                    key_suffix="before_batch"
-                                )
-
-                            with pca_col2:
-                                st.markdown("PCA After Batch Correction")
-                                create_pca_plot(
-                                    df=ss["merged_df"],
-                                    group_samples=group_samples,
-                                    group_labels=group_labels,
-                                    title="PCA After Batch Correction",
-                                    pc_x=ss.get("pca_x", "PC1"),
-                                    pc_y=ss.get("pca_y", "PC2"),
-                                    draw_ellipses=ss.get("pca_draw_ellipses", False),
-                                    hide_outliers=ss.get("pca_hide_outliers", False),
-                                    label_outliers=ss.get("pca_label_outliers", True),
-                                    zoom_q=ss.get("pca_zoom_q", 1.0),
-                                    palette=ss.get("pca_palette", None),
-                                    quant_mode="TMT",
-                                    key_suffix="after_batch"
-                                )
-
-                        else:
-                            #st.markdown("### PCA")
-                            create_pca_plot(
-                                df=df,
-                                group_samples=group_samples,
-                                group_labels=group_labels,
-                                title="PCA",
-                                pc_x=ss.get("pca_x", "PC1"),
-                                pc_y=ss.get("pca_y", "PC2"),
-                                draw_ellipses=ss.get("pca_draw_ellipses", False),
-                                    hide_outliers=ss.get("pca_hide_outliers", False),
-                                    label_outliers=ss.get("pca_label_outliers", True),
-                                    zoom_q=ss.get("pca_zoom_q", 1.0),
-                                palette=ss.get("pca_palette", None),
-                                quant_mode="TMT",
-                                key_suffix="single_pca"
-                            )
 
                     else:
                         st.info("No samples available for PCA.")
@@ -2322,7 +2029,7 @@ def main():
                         st.info("No numeric sample columns detected for abundance density.")
 
                 else:
-                    st.info("Choose an Analysis Module on the left to begin.")
+                    st.info("Pick a plot on the left.")
 
     # ====================== Step 4: Statistical Analysis Suite ======================
     if ss.get("show_suite"):
@@ -2330,7 +2037,7 @@ def main():
 
         def _detect_sample_options(df: pd.DataFrame):
             candidates = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-            
+
             def _clean(name: str) -> str:
                 s = str(name)
                 patterns = [
@@ -2374,7 +2081,7 @@ def main():
         with tabs[0]:
 
             merged_df = ss.get("merged_df")
-            
+
             if df_is_empty(merged_df):
                 st.info("Upload and process data first.")
             else:
@@ -2388,7 +2095,7 @@ def main():
                     for i, (lbl, cols) in enumerate(zip(group_labels, group_samples))
                     if cols
                 ]
-                
+
                 if len(nonempty_groups) < 2:
                     st.warning("You must assign samples to at least **two different groups** in the 'Data Filtering & Group Specification' module before running statistical analysis.")
                 else:
@@ -2402,235 +2109,225 @@ def main():
                     ss["control_group_idx"] = ctrl_idx
                     ss["all_groups"] = list(dict.fromkeys([c for g in group_samples for c in g]))
 
-                    with st.expander("Current Group Specification (read-only)", expanded=True):
-                        st.write(f"**Number of groups:** {n_groups}")
-                        st.write(f"**Reference group:** {group_labels[ctrl_idx]}")
-                        for i, (lbl, cols) in enumerate(zip(group_labels, group_samples), start=1):
-                            st.write(f"**Group {i} — {lbl}:** {len(cols)} samples")
-                            st.caption(", ".join([str(c) for c in cols]) if cols else "(empty)")
-
-                    ss.setdefault("compare_open", False)
+                    _grp_txt = " · ".join(
+                        f"**{lbl}** ({len(cols)})" for lbl, cols in zip(group_labels, group_samples) if cols
+                    )
+                    st.caption(
+                        f"Groups: {_grp_txt} · reference: **{group_labels[ctrl_idx]}**. "
+                        "Change them in Data Filtering & Group Specification."
+                    )
                     ss.setdefault("filter_open", False)
 
-                    def _toggle_compare():
-                        ss["compare_open"] = not ss.get("compare_open", False)
+                    with st.container(border=True):
+                        st.markdown("#### Test Parameters and Execution")
+                        st.caption(
+                            "Abundances: **" + ("raw (no normalization)" if ss.get("ge_norm_method", GE_NORM_NONE) == GE_NORM_NONE
+                                                else ss.get("ge_norm_method", "")) + "**. Change it in Data Integrity Check → "
+                            "Channel Loading & Normalization."
+                        )
 
-                    st.button(
-                        ("▸ " if not ss["compare_open"] else "▾ ") + "Select Statistical Test",
-                        key="btn_toggle_compare",
-                        width="stretch",
-                        help="Open the panel to choose the design and test, then run the analysis.",
-                        on_click=_toggle_compare,
-                    )
-
-                    if not ss["compare_open"]:
-                        st.info("Click Select Statistical Test to choose pairwise or ANOVA and run the analysis.")
-                    else:
-                        with st.container(border=True):
-                            st.markdown("#### Test Parameters and Execution")
-
-                            with st.expander("Which test should I use?", icon=":material/help:"):
-                                st.markdown(
-                                    "| Your design | Suggested test |\n"
-                                    "|---|---|\n"
-                                    "| 2 groups, independent samples, 3-6 replicates (typical TMT) | **limma moderated t-test** |\n"
-                                    "| 2 groups, independent samples, 8+ replicates | Welch's t-test or limma |\n"
-                                    "| Same subjects measured twice (matched channels) | Paired t-test |\n"
-                                    "| 3 groups | **limma moderated F-test** (default), then read the pairwise q-values |\n\n"
-                                    "**Why limma?** With few replicates, each glycoform's variance is estimated from only "
-                                    "a handful of values, so ordinary t-tests produce many false hits (tiny variance by "
-                                    "chance) and miss real ones. limma shrinks each variance towards the typical variance "
-                                    "of all glycoforms, which makes the test both more reliable and more powerful.\n\n"
-                                    "**Scale:** limma works on log2 abundances (zeros are treated as missing). The other "
-                                    "tests run on raw abundances, so their p-values and log2FC can differ from limma's.\n\n"
-                                    "**q-value** is the Benjamini-Hochberg adjusted p-value (false discovery rate). "
-                                    "q < 0.05 means about 5% of the features you call significant are expected to be false."
-                                )
-
-                            nonempty = [(lbl, cols) for lbl, cols in zip(group_labels, group_samples) if cols]
-                            nonempty_idx = [i for i, cols in enumerate(group_samples) if cols]
-                            can_pairwise = len(nonempty) >= 2
-                            can_anova    = (len(nonempty) == 3) and (n_groups == 3)
-                            labels_unique = len({lbl for lbl, _ in nonempty}) == len(nonempty)
-
-                            # No st.form here on purpose: inside a form the options below
-                            # would not update when the design is changed.
-                            DESIGN_TWO = "Two groups (pairwise)"
-                            DESIGN_THREE = "All three groups (limma F-test or ANOVA)"
-                            comparison_choices = [
-                                DESIGN_TWO if can_pairwise else DESIGN_TWO + " — need ≥2 non-empty groups",
-                                DESIGN_THREE if can_anova else DESIGN_THREE + " — need exactly 3 non-empty groups",
-                            ]
-                            # Labels change when groups change; drop a stale stored choice.
-                            if ss.get("stat_design") not in comparison_choices:
-                                ss.pop("stat_design", None)
-                            comparison_type = st.radio(
-                                "Select experimental design:",
-                                comparison_choices,
-                                # With three groups defined, start on the three-group design.
-                                index=1 if can_anova else 0,
-                                horizontal=True,
-                                key="stat_design",
-                                help="Two groups: compares one pair and gives a fold change (volcano, waterfall). "
-                                     "All three groups: tests whether any group differs, and limma also reports "
-                                     "every pairwise comparison in the same table.",
+                        with st.expander("Which test should I use?", icon=":material/help:"):
+                            st.markdown(
+                                "| Your design | Suggested test |\n"
+                                "|---|---|\n"
+                                "| 2 groups, independent samples, 3-6 replicates (typical TMT) | **limma moderated t-test** |\n"
+                                "| 2 groups, independent samples, 8+ replicates | Welch's t-test or limma |\n"
+                                "| Same subjects measured twice (matched channels) | Paired t-test |\n"
+                                "| 3 groups | **limma moderated F-test** (default), then read the pairwise q-values |\n\n"
+                                "**Why limma?** With few replicates, each glycoform's variance is estimated from only "
+                                "a handful of values, so ordinary t-tests produce many false hits (tiny variance by "
+                                "chance) and miss real ones. limma shrinks each variance towards the typical variance "
+                                "of all glycoforms, which makes the test both more reliable and more powerful.\n\n"
+                                "**Scale:** limma works on log2 abundances (zeros are treated as missing). The other "
+                                "tests run on raw abundances, so their p-values and log2FC can differ from limma's.\n\n"
+                                "**q-value** is the Benjamini-Hochberg adjusted p-value (false discovery rate). "
+                                "q < 0.05 means about 5% of the features you call significant are expected to be false."
                             )
-                            is_pairwise_design = comparison_type.startswith(DESIGN_TWO)
 
-                            selected_pair = None
-                            pairs = {}
-                            specific_test = PAIRWISE_TESTS[0]
-                            multigroup_test = MULTIGROUP_TESTS[0]
-                            limma_all_groups = True
+                        nonempty = [(lbl, cols) for lbl, cols in zip(group_labels, group_samples) if cols]
+                        nonempty_idx = [i for i, cols in enumerate(group_samples) if cols]
+                        can_pairwise = len(nonempty) >= 2
+                        can_anova    = (len(nonempty) == 3) and (n_groups == 3)
+                        labels_unique = len({lbl for lbl, _ in nonempty}) == len(nonempty)
 
-                            if is_pairwise_design:
-                                if not can_pairwise:
-                                    st.warning("Please define at least two non-empty groups in the Data Filtering tab.")
-                                else:
-                                    pairs = {
-                                        f"{group_labels[i]} vs {group_labels[j]}": (i, j)
-                                        for a, i in enumerate(nonempty_idx)
-                                        for j in nonempty_idx[a + 1:]
-                                    }
+                        # No st.form here on purpose: inside a form the options below
+                        # would not update when the design is changed.
+                        DESIGN_TWO = "Two groups (pairwise)"
+                        DESIGN_THREE = "All three groups (limma F-test or ANOVA)"
+                        comparison_choices = [
+                            DESIGN_TWO if can_pairwise else DESIGN_TWO + " — need ≥2 non-empty groups",
+                            DESIGN_THREE if can_anova else DESIGN_THREE + " — need exactly 3 non-empty groups",
+                        ]
+                        # Labels change when groups change; drop a stale stored choice.
+                        if ss.get("stat_design") not in comparison_choices:
+                            ss.pop("stat_design", None)
+                        comparison_type = st.radio(
+                            "Select experimental design:",
+                            comparison_choices,
+                            # With three groups defined, start on the three-group design.
+                            index=1 if can_anova else 0,
+                            horizontal=True,
+                            key="stat_design",
+                            help="Two groups: compares one pair and gives a fold change (volcano, waterfall). "
+                                 "All three groups: tests whether any group differs, and limma also reports "
+                                 "every pairwise comparison in the same table.",
+                        )
+                        is_pairwise_design = comparison_type.startswith(DESIGN_TWO)
 
-                                    col1, col2 = st.columns(2)
-                                    with col1:
-                                        selected_pair = st.selectbox(
-                                            "Select pairwise comparison:",
-                                            list(pairs.keys()),
-                                            key="stat_pair",
-                                            help="log2FC is always reported as the other group versus the reference group.",
-                                        )
-                                    with col2:
-                                        specific_test = st.selectbox(
-                                            "Select statistical test:",
-                                            PAIRWISE_TESTS,
-                                            key="stat_test",
-                                            help="Not sure? Open 'Which test should I use?' above.",
-                                        )
-                                    st.caption(TEST_HELP.get(specific_test, ""))
+                        selected_pair = None
+                        pairs = {}
+                        specific_test = PAIRWISE_TESTS[0]
+                        multigroup_test = MULTIGROUP_TESTS[0]
+                        limma_all_groups = True
 
-                                    if specific_test == LIMMA_T and len(nonempty) > 2:
-                                        limma_all_groups = st.checkbox(
-                                            "Use all groups to estimate variance (recommended)",
-                                            value=True,
-                                            key="stat_limma_all_groups",
-                                            help="Standard limma practice: the third group adds information about "
-                                                 "measurement noise and gives more power. Turn off to use only the "
-                                                 "two compared groups.",
-                                        )
+                        if is_pairwise_design:
+                            if not can_pairwise:
+                                st.warning("Please define at least two non-empty groups in the Data Filtering tab.")
                             else:
-                                selected_pair = "Three-group ANOVA"
-                                if can_anova:
-                                    multigroup_test = st.radio(
-                                        "Select statistical test:",
-                                        MULTIGROUP_TESTS,
-                                        key="stat_multigroup_test",
-                                        captions=[
-                                            "Recommended. log2 scale, stable with few replicates. Also gives log2FC "
-                                            "and q-value for every pair of groups.",
-                                            "Classical test on raw abundances. Only says whether any group differs.",
-                                        ],
-                                        help=TEST_HELP[LIMMA_F],
+                                pairs = {
+                                    f"{group_labels[i]} vs {group_labels[j]}": (i, j)
+                                    for a, i in enumerate(nonempty_idx)
+                                    for j in nonempty_idx[a + 1:]
+                                }
+
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    selected_pair = st.selectbox(
+                                        "Select pairwise comparison:",
+                                        list(pairs.keys()),
+                                        key="stat_pair",
+                                        help="log2FC is always reported as the other group versus the reference group.",
                                     )
+                                with col2:
+                                    specific_test = st.selectbox(
+                                        "Select statistical test:",
+                                        PAIRWISE_TESTS,
+                                        key="stat_test",
+                                        help="\n\n".join(f"**{_t}**: {TEST_HELP.get(_t, '')}" for _t in PAIRWISE_TESTS)
+                                             + "\n\nNot sure? Open **Which test should I use?** above.",
+                                    )
+
+                                if specific_test == LIMMA_T and len(nonempty) > 2:
+                                    limma_all_groups = st.checkbox(
+                                        "Use all groups to estimate variance (recommended)",
+                                        value=True,
+                                        key="stat_limma_all_groups",
+                                        help="Standard limma practice: the third group adds information about "
+                                             "measurement noise and gives more power. Turn off to use only the "
+                                             "two compared groups.",
+                                    )
+                        else:
+                            selected_pair = "Three-group ANOVA"
+                            if can_anova:
+                                multigroup_test = st.radio(
+                                    "Select statistical test:",
+                                    MULTIGROUP_TESTS,
+                                    key="stat_multigroup_test",
+                                    captions=[
+                                        "Recommended. log2 scale, stable with few replicates. Also gives log2FC "
+                                        "and q-value for every pair of groups.",
+                                        "Classical test on raw abundances. Only says whether any group differs.",
+                                    ],
+                                    help=TEST_HELP[LIMMA_F],
+                                )
+                            else:
+                                st.warning("Define exactly three non-empty groups in Data Filtering & Group Specification.")
+
+                        run_button = st.button(
+                            "Run Analysis",
+                            type="primary",
+                            key="btn_run_diff",
+                            help="Execute the selected statistical test to generate significance metrics (p-values, q-values, fold changes).",
+                        )
+
+                        if run_button:
+                            ss["filter_open"] = False
+                            # A new test makes any earlier filtered subset stale.
+                            ss["filtered_df"] = None
+                            ss["filtered_ready"] = False
+
+                            if not labels_unique:
+                                st.error("Group labels must be different from each other. Rename the groups in Data Filtering & Group Specification.")
+
+                            elif is_pairwise_design:
+                                if not can_pairwise or not selected_pair:
+                                    st.error("Define at least two non-empty groups and pick a comparison.")
                                 else:
-                                    st.warning("Define exactly three non-empty groups in Data Filtering & Group Specification.")
-
-                            run_button = st.button(
-                                "Run Analysis",
-                                type="primary",
-                                key="btn_run_diff",
-                                help="Execute the selected statistical test to generate significance metrics (p-values, q-values, fold changes).",
-                            )
-
-                            if run_button:
-                                ss["filter_open"] = False
-                                # A new test makes any earlier filtered subset stale.
-                                ss["filtered_df"] = None
-                                ss["filtered_ready"] = False
-
-                                if not labels_unique:
-                                    st.error("Group labels must be different from each other. Rename the groups in Data Filtering & Group Specification.")
-
-                                elif is_pairwise_design:
-                                    if not can_pairwise or not selected_pair:
-                                        st.error("Define at least two non-empty groups and pick a comparison.")
+                                    i, j = pairs[selected_pair]
+                                    if ctrl_idx == j:
+                                        c_i, t_i = j, i
                                     else:
-                                        i, j = pairs[selected_pair]
-                                        if ctrl_idx == j:
-                                            c_i, t_i = j, i
-                                        else:
-                                            c_i, t_i = i, j
+                                        c_i, t_i = i, j
 
-                                        control_cols, test_cols = group_samples[c_i], group_samples[t_i]
-                                        control_lab, test_lab = group_labels[c_i], group_labels[t_i]
+                                    control_cols, test_cols = group_samples[c_i], group_samples[t_i]
+                                    control_lab, test_lab = group_labels[c_i], group_labels[t_i]
 
-                                        try:
-                                            with st.spinner(f"Running {specific_test}..."):
-                                                if specific_test == LIMMA_T:
-                                                    diffexp_df = compute_diffexp_limma(
-                                                        df=merged_df,
-                                                        group_cols=[list(c) for c in group_samples],
-                                                        group_labels=list(group_labels),
-                                                        control_idx=c_i,
-                                                        test_idx=t_i,
-                                                        use_all_groups=limma_all_groups,
-                                                    )
-                                                else:
-                                                    diffexp_df = compute_diffexp(
-                                                        df=merged_df,
-                                                        control_cols=control_cols,
-                                                        test_cols=test_cols,
-                                                        control_label=control_lab,
-                                                        test_label=test_lab,
-                                                        test_type=specific_test
-                                                    )
-                                        except Exception as e:
-                                            st.error(f"The statistical test could not be run: {e}")
-                                        else:
-                                            method_label = f"{specific_test}: {test_lab} vs {control_lab}"
-                                            if specific_test == LIMMA_T and limma_all_groups and len(nonempty) > 2:
-                                                method_label += " (variance from all groups)"
+                                    try:
+                                        with st.spinner(f"Running {specific_test}..."):
+                                            if specific_test == LIMMA_T:
+                                                diffexp_df = compute_diffexp_limma(
+                                                    df=merged_df,
+                                                    group_cols=[list(c) for c in group_samples],
+                                                    group_labels=list(group_labels),
+                                                    control_idx=c_i,
+                                                    test_idx=t_i,
+                                                    use_all_groups=limma_all_groups,
+                                                )
+                                            else:
+                                                diffexp_df = compute_diffexp(
+                                                    df=merged_df,
+                                                    control_cols=control_cols,
+                                                    test_cols=test_cols,
+                                                    control_label=control_lab,
+                                                    test_label=test_lab,
+                                                    test_type=specific_test
+                                                )
+                                    except Exception as e:
+                                        st.error(f"The statistical test could not be run: {e}")
+                                    else:
+                                        method_label = f"{specific_test}: {test_lab} vs {control_lab}"
+                                        if specific_test == LIMMA_T and limma_all_groups and len(nonempty) > 2:
+                                            method_label += " (variance from all groups)"
 
-                                            ss["pairwise_control_label"] = control_lab
-                                            ss["pairwise_test_label"] = test_lab
-                                            ss["pairwise_control_cols"] = control_cols
-                                            ss["pairwise_test_cols"] = test_cols
+                                        ss["pairwise_control_label"] = control_lab
+                                        ss["pairwise_test_label"] = test_lab
+                                        ss["pairwise_control_cols"] = control_cols
+                                        ss["pairwise_test_cols"] = test_cols
 
-                                            ss["stat_method_label"] = method_label
-                                            ss["diffexp_df"] = diffexp_df
-                                            ss["diff_done"]  = True
+                                        ss["stat_method_label"] = method_label
+                                        ss["diffexp_df"] = diffexp_df
+                                        ss["diff_done"]  = True
 
+                            else:
+                                if not can_anova:
+                                    st.error("Provide exactly three non-empty groups for ANOVA.")
                                 else:
-                                    if not can_anova:
-                                        st.error("Provide exactly three non-empty groups for ANOVA.")
+                                    try:
+                                        with st.spinner(f"Running {multigroup_test}..."):
+                                            if multigroup_test == LIMMA_F:
+                                                diffexp_df = compute_diffexp_limma_f(
+                                                    df=merged_df,
+                                                    group_cols=[list(c) for c in group_samples],
+                                                    group_labels=list(group_labels),
+                                                    control_idx=ctrl_idx,
+                                                )
+                                            else:
+                                                diffexp_df = compute_diffexp_anova(
+                                                    df=merged_df,
+                                                    group1_cols=group_samples[0],
+                                                    group2_cols=group_samples[1],
+                                                    group3_cols=group_samples[2],
+                                                    group1_label=group_labels[0],
+                                                    group2_label=group_labels[1],
+                                                    group3_label=group_labels[2],
+                                                    run_tukey=False
+                                                )
+                                    except Exception as e:
+                                        st.error(f"The statistical test could not be run: {e}")
                                     else:
-                                        try:
-                                            with st.spinner(f"Running {multigroup_test}..."):
-                                                if multigroup_test == LIMMA_F:
-                                                    diffexp_df = compute_diffexp_limma_f(
-                                                        df=merged_df,
-                                                        group_cols=[list(c) for c in group_samples],
-                                                        group_labels=list(group_labels),
-                                                        control_idx=ctrl_idx,
-                                                    )
-                                                else:
-                                                    diffexp_df = compute_diffexp_anova(
-                                                        df=merged_df,
-                                                        group1_cols=group_samples[0],
-                                                        group2_cols=group_samples[1],
-                                                        group3_cols=group_samples[2],
-                                                        group1_label=group_labels[0],
-                                                        group2_label=group_labels[1],
-                                                        group3_label=group_labels[2],
-                                                        run_tukey=False
-                                                    )
-                                        except Exception as e:
-                                            st.error(f"The statistical test could not be run: {e}")
-                                        else:
-                                            ss["stat_method_label"] = f"{multigroup_test}: {', '.join(group_labels[:3])}"
-                                            ss["diffexp_df"] = diffexp_df
-                                            ss["diff_done"]  = True
+                                        ss["stat_method_label"] = f"{multigroup_test}: {', '.join(group_labels[:3])}"
+                                        ss["diffexp_df"] = diffexp_df
+                                        ss["diff_done"]  = True
 
 
                     if ss.get("diff_done") and df_is_nonempty(ss.get("diffexp_df")):
@@ -2642,31 +2339,31 @@ def main():
                         )
                         if "AveExpr" in _res.columns:
                             if "F" in _res.columns:
-                                st.caption(
+                                help_popover(
                                     "limma columns: **AveExpr** = mean log2 abundance; **F** = moderated F statistic; "
                                     "**p-value / q-value** = does any group differ; **log2FC (B vs A)** and "
                                     "**q-value (B vs A)** = each pair of groups (moderated t-test). "
-                                    "Group-name columns show the mean raw abundance."
+                                    "Group-name columns show the mean raw abundance.", label="Column guide"
                                 )
                             else:
-                                st.caption(
+                                help_popover(
                                     "limma columns: **log2FC** = mean log2(test) − mean log2(reference); "
                                     "**AveExpr** = mean log2 abundance; **t** = moderated t statistic. "
-                                    "Group-name columns show the mean raw abundance."
+                                    "Group-name columns show the mean raw abundance.", label="Column guide"
                                 )
                         show_grid(ss["diffexp_df"], page_size=15, height=400)
-                        
+
                         plot_df = ss["diffexp_df"]
-                        
+
                         st.divider()
                         st.markdown("#### Filter & Download Results")
-                        
+
                         with st.expander("Download Full Dataset (Unfiltered)", expanded=False):
                             dl_col1, dl_col2, spacer = st.columns([1.5, 1.5, 7])
-                            
+
                             buffer_csv_diff = BytesIO()
                             ss["diffexp_df"].to_csv(buffer_csv_diff, index=False)
-                            
+
                             with dl_col1:
                                 add_hosted_safe_file_download_button(
                                     label="Download CSV",
@@ -2679,7 +2376,7 @@ def main():
                             buffer_diff_excel = BytesIO()
                             with pd.ExcelWriter(buffer_diff_excel, engine='openpyxl') as writer:
                                 ss["diffexp_df"].to_excel(writer, index=False, sheet_name='Differential_Results')
-                            
+
                             with dl_col2:
                                 add_hosted_safe_file_download_button(
                                     label="Download Excel",
@@ -2727,19 +2424,19 @@ def main():
                                 mask = diff_df[sig_metric] < alpha_thr
                                 if not is_anova:
                                     mask = mask & (diff_df["log2FC"].abs() > fc_thr)
-                                
+
                                 ss["filtered_df"] = diff_df[mask].copy()
                                 ss["filtered_ready"] = True
-                                
+
                             if ss.get("filtered_ready") and ss.get("filtered_df") is not None:
                                 f_df = ss["filtered_df"]
                                 st.success(f"Retained **{len(f_df)}** significant features matching the criteria.")
-                                
+
                                 if not f_df.empty:
                                     show_grid(f_df, page_size=10, height=300)
-                                    
+
                                     f_col1, f_col2, _ = st.columns([1.5, 1.5, 7])
-                                    
+
                                     buf_f_csv = BytesIO()
                                     f_df.to_csv(buf_f_csv, index=False)
                                     with f_col1:
@@ -2842,10 +2539,10 @@ def main():
                             ),
                             "Glycan class breakdown": dict(show_class_breakdown=True),
                         }
-                        
+
                         for k in ["show_volcano","show_waterfall","show_box","show_heatmap","show_box_gene","show_lollipop","show_class_breakdown"]:
                             ss[k] = False
-                        
+
                         if mode is not None:
                             ss.update(flags[mode])
 
@@ -2858,7 +2555,7 @@ def main():
                                 key="volcano_plot_type",
                                 horizontal=True
                             )
-                            
+
                             sig_col = st.radio(
                                 "Significance metric",
                                 ["p-value", "q-value"],
@@ -2926,7 +2623,7 @@ def main():
                                 horizontal=True
                             )
                             top_n_box = st.slider("Top N markers to display", 1, 50, 10, key="box_topn")
-                            
+
                             if not is_anova:
                                 top_mode_box = st.radio(
                                     "Top Hits Direction:",
@@ -2935,13 +2632,13 @@ def main():
                                     key="box_topmode",
                                     horizontal=True
                                 )
-                                
+
                             st.markdown("**Customize Group Colors**")
                             if is_anova:
                                 ss["box_anova_colors"] = {}
                                 default_palette = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
                                 cols = st.columns(len(group_labels))
-                                
+
                                 for i, label in enumerate(group_labels):
                                     with cols[i]:
                                         ss["box_anova_colors"][label] = st.color_picker(
@@ -2980,13 +2677,13 @@ def main():
                                 ["Hierarchical", "K-Means", "None"],
                                 key="heatmap_cluster"
                             )
-                            
+
                             st.markdown("Customize Group Colors")
                             if is_anova:
                                 default_palette = ["#87CEEB", "#FA8072", "#90EE90", "#DDA0DD", "#F0E68C"]
                                 ss["heatmap_anova_colors"] = {}
                                 cols = st.columns(len(group_labels))
-                                
+
                                 for i, label in enumerate(group_labels):
                                     with cols[i]:
                                         ss["heatmap_anova_colors"][label] = st.color_picker(
@@ -3053,8 +2750,8 @@ def main():
                                                 format="%.2f", key="gcb_fc")
 
                         if ss.get("show_lollipop", False):
-                            st.markdown("**Lollipop plot options**")                            
-                            
+                            st.markdown("**Lollipop plot options**")
+
                             metric_opts = ["q-value", "p-value"] if "q-value" in plot_df.columns else ["p-value"]
                             ss["lollipop_sig_col"] = st.radio(
                                 "Significance metric",
@@ -3066,8 +2763,8 @@ def main():
                                 "Distinguish glycans with shapes and legend",
                                 value=False,
                                 key="lollipop_legend_ui"
-                            ) 
-                            
+                            )
+
                             if "Genes" in plot_df.columns:
                                 all_genes_raw = plot_df["Genes"].dropna().astype(str).tolist()
                                 unique_genes = set()
@@ -3142,7 +2839,7 @@ def main():
                                 )
 
                     elif ss.get("show_waterfall", False):
-                        st.info("Waterfall output is shown full-width below this section.")
+                        pass  # the waterfall is drawn full-width below
 
                     elif ss.get("show_box", False):
                         pval_col = "p-value" if ss["box_sig_col"] == "p-value" else "q-value"
@@ -3267,15 +2964,15 @@ def main():
                             sig_metric = ss.get("lollipop_sig_col", "q-value")
                             required = {"Genes", "Peptide", "ProSites", "Glycan", sig_metric}
                             missing = [c for c in required if c not in plot_df.columns]
-                            
+
                             if missing:
                                 st.error("Missing required columns for lollipop plot: " + ", ".join(missing))
                             else:
                                 df_for_plot = plot_df.copy()
                                 gene = genes[0]
-                                
+
                                 show_legend = ss.get("lollipop_show_legend", False)
-                                
+
                                 if show_legend:
                                     create_lollipop_legend(df_for_plot, gene, sig_col=sig_metric)
                                 else:
@@ -3312,7 +3009,7 @@ def main():
 
                 st.markdown(
                     """
-                    - **Experimental Design:** Cohort definitions, sample mapping, reference group, and batch status.
+                    - **Experimental Design:** Cohort definitions, sample mapping, reference group and channel normalization.
                     - **Data Integrity:** PCA, correlation matrices, sample clustering, and glycan summaries.
                     - **Differential Analysis:** Top up/down glycopeptides, gene-level summaries, waterfall top features, and statistical tables.
                     - **Export Bundle:** A ZIP archive containing the PDF, report images, and tabular outputs.
@@ -3353,7 +3050,7 @@ def main():
                     zip_buffer = BytesIO()
 
                     with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-                        
+
                         if ss.get("final_pdf_bytes") is not None:
                             zf.writestr(
                                 "report/final_report.pdf",
@@ -3388,7 +3085,6 @@ def main():
                             group_samples = ss.get("global_group_samples", [])
                             group_labels = ss.get("global_group_labels", [])
                             control_idx = ss.get("global_control_group_idx", 0)
-                            batch_dict  = ss.get("batch_dict", {})
 
                             def clean_label(name: str) -> str:
                                 s = str(name)
@@ -3405,18 +3101,11 @@ def main():
                                         grp_name = group_labels[i] if i < len(group_labels) else f"Group{i+1}"
                                         grp_num = i + 1
                                         break
-                                        
-                                batch_name = "Unassigned"
-                                for b_name, b_cols in batch_dict.items():
-                                    if col in b_cols:
-                                        batch_name = b_name
-                                        break
 
                                 rows.append({
                                     "Column": col,
                                     "Sample": clean_label(col),
                                     "Group": grp_name,
-                                    "Batch": batch_name if ss.get("batch_corrected") else "N/A",
                                     "Group_Number": grp_num,
                                     "Is_Reference": (grp_num is not None and (grp_num - 1) == control_idx)
                                 })
@@ -3553,9 +3242,9 @@ def main():
                         ss.pop("final_report_zip_bytes", None)
                         ss.pop("final_report_timestamp", None)
                         st.rerun()
-                        
+
     # ====================== DEFAULT STATE & FAQ ======================
-    
+
     any_tab_active = (
         ss.get("show_global_select", False) or
         ss.get("show_overview", False) or

@@ -104,6 +104,8 @@ def _get_batch_status(ss) -> tuple[bool, str, dict]:
     batch_applied = batch_corrected or run_combat
 
     method = ss.get("batch_method_ui", None) or ss.get("batch_method", None)
+    if not method and str(ss.get("batch_correction_applied_method", "None")) not in ("", "None"):
+        method = ss.get("batch_correction_applied_method")
     if run_combat and not method:
         method = "ComBat (Empirical Bayes)"
 
@@ -173,15 +175,15 @@ def _build_sample_mapping_df(ss) -> pd.DataFrame:
 
 def _add_sample_mapping_table(pdf: AnalysisReport, mapping_df: pd.DataFrame, batch_applied: bool = False):
     pdf.add_page()
-    pdf.section_title("2. Sample Mapping")
+    pdf.section_title("3. Sample Mapping")
 
     if mapping_df is None or mapping_df.empty:
         pdf.section_text("No sample mapping information was available in session state.")
         return
 
     pdf.section_text(
-        "This table shows the samples included in the active analysis, their assigned groups, "
-        "reference status, and batch assignment when batch correction was applied.",
+        "This table shows the samples included in the active analysis, their assigned groups"
+        + (", reference status, and batch assignment." if batch_applied else " and reference status."),
         font_size=9,
     )
 
@@ -208,7 +210,7 @@ def _add_sample_mapping_table(pdf: AnalysisReport, mapping_df: pd.DataFrame, bat
     for _, row in table_df.iterrows():
         if pdf.get_y() > 265:
             pdf.add_page()
-            pdf.section_title("2. Sample Mapping (continued)")
+            pdf.section_title("3. Sample Mapping (continued)")
             pdf.set_font("helvetica", "B", 9)
             pdf.set_fill_color(230, 240, 250)
             for header, width in zip(headers, widths):
@@ -383,8 +385,14 @@ def _save_fig_to_temp(fig, dpi=180) -> str:
 
 def _figure_interpretation(title: str) -> str:
     t = title.lower()
+    if "sample loading" in t:
+        return "Interpretation: Each box is one sample run (log2 intensity of measured glycoforms). Boxes at different heights mean unequal amounts injected or enriched. Lower panels show the samples after the normalization (and batch correction) used for the statistics."
+    if "normalization" in t or "channel loading" in t:
+        return "Interpretation: Each box is one TMT channel. Boxes at different heights mean unequal sample loading. The lower panel (when present) shows the channels after the normalization that was used for the statistics."
+    if "missing values" in t:
+        return "Interpretation: Left, the share of glycoforms not measured in each sample; a sample far above its group is a weak run. Right, missing values by intensity quartile; more missing values at low intensity means values are mostly below detection."
     if "pca" in t or "principal component" in t:
-        return "Interpretation: Samples that cluster together have more similar glycopeptide abundance profiles. Separation by group supports biological differences; separation by batch suggests technical effects."
+        return "Interpretation: Samples that cluster together have more similar glycopeptide abundance profiles. Separation by group supports biological differences; a sample far from its own group may be a technical outlier."
     if "correlation" in t:
         return "Interpretation: High within-group correlation supports sample reproducibility. Low-correlation samples should be reviewed for outlier behavior or technical issues."
     if "volcano" in t:
@@ -441,17 +449,19 @@ def _add_figure_page(pdf: AnalysisReport, fig, title: str, subtitle: str = None)
 def _collect_report_figures(ss) -> List[Dict[str, Any]]:
     # Added 'report_sample_clustering_fig' and 'report_waterfall_fig' to the list
     figure_specs = [
-        ("report_pca_fig", "3. Principal Component Analysis (PCA)"),
-        ("report_corr_fig", "4. Sample Correlation Heatmap"),
-        ("report_density_fig", "5. Abundance Density Plot"),
-        ("report_sample_clustering_fig", "6. Sample Clustering"),
-        ("report_glycan_class_fig", "7. Glycan Classification Summary"),
-        ("report_volcano_fig", "8. Differential Volcano Plot"),
-        ("report_waterfall_fig", "9. Waterfall Plot of Differential Glycopeptides"),
-        ("report_ma_fig", "10. MA Plot"),
-        ("report_heatmap_fig", "11. Clustered Heatmap of Top Hits"),
-        ("report_boxplot_fig", "12. Differential Box Plot"),
-        ("report_lollipop_fig", "13. Glycosite Lollipop Plot"),
+        ("report_norm_fig", str(ss.get("report_norm_fig_title") or "Channel Loading Before / After Normalization")),
+        ("report_missing_fig", "Missing Values per Sample"),
+        ("report_pca_fig", "Principal Component Analysis (PCA)"),
+        ("report_corr_fig", "Sample Correlation Heatmap"),
+        ("report_density_fig", "Abundance Density Plot"),
+        ("report_sample_clustering_fig", "Sample Clustering"),
+        ("report_glycan_class_fig", "Glycan Classification Summary"),
+        ("report_volcano_fig", "Differential Volcano Plot"),
+        ("report_waterfall_fig", "Waterfall Plot of Differential Glycopeptides"),
+        ("report_ma_fig", "MA Plot"),
+        ("report_heatmap_fig", "Clustered Heatmap of Top Hits"),
+        ("report_boxplot_fig", "Differential Box Plot"),
+        ("report_lollipop_fig", "Glycosite Lollipop Plot"),
     ]
 
     found = []
@@ -462,6 +472,10 @@ def _collect_report_figures(ss) -> List[Dict[str, Any]]:
                 found.append({"key": key, "title": title})
         except Exception:
             pass
+    # Sections 1-3 are the summary, the design and the sample map; figures are numbered
+    # from 4, without gaps when a figure was not made in this session.
+    for i, item in enumerate(found):
+        item["title"] = f"{i + 4}. {item['title']}"
     return found
 
 
@@ -707,6 +721,9 @@ def generate_final_pdf():
     # The PDF fonts are Latin-1 only; replace anything else instead of failing.
     stat_test = str(stat_test).encode("latin-1", "replace").decode("latin-1")
     batch_applied, batch_status, _ = _get_batch_status(ss)
+    no_batch = bool(ss.get("report_no_batch_correction", False))
+    norm_label = str(ss.get("report_normalization_label") or "no normalization").encode("latin-1", "replace").decode("latin-1")
+    has_norm = bool(ss.get("report_normalization_label"))
 
     # -------------------------------------------------------------------------
     # 1. Executive Summary
@@ -726,8 +743,13 @@ def generate_final_pdf():
         f"- Significant features (q < 0.05): {diff_summary.get('n_sig', 0):,}",
         f"- Statistical analysis: {stat_test}",
         f"- Reference group: {ref_grp}",
-        f"- Batch correction: {batch_status}",
     ]
+    if no_batch:
+        summary_lines.append(f"- Channel normalization: {norm_label}")
+    else:
+        if has_norm:
+            summary_lines.append(f"- Normalization and filtering: {norm_label}")
+        summary_lines.append(f"- Batch correction: {batch_status}")
 
     if not diff_summary.get("is_anova", True):
         summary_lines.extend([
@@ -749,11 +771,12 @@ def generate_final_pdf():
     analysis_mode = "Label-Free Quantification (LFQ)" if ss.get("raw_merged_df", None) is not None else "TMT / Glycopeptide Quantification"
     params = [
         f"Analysis Mode: {analysis_mode}",
-        "Species: Human",
+        f"Species: {ss.get('ge_species', 'Human')}",
         f"Statistical Test Used: {stat_test}",
         f"Global Reference Group: {ref_grp}",
         f"Number of Groups: {ss.get('global_n_groups', 'N/A')}",
-        f"Batch Effect Correction: {batch_status}",
+        (f"Channel Normalization: {norm_label}" if no_batch else f"Batch Effect Correction: {batch_status}"),
+        *([f"Normalization and Filtering: {norm_label}"] if (has_norm and not no_batch) else []),
         f"Total Glycopeptides Analyzed: {len(merged_df) if isinstance(merged_df, pd.DataFrame) else 'N/A'}",
         f"Differential Result Rows: {len(diff_df) if isinstance(diff_df, pd.DataFrame) else 'N/A'}",
     ]
