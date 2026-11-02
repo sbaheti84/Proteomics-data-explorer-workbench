@@ -650,6 +650,7 @@ def build_processed_matrix(df: pd.DataFrame, pretty_labels: dict):
 
     expr_pre_batch = expr_base.copy()
     expr_proc = expr_base.copy()
+    ss["expr_before_norm"] = expr_base.copy()  # for the before/after box plot
     ss["batch_combat_info"] = None
 
     if batch_requested:
@@ -715,7 +716,7 @@ def build_processed_matrix(df: pd.DataFrame, pretty_labels: dict):
 def render_preprocessing_settings(df: pd.DataFrame):
     """Matrix preprocessing settings (shown in Data Filtering & Group Specification)."""
     with st.container(border=True):
-        st.markdown("#### Matrix Preprocessing")
+        st.markdown("#### Matrix Preprocessing & Normalization")
         with st.expander("What do these do?", icon=":material/help:"):
             st.markdown(
                 "Applied in this order: protein filters, 0 as missing, log2, batch correction, normalization. "
@@ -778,8 +779,6 @@ def render_preprocessing_settings(df: pd.DataFrame):
                 help="Keep Proteome Discoverer master proteins with High protein FDR confidence.",
             )
 
-        if ss.get("tp_preprocessing_label"):
-            st.caption(f"Current matrix: {ss['tp_preprocessing_label']}")
 
 
 # -----------------------------------------------------------------------------
@@ -2187,7 +2186,7 @@ def render_navigation_buttons() -> None:
 
     panels = [
         (c1, "show_global_select", "btn_global_select", "Data Filtering & Group Specification", "Assign samples to biological groups and set a control/baseline."),
-        (c2, "show_overview", "btn_overview", "Data Integrity Check & Sanity Profiling", "Quality control: PCA, density, correlation, heatmap, boxplots and missing values."),
+        (c2, "show_overview", "btn_overview", "Data Integrity Check & Sanity Profiling", "Protein filters, normalization and optional batch correction, then QC: PCA, density, correlation, heatmap, boxplots and missing values."),
         (c3, "show_suite", "btn_suite", "Statistical Analysis Suite", "Perform differential expression testing and visualize results (Volcano, Heatmaps, etc.)."),
         (c4, "show_report", "btn_report", "Results Download", "Compile and export a comprehensive PDF report and ZIP bundle of your analysis."),
     ]
@@ -2210,7 +2209,8 @@ def render_navigation_buttons() -> None:
     n_ready = sum(1 for g in (ss.get("global_group_samples") or []) if g)
     c1.caption(f"Step 1 · :green[✓ {n_ready} groups defined]" if n_ready >= 2
                else "Step 1 · Start here: assign samples to at least 2 groups")
-    c2.caption("Step 2 · Check samples look as expected before testing")
+    c2.caption("Step 2 · Normalization: " + str(ss.get("_tp_pre_norm", ss.get("tp_pre_norm", PREPROCESS_DEFAULTS["tp_pre_norm"]))).replace(" normalization", "").lower()
+               + (" · :green[batch corrected]" if ss.get("batch_correction_applied") else "") + " · check samples")
     done = ss.get("diff_results") is not None
     c3.caption(f"Step 3 · :green[✓ {str(ss.get('stat_method_label', 'Statistics done')).split(';')[0]}]" if done
                else ("Step 3 · Ready to run statistics" if n_ready >= 2 else "Step 3 · Needs groups from step 1"))
@@ -2743,10 +2743,8 @@ def main():
                 "2. **Groups**: put every channel into a biological group (2 or 3 groups).\n"
                 "3. **Reference group**: the baseline, usually the control. log2FC is reported as "
                 "*other group vs reference*, so positive means higher than the reference.\n"
-                "4. **Matrix preprocessing**: protein filters, 0 as missing, log2 and normalization. "
-                "These define the matrix used everywhere downstream.\n"
-                "5. **Batch correction (optional)**: only if samples were run in more than one TMT plex. "
-                "Each batch should contain more than one group, otherwise batch and biology cannot be separated."
+                "4. **Next**: protein filters, normalization and optional batch correction are set at the "
+                "top of **Data Integrity Check & Sanity Profiling** (step 2)."
             )
 
         left, right = st.columns([0.42, 0.58], gap="large")
@@ -2897,7 +2895,68 @@ def main():
                     ss["global_control_group_idx"] = 0
                     st.info("Assign samples to groups to select a global reference.")
 
-            # ---- MATRIX PREPROCESSING (moved here from the QC panel) ----
+        with right:
+            with st.container(border=True):
+                st.markdown("#### Sample Mapping Summary")
+                if not ss["global_all_groups"]:
+                    st.info("No groups assigned yet. Select samples on the left.")
+                else:
+                    rows = []
+                    for c in ss.get("global_sample_cols", []):
+                        grp_name = "Unassigned"
+                        grp_num = None
+                        is_ctrl = False
+                        
+                        for i, g_cols in enumerate(ss.get("global_group_samples", [])):
+                            if c in g_cols:
+                                grp_name = ss["global_group_labels"][i] if i < len(ss["global_group_labels"]) else f"Group{i+1}"
+                                grp_num = i + 1
+                                is_ctrl = (ss.get("global_control_group_idx") is not None and i == ss["global_control_group_idx"])
+                                break
+                                
+                        batch_name = "Unassigned"
+                        if ss.get("enable_batch_correction"):
+                            visible_batch_dict = (
+                                ss.get("batch_config", {})
+                                or ss.get("batch_dict", {})
+                            )
+                            for b_name, b_cols in visible_batch_dict.items():
+                                if c in b_cols:
+                                    batch_name = b_name
+                                    break
+                        else:
+                            batch_name = "N/A"
+                                
+                        rows.append({
+                            "Column": c,
+                            "Sample": pretty_labels.get(c, c),
+                            "Group": grp_name,
+                            "Group #": grp_num,
+                            "Batch": batch_name,
+                            "Is_Reference": is_ctrl
+                        })
+                    
+                    meta_df = pd.DataFrame(rows)
+                    assigned_df = meta_df[meta_df["Group"] != "Unassigned"].copy()
+                    
+                    if assigned_df.empty:
+                        st.info("No selected samples are assigned to a group yet.")
+                    else:
+                        st.dataframe(assigned_df, use_container_width=True, hide_index=True)
+
+    # =========================================================================
+    # PILLAR 2: DATA INTEGRITY CHECK & SANITY PROFILING
+    # =========================================================================
+    if ss["show_overview"]:
+        
+        if not ss["global_all_groups"]:
+            st.warning("Please assign groups in Data Filtering & Group Specification first.")
+            st.stop()
+
+        # ---------- Block 1: preprocessing, normalization and batch correction ----------
+        sample_cols = ss.get("global_sample_cols", [])
+        p_left, p_right = st.columns([0.42, 0.58], gap="large")
+        with p_left:
             render_preprocessing_settings(df)
 
             # ---- BATCH CORRECTION UI ----
@@ -3215,12 +3274,7 @@ def main():
                                 type="primary",
                                 key="run_batch_correction_btn",
                                 disabled=not can_run_batch,
-                                help=(
-                                    "Validate and lock this batch design. "
-                                    "The correction is then applied with the "
-                                    "selected preprocessing settings in the "
-                                    "Data Integrity module."
-                                )
+                                help="Apply this batch design to the matrix."
                             ):
                                 ss["batch_dict"] = {
                                     k: list(v)
@@ -3245,27 +3299,7 @@ def main():
                                 ss["filtered_df"] = None
                                 ss["filtered_ready"] = False
 
-                                st.success(
-                                    f"{batch_method} batch setup saved. "
-                                    "Open Data Integrity Check & Sanity Profiling "
-                                    "to apply the correction with the selected "
-                                    "preprocessing settings."
-                                )
-
-                            elif ss.get("batch_correction_requested", False):
-                                if ss.get("batch_correction_applied", False):
-                                    st.success(
-                                        f"{ss.get('batch_correction_applied_method', batch_method)} "
-                                        "applied successfully. QC can compare "
-                                        "before and after batch correction, and "
-                                        "downstream analysis uses corrected abundances."
-                                    )
-                                else:
-                                    st.info(
-                                        f"{batch_method} batch setup is ready. "
-                                        "Open Data Integrity Check & Sanity Profiling "
-                                        "to apply the correction."
-                                    )
+                                # Applied below by build_processed_matrix().
 
                     else:
                         ss["batch_dict"] = {}
@@ -3281,64 +3315,7 @@ def main():
                         ss["filtered_df"] = None
                         ss["filtered_ready"] = False
 
-        with right:
-            with st.container(border=True):
-                st.markdown("#### Sample Mapping Summary")
-                if not ss["global_all_groups"]:
-                    st.info("No groups assigned yet. Select samples on the left.")
-                else:
-                    rows = []
-                    for c in ss.get("global_sample_cols", []):
-                        grp_name = "Unassigned"
-                        grp_num = None
-                        is_ctrl = False
-                        
-                        for i, g_cols in enumerate(ss.get("global_group_samples", [])):
-                            if c in g_cols:
-                                grp_name = ss["global_group_labels"][i] if i < len(ss["global_group_labels"]) else f"Group{i+1}"
-                                grp_num = i + 1
-                                is_ctrl = (ss.get("global_control_group_idx") is not None and i == ss["global_control_group_idx"])
-                                break
-                                
-                        batch_name = "Unassigned"
-                        if ss.get("enable_batch_correction"):
-                            visible_batch_dict = (
-                                ss.get("batch_config", {})
-                                or ss.get("batch_dict", {})
-                            )
-                            for b_name, b_cols in visible_batch_dict.items():
-                                if c in b_cols:
-                                    batch_name = b_name
-                                    break
-                        else:
-                            batch_name = "N/A"
-                                
-                        rows.append({
-                            "Column": c,
-                            "Sample": pretty_labels.get(c, c),
-                            "Group": grp_name,
-                            "Group #": grp_num,
-                            "Batch": batch_name,
-                            "Is_Reference": is_ctrl
-                        })
-                    
-                    meta_df = pd.DataFrame(rows)
-                    assigned_df = meta_df[meta_df["Group"] != "Unassigned"].copy()
-                    
-                    if assigned_df.empty:
-                        st.info("No selected samples are assigned to a group yet.")
-                    else:
-                        st.dataframe(assigned_df, use_container_width=True, hide_index=True)
-
-    # =========================================================================
-    # PILLAR 2: DATA INTEGRITY CHECK & SANITY PROFILING
-    # =========================================================================
-    if ss["show_overview"]:
-        
-        if not ss["global_all_groups"]:
-            st.warning("Please assign groups in Data Filtering & Group Specification first.")
-            st.stop()
-
+        # Settings above may have just changed: rebuild (cached when nothing changed).
         expr_proc = build_processed_matrix(df, pretty_labels)
         if expr_proc is None:
             st.stop()
@@ -3348,33 +3325,44 @@ def main():
         pre_quant = cfg_now["tp_pre_norm"] != "None"
         batch_method = ss.get("batch_method_ui", "None")
 
-        with st.container(border=True):
-            st.markdown("#### Matrix Used for QC and Statistics")
-            st.markdown(f"**{expr_proc.shape[0]:,} proteins** · {ss.get('tp_preprocessing_label', '')}")
-            st.caption("To change protein filters, log2, normalization or batch correction, open "
-                       "**Data Filtering & Group Specification**.")
-
+        with p_left:
             if ss.get("batch_correction_applied", False):
-                st.success(
-                    f"{ss.get('batch_correction_applied_method', batch_method)} "
-                    "applied. QC can compare before and after batch correction, and downstream "
-                    "analysis uses the corrected abundances."
-                )
+                st.success(f"{ss.get('batch_correction_applied_method', batch_method)} applied.")
                 for _w in (ss.get("batch_combat_info") or {}).get("warnings", []):
                     st.warning(_w)
             elif ss.get("batch_correction_last_error"):
                 st.error(f"Batch correction was not applied: {ss['batch_correction_last_error']}")
-            elif (
-                ss.get("enable_batch_correction", False)
-                and not ss.get("batch_correction_requested", False)
-            ):
-                st.warning(
-                    "Batch correction is enabled but has not been run. "
-                    "Return to Data Filtering & Group Specification and click "
-                    "**Run Batch Correction**."
-                )
+            elif ss.get("enable_batch_correction", False) and not ss.get("batch_correction_requested", False):
+                st.info("Batch correction is on but has not been run. Click **Run Batch Correction**.")
 
-        st.divider()    
+        with p_right:
+            _group_of = {
+                pretty_labels.get(c, c): ss["global_group_labels"][i]
+                for i, cols in enumerate(ss["global_group_samples"]) for c in cols
+            }
+            _samples = [pretty_labels.get(c, c) for c in ss["global_all_groups"]]
+            _panels = [("Before normalization", to_log2_for_display(ss["expr_before_norm"], pre_log2))]
+            if pre_quant:
+                _panels.append((f"After {cfg_now['tp_pre_norm'].lower()}",
+                                to_log2_for_display(ss["expr_pre_batch"], pre_log2)))
+            if ss.get("batch_correction_applied", False):
+                _panels.append((f"After batch correction ({ss.get('batch_correction_applied_method', '')})"
+                                + (" and normalization" if pre_quant else ""),
+                                to_log2_for_display(expr_proc, pre_log2)))
+            _fig = loading_boxplot_figure(_panels, _samples, group_of=_group_of,
+                                          palette=ss.get("pca_palette") or None)
+            st.pyplot(_fig)
+            plt.close(_fig)
+            ss["report_norm_fig"] = _fig
+            add_figure_download_buttons_tp(_fig, "TMT_sample_loading_normalization", key_suffix="tp_norm")
+            st.caption(f"{expr_proc.shape[0]:,} proteins · {ss.get('tp_preprocessing_label', '')}")
+            help_popover(
+                "Each box is one TMT channel (log2 abundance of the proteins measured in every channel). "
+                "Boxes at different heights mean unequal loading. After normalization they should line up. "
+                "The QC plots below, the statistics and the report use the processed matrix.",
+            )
+
+        st.divider()
         st.markdown("#### Quality Control Plots")
         
         design_rows = []

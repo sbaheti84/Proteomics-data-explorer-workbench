@@ -25,6 +25,18 @@ if getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS"):
     os.environ.setdefault("GLYCOEXPLORER_HOSTED", "false")
     os.environ.setdefault("GLYCOEXPLORER_SAVE_MODE", "dialog")
 
+import logging
+
+# Log file for the desktop builds (also started by the PyInstaller runtime hook).
+# From source it is off unless WORKBENCH_LOG=1 is set.
+try:
+    import workbench_log as _wb_log
+    if getattr(sys, "frozen", False) or os.environ.get("WORKBENCH_LOG") == "1":
+        _wb_log.setup()
+except Exception:  # logging must never stop the app
+    _wb_log = None
+LOG = logging.getLogger("workbench")
+
 import streamlit as st
 
 
@@ -415,6 +427,7 @@ def render_failure(app: dict, stage: str, exc: BaseException):
             "sidebar, then report the problem with the error report below."
         )
 
+    LOG.error("%s could not %s:\n%s", app["title"], stage, build_error_report(app, stage, exc))
     st.error(f"**{app['title']} could not {stage}.** {what}", icon=":material/error:")
     st.markdown(todo)
 
@@ -586,6 +599,8 @@ def render_app(app: dict):
         with loading_slot.container():
             render_loading_panel(app["title"])
 
+    if first_open:
+        LOG.info("Opening app: %s", app["title"])
     # Step 1: load the launcher file
     try:
         module = load_module_safely(app["module"])
@@ -656,6 +671,20 @@ def render_help():
         icon=":material/bug_report:",
         width="stretch",
     )
+
+    log_file = os.environ.get("WORKBENCH_LOG_FILE", "")
+    if log_file:
+        st.divider()
+        st.markdown("**Log file**")
+        st.caption("If something fails without a message, send this file with your report.")
+        st.code(log_file, language="text")
+        try:
+            with open(log_file, "rb") as fh:
+                from download_utility import add_download_button
+                add_download_button(fh.read(), os.path.basename(log_file), label="Save log file",
+                                    key=WB + "dl_log", mime="text/plain")
+        except Exception:
+            pass
 
     st.divider()
     st.markdown("**Restart workbench**")

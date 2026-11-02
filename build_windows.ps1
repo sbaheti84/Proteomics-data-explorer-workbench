@@ -31,6 +31,7 @@ if (!(Test-Path $placeholder)) {
 
 # Optional logo/example folders are bundled only if they exist, but this keeps assets stable.
 Write-Host "Checking expected paths..."
+if (!(Test-Path (Join-Path $ROOT "workbench_log.py"))) { throw "workbench_log.py is missing (log file for the desktop app)." }
 if (!(Test-Path (Join-Path $ROOT "download_utility.py"))) { throw "download_utility.py is missing. Put the fixed file at repository root before building." }
 foreach ($d in $requiredDirs) {
     $p = Join-Path $ROOT $d
@@ -62,6 +63,9 @@ streamlit-desktop-app build app.py `
     --paths "$(Join-Path $ROOT 'faq')" `
     --add-data "$ROOT\app_launcher_*.py;." `
     --add-data "$ROOT\download_utility.py;." `
+    --add-data "$ROOT\workbench_log.py;." `
+    --runtime-hook "$ROOT\workbench_log.py" `
+    --hidden-import workbench_log `
     --add-data "$ROOT\naguider_impute.R;." `
     --add-data "$ROOT\r_bundle\R;R" `
     --add-data "$ROOT\r_bundle\library;R_library" `

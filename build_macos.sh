@@ -65,6 +65,9 @@ streamlit-desktop-app build app.py \
     --paths "$ROOT/faq" \
     --add-data "$ROOT/app_launcher_*.py:." \
     --add-data "$ROOT/download_utility.py:." \
+    --add-data "$ROOT/workbench_log.py:." \
+    --runtime-hook "$ROOT/workbench_log.py" \
+    --hidden-import workbench_log \
     --add-data "$ROOT/naguider_impute.R:." \
     --hidden-import download_utility \
     --hidden-import app_launcher_GE \

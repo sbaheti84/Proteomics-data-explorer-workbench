@@ -328,6 +328,7 @@ def _add_figure_page(pdf: AnalysisReport, fig, title: str, subtitle: str = None)
 
 def _collect_report_figures(ss) -> List[Dict[str, Any]]:
     figure_specs = [
+        ("report_norm_fig", "2b. Sample Loading Before / After Normalization"),
         ("report_pca_no_ellipse_fig", "3a. Principal Component Analysis (PCA) - No Ellipse"),
         ("report_pca_ellipse_fig", "3b. Principal Component Analysis (PCA) - With Ellipse"),
         ("report_pca_fig", "3. Principal Component Analysis (PCA)"),

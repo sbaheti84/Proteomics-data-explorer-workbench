@@ -2724,7 +2724,7 @@ def main():
                     "Preprocessing is done once here. QC, batch correction and statistics all use this matrix; "
                     "statistics never re-impute or re-normalize.\n\n"
                     "**Order:** remove contaminants → 0 becomes missing → drop sparse proteins → log2 → "
-                    "normalize → impute missing values. Batch correction (step 3) comes after QC.\n\n"
+                    "normalize → impute missing values. Batch correction (step 2) is optional.\n\n"
                     "- **0 → missing:** in LFQ tables a 0 means *not detected*, not *zero protein*.\n"
                     "- **Drop sparse proteins:** proteins measured in too few samples cannot be tested reliably "
                     "and make imputation guess most of their values.\n"
@@ -3038,10 +3038,189 @@ def main():
                     )
 
         # ------------------------------------------------------------------
+        # Optional batch correction, right after normalization/imputation (as in the glyco apps).
+        # ------------------------------------------------------------------
+        st.markdown("#### Step 2 — Optional Technical Batch Correction")
+        help_popover(
+            "Use this only for known technical batches/runs. Look at PCA in the QC plots below first. "
+            "ComBat preserves the biological group as a categorical covariate.",
+            label="When to use this",
+        )
+
+        if not ss.get("preprocessing_applied", False) or not isinstance(ss.get("expr_imputed"), pd.DataFrame):
+            st.info("Run Normalization + Imputation first.")
+        elif not ss.get("pre_log2", True):
+            st.warning("Batch correction in this workflow requires log2-transformed abundances.")
+        else:
+            if "_enable_batch_correction_widget" not in ss:
+                ss["_enable_batch_correction_widget"] = bool(ss.get("enable_batch_correction", False))
+            apply_batch = st.toggle(
+                "Apply Batch Effect Correction",
+                key="_enable_batch_correction_widget",
+                help="Define technical batches only after reviewing normalized/imputed QC.",
+            )
+            ss["enable_batch_correction"] = bool(apply_batch)
+
+            if not apply_batch:
+                ss["batch_correction_applied"] = False
+                ss["batch_correction_applied_method"] = "None"
+                ss["expr_pre_batch"] = ss["expr_imputed"].copy()
+                ss["expr_processed"] = ss["expr_imputed"].copy()
+                ss["expr_final"] = ss["expr_imputed"].copy()
+                st.caption("Batch correction is off.")
+            else:
+                bcol1, bcol2 = st.columns([0.35, 0.65], gap="large")
+                with bcol1:
+                    batch_methods = [
+                        "ComBat (Empirical Bayes)",
+                        "Median Centering",
+                        "Mean Centering",
+                        "Standardize (Mean + Variance)",
+                    ]
+                    previous_method = ss.get("batch_method_ui", "ComBat (Empirical Bayes)")
+                    if previous_method not in batch_methods:
+                        previous_method = batch_methods[0]
+                    batch_method = st.selectbox(
+                        "Batch Correction Method",
+                        batch_methods,
+                        index=batch_methods.index(previous_method),
+                        key="batch_method_ui_sel",
+                    )
+                    ss["batch_method_ui"] = batch_method
+                    previous_n = int(ss.get("global_n_batches", 2) or 2)
+                    if previous_n not in [2, 3, 4]:
+                        previous_n = 2
+                    num_batches = st.radio(
+                        "Number of Batches", [2, 3, 4], index=[2, 3, 4].index(previous_n), horizontal=True,
+                        key="num_batches_ui",
+                    )
+                    ss["global_n_batches"] = num_batches
+
+                with bcol2:
+                    batch_allowed_samples = list(ss.get("global_all_groups", []))
+                    stored_batch_samples = ss.get("global_batch_samples", []) or []
+                    batch_samples = []
+                    selected_so_far = []
+                    for b in range(num_batches):
+                        key = f"batch_sel_{b}"
+                        previous = ss.get(key, stored_batch_samples[b] if b < len(stored_batch_samples) else [])
+                        previous = _sanitize_lf(previous, batch_allowed_samples)
+                        available = [c for c in batch_allowed_samples if c not in selected_so_far or c in previous]
+                        previous = _sanitize_lf(previous, available)
+                        ss[key] = previous
+                        b_cols = st.multiselect(
+                            f"Batch {b + 1} Samples",
+                            available,
+                            format_func=lambda x: pretty_labels.get(x, x),
+                            key=key,
+                        )
+                        b_cols = _sanitize_lf(b_cols, batch_allowed_samples)
+                        batch_samples.append(b_cols)
+                        selected_so_far = _uniq_lf(selected_so_far + b_cols)
+
+                    assigned = _uniq_lf([c for cols in batch_samples for c in cols])
+                    unassigned = [c for c in batch_allowed_samples if c not in assigned]
+                    nonempty = [cols for cols in batch_samples if cols]
+                    if unassigned:
+                        st.warning("Unassigned samples: " + ", ".join(pretty_labels.get(c, c) for c in unassigned))
+                    if len(nonempty) < 2:
+                        st.warning("At least two non-empty technical batches are required.")
+
+                    ss["global_batch_samples"] = batch_samples
+                    ss["global_batch_labels"] = [f"Batch {i+1}" for i in range(num_batches)]
+
+                    translated_batches = [
+                        [pretty_labels.get(c, c) for c in cols]
+                        for cols in batch_samples
+                    ]
+                    batch_signature = (
+                        ss.get("preprocessing_run_signature"), batch_method, int(num_batches),
+                        tuple(tuple(cols) for cols in batch_samples),
+                    )
+
+                    # Never keep using a correction generated from old batch assignments/methods.
+                    if (
+                        ss.get("batch_correction_applied", False)
+                        and ss.get("batch_correction_run_signature") != batch_signature
+                    ):
+                        ss["batch_correction_applied"] = False
+                        ss["batch_correction_applied_method"] = "None"
+                        ss["batch_correction_run_signature"] = None
+                        ss["expr_pre_batch"] = ss["expr_imputed"].copy()
+                        ss["expr_processed"] = ss["expr_imputed"].copy()
+                        ss["expr_final"] = ss["expr_imputed"].copy()
+                        ss["diff_results"] = None
+                        st.warning("Batch settings changed. The previous correction was removed; run batch correction again.")
+
+                    can_run_batch = not unassigned and len(nonempty) >= 2
+                    if st.button(
+                        "Run Batch Correction",
+                        type="primary",
+                        disabled=not can_run_batch,
+                        use_container_width=True,
+                        key="run_batch_correction_btn_lfq",
+                    ):
+                        corrected = apply_batch_correction(
+                            ss["expr_imputed"],
+                            translated_batches,
+                            method=batch_method,
+                            biological_groups=_group_map_pretty_lfq(pretty_labels),
+                        )
+                        if not ss.get("batch_correction_last_error"):
+                            ss["expr_pre_batch"] = ss["expr_imputed"].copy()
+                            ss["expr_processed"] = corrected.copy()
+                            ss["expr_final"] = corrected.copy()
+                            ss["batch_correction_applied"] = True
+                            ss["batch_correction_applied_method"] = batch_method
+                            ss["batch_correction_run_signature"] = batch_signature
+                            ss["diff_results"] = None
+                            st.success(
+                                f"{batch_method} applied. The box plot and the QC plots below use the corrected matrix."
+                            )
+
+                if ss.get("batch_correction_applied", False):
+                    st.success(f"Current final matrix includes {ss.get('batch_correction_applied_method', 'batch correction')}.")
+
+        # ------------------------------------------------------------------
+        # Samples before / after normalization (and batch correction)
+        # ------------------------------------------------------------------
+        if isinstance(ss.get("expr_normalized"), pd.DataFrame) and ss.get("preprocessing_applied", False):
+            st.divider()
+            st.markdown("#### Samples before and after normalization")
+            help_popover(
+                "Each box is one sample (log2 intensity of the proteins measured in every sample, before "
+                "imputation). Boxes at different heights mean unequal loading. After normalization they "
+                "should line up. The last panel shows the batch-corrected matrix when batch correction is on.",
+            )
+            _group_of = {
+                pretty_labels.get(c, c): ss["global_group_labels"][i]
+                for i, cols in enumerate(ss["global_group_samples"]) for c in cols
+            }
+            _samples = [pretty_labels.get(c, c) for c in ss["global_all_groups"]]
+            _raw_log = to_log2_for_display(expr_raw_current, False)
+            _panels = [("Before normalization (raw, log2)", _raw_log)]
+            _norm = ss["expr_normalized"]
+            _norm_disp = to_log2_for_display(_norm, bool(ss.get("pre_log2", True)))
+            _panels.append((f"After normalization ({ss.get('normalization_applied_method', '')})", _norm_disp))
+            if ss.get("batch_correction_applied", False) and isinstance(ss.get("expr_processed"), pd.DataFrame):
+                _bc = to_log2_for_display(ss["expr_processed"], bool(ss.get("pre_log2", True)))
+                # imputed values would hide loading differences; show measured cells only
+                _bc = _bc.where(_norm_disp.reindex(index=_bc.index, columns=_bc.columns).notna())
+                _panels.append((f"After batch correction ({ss.get('batch_correction_applied_method', '')})", _bc))
+            bx_l, bx_r = st.columns([0.62, 0.38])
+            with bx_l:
+                _fig = loading_boxplot_figure(_panels, _samples, group_of=_group_of,
+                                              palette=ss.get("pca_palette") or None, ylabel="log2 intensity")
+                st.pyplot(_fig)
+                plt.close(_fig)
+                ss["report_norm_fig"] = _fig
+                add_plot_download_buttons(_fig, "LFQ_protein_sample_loading_normalization")
+
+        # ------------------------------------------------------------------
         # QC after normalization/imputation, with raw and before/after views.
         # ------------------------------------------------------------------
         st.divider()
-        st.markdown("#### Step 2 — Quality Control")
+        st.markdown("#### Quality Control Plots")
         design_rows = []
         for i, cols in enumerate(ss["global_group_samples"]):
             for c in cols:
@@ -3229,151 +3408,6 @@ def main():
                     ss["report_dendrogram_fig"] = fig
                     add_plot_download_buttons(fig, "dendrogram")
 
-        # ------------------------------------------------------------------
-        # Batch correction comes after normalization/imputation and initial QC.
-        # ------------------------------------------------------------------
-        st.divider()
-        st.markdown("#### Step 3 — Optional Technical Batch Correction")
-        help_popover(
-            "Use this only for known technical batches/runs. Review the QC above first. "
-            "ComBat preserves the biological group as a categorical covariate.",
-            label="When to use this",
-        )
-
-        if not ss.get("preprocessing_applied", False) or not isinstance(ss.get("expr_imputed"), pd.DataFrame):
-            st.info("Run Normalization + Imputation first.")
-        elif not ss.get("pre_log2", True):
-            st.warning("Batch correction in this workflow requires log2-transformed abundances.")
-        else:
-            if "_enable_batch_correction_widget" not in ss:
-                ss["_enable_batch_correction_widget"] = bool(ss.get("enable_batch_correction", False))
-            apply_batch = st.toggle(
-                "Apply Batch Effect Correction",
-                key="_enable_batch_correction_widget",
-                help="Define technical batches only after reviewing normalized/imputed QC.",
-            )
-            ss["enable_batch_correction"] = bool(apply_batch)
-
-            if not apply_batch:
-                ss["batch_correction_applied"] = False
-                ss["batch_correction_applied_method"] = "None"
-                ss["expr_pre_batch"] = ss["expr_imputed"].copy()
-                ss["expr_processed"] = ss["expr_imputed"].copy()
-                ss["expr_final"] = ss["expr_imputed"].copy()
-                st.caption("Batch correction is off.")
-            else:
-                bcol1, bcol2 = st.columns([0.35, 0.65], gap="large")
-                with bcol1:
-                    batch_methods = [
-                        "ComBat (Empirical Bayes)",
-                        "Median Centering",
-                        "Mean Centering",
-                        "Standardize (Mean + Variance)",
-                    ]
-                    previous_method = ss.get("batch_method_ui", "ComBat (Empirical Bayes)")
-                    if previous_method not in batch_methods:
-                        previous_method = batch_methods[0]
-                    batch_method = st.selectbox(
-                        "Batch Correction Method",
-                        batch_methods,
-                        index=batch_methods.index(previous_method),
-                        key="batch_method_ui_sel",
-                    )
-                    ss["batch_method_ui"] = batch_method
-                    previous_n = int(ss.get("global_n_batches", 2) or 2)
-                    if previous_n not in [2, 3, 4]:
-                        previous_n = 2
-                    num_batches = st.radio(
-                        "Number of Batches", [2, 3, 4], index=[2, 3, 4].index(previous_n), horizontal=True,
-                        key="num_batches_ui",
-                    )
-                    ss["global_n_batches"] = num_batches
-
-                with bcol2:
-                    batch_allowed_samples = list(ss.get("global_all_groups", []))
-                    stored_batch_samples = ss.get("global_batch_samples", []) or []
-                    batch_samples = []
-                    selected_so_far = []
-                    for b in range(num_batches):
-                        key = f"batch_sel_{b}"
-                        previous = ss.get(key, stored_batch_samples[b] if b < len(stored_batch_samples) else [])
-                        previous = _sanitize_lf(previous, batch_allowed_samples)
-                        available = [c for c in batch_allowed_samples if c not in selected_so_far or c in previous]
-                        previous = _sanitize_lf(previous, available)
-                        ss[key] = previous
-                        b_cols = st.multiselect(
-                            f"Batch {b + 1} Samples",
-                            available,
-                            format_func=lambda x: pretty_labels.get(x, x),
-                            key=key,
-                        )
-                        b_cols = _sanitize_lf(b_cols, batch_allowed_samples)
-                        batch_samples.append(b_cols)
-                        selected_so_far = _uniq_lf(selected_so_far + b_cols)
-
-                    assigned = _uniq_lf([c for cols in batch_samples for c in cols])
-                    unassigned = [c for c in batch_allowed_samples if c not in assigned]
-                    nonempty = [cols for cols in batch_samples if cols]
-                    if unassigned:
-                        st.warning("Unassigned samples: " + ", ".join(pretty_labels.get(c, c) for c in unassigned))
-                    if len(nonempty) < 2:
-                        st.warning("At least two non-empty technical batches are required.")
-
-                    ss["global_batch_samples"] = batch_samples
-                    ss["global_batch_labels"] = [f"Batch {i+1}" for i in range(num_batches)]
-
-                    translated_batches = [
-                        [pretty_labels.get(c, c) for c in cols]
-                        for cols in batch_samples
-                    ]
-                    batch_signature = (
-                        ss.get("preprocessing_run_signature"), batch_method, int(num_batches),
-                        tuple(tuple(cols) for cols in batch_samples),
-                    )
-
-                    # Never keep using a correction generated from old batch assignments/methods.
-                    if (
-                        ss.get("batch_correction_applied", False)
-                        and ss.get("batch_correction_run_signature") != batch_signature
-                    ):
-                        ss["batch_correction_applied"] = False
-                        ss["batch_correction_applied_method"] = "None"
-                        ss["batch_correction_run_signature"] = None
-                        ss["expr_pre_batch"] = ss["expr_imputed"].copy()
-                        ss["expr_processed"] = ss["expr_imputed"].copy()
-                        ss["expr_final"] = ss["expr_imputed"].copy()
-                        ss["diff_results"] = None
-                        st.warning("Batch settings changed. The previous correction was removed; run batch correction again.")
-
-                    can_run_batch = not unassigned and len(nonempty) >= 2
-                    if st.button(
-                        "Run Batch Correction",
-                        type="primary",
-                        disabled=not can_run_batch,
-                        use_container_width=True,
-                        key="run_batch_correction_btn_lfq",
-                    ):
-                        corrected = apply_batch_correction(
-                            ss["expr_imputed"],
-                            translated_batches,
-                            method=batch_method,
-                            biological_groups=_group_map_pretty_lfq(pretty_labels),
-                        )
-                        if not ss.get("batch_correction_last_error"):
-                            ss["expr_pre_batch"] = ss["expr_imputed"].copy()
-                            ss["expr_processed"] = corrected.copy()
-                            ss["expr_final"] = corrected.copy()
-                            ss["batch_correction_applied"] = True
-                            ss["batch_correction_applied_method"] = batch_method
-                            ss["batch_correction_run_signature"] = batch_signature
-                            ss["diff_results"] = None
-                            st.success(
-                                f"{batch_method} applied. Select **After batch correction** in the QC Data Source above "
-                                "to compare it with the pre-batch matrix."
-                            )
-
-                if ss.get("batch_correction_applied", False):
-                    st.success(f"Current final matrix includes {ss.get('batch_correction_applied_method', 'batch correction')}.")
 
     # =========================================================================
     # PILLAR 3: STATISTICAL ANALYSIS SUITE

@@ -321,3 +321,68 @@ try:
     )
 except Exception:
     pass
+
+
+# =============================================================================
+# Sample loading before / after normalization (same look as the glyco apps)
+# =============================================================================
+def loading_boxplot_figure(panels, samples, group_of=None, palette=None, ylabel="log2 abundance",
+                           min_complete=30):
+    """Stacked per-sample boxplots, one panel per processing stage.
+
+    panels: list of (title, DataFrame) with samples as columns, values already on log2 scale.
+    The same proteins are used in every panel: those measured in every sample of the
+    first panel when there are at least `min_complete`, otherwise all values. Samples
+    with more missing values are then compared fairly.
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
+
+    group_of = group_of or {}
+    samples = [s for s in samples if all(s in p.columns for _, p in panels)]
+    groups = list(dict.fromkeys(group_of.get(s, "") for s in samples))
+    base_cols = ["#8dd3c7", "#fdb462", "#bebada", "#fb8072", "#80b1d3", "#b3de69"]
+    palette = palette or {g: base_cols[i % len(base_cols)] for i, g in enumerate(groups)}
+
+    first = panels[0][1][samples].apply(pd.to_numeric, errors="coerce")
+    complete = first.dropna().index
+    rows = complete if len(complete) >= min_complete else first.index
+
+    width = max(6.0, 0.42 * len(samples) + 1.8)
+    fig, axes = plt.subplots(len(panels), 1, figsize=(width, 2.6 * len(panels) + 0.4),
+                             sharex=True, squeeze=False)
+    for ax, (title, data) in zip(axes[:, 0], panels):
+        d = data.reindex(rows)[samples].apply(pd.to_numeric, errors="coerce")
+        vals = [d[s].dropna().to_numpy() for s in samples]
+        bp = ax.boxplot(vals, showfliers=False, patch_artist=True, widths=0.6)
+        for patch, s in zip(bp["boxes"], samples):
+            patch.set_facecolor(palette.get(group_of.get(s, ""), "#d9d9d9"))
+            patch.set_edgecolor("#555555")
+        for med in bp["medians"]:
+            med.set_color("#222222")
+        allv = np.concatenate([v for v in vals if len(v)]) if any(len(v) for v in vals) else np.array([])
+        if allv.size:
+            ax.axhline(float(np.median(allv)), color="#c0392b", linestyle="--", linewidth=0.8)
+        ax.set_title(title, fontsize=9, loc="left")
+        ax.set_ylabel(ylabel, fontsize=8)
+        ax.tick_params(axis="both", labelsize=7)
+        for sp in ("top", "right"):
+            ax.spines[sp].set_visible(False)
+        ax.grid(False)
+    axes[-1, 0].set_xticks(range(1, len(samples) + 1))
+    axes[-1, 0].set_xticklabels([str(s) for s in samples], rotation=45, ha="right", fontsize=7)
+    if groups and any(groups):
+        axes[0, 0].legend(handles=[Patch(facecolor=palette[g], edgecolor="#555555", label=g) for g in groups if g],
+                          fontsize=7, frameon=False, loc="upper left", bbox_to_anchor=(1.0, 1.0))
+    plt.tight_layout()
+    return fig
+
+
+def to_log2_for_display(df, already_log2: bool):
+    """Values on log2 scale for plotting; zeros and negatives become missing."""
+    import numpy as np
+    d = df.apply(pd.to_numeric, errors="coerce")
+    if already_log2:
+        return d
+    return np.log2(d.where(d > 0))
