@@ -464,11 +464,13 @@ jobs:
       # Upload
       # ======================================================
 
+      # archive: false stores the ZIP as it is. Without it GitHub wraps the
+      # ZIP in a second ZIP when you download the artifact.
       - name: Upload Windows app
         uses: actions/upload-artifact@v6
         with:
-          name: ProteomicsWorkbench-Windows
           path: ProteomicsWorkbench-Windows.zip
+          archive: false
           if-no-files-found: error
           retention-days: 90
 
@@ -494,6 +496,23 @@ jobs:
           }
 
           $TAG = "v1.0.${{ github.run_number }}"
+          $REPO = "${{ github.repository }}"
+
+          # Keep only the newest Windows build: delete every earlier Windows
+          # release (tags v1.0.N) and its tag, including a leftover release with
+          # this tag (that made "gh release create" fail). macOS releases (mac-...) stay.
+          $ErrorActionPreference = "Continue"
+          $old = gh release list --repo $REPO --limit 1000 --json tagName --jq '.[].tagName'
+          foreach ($t in $old) {
+            if ($t -and $t.StartsWith("v")) {
+              Write-Host "Deleting old release $t"
+              gh release delete $t --repo $REPO --yes --cleanup-tag
+            }
+          }
+          # A tag can exist without a release; remove it too.
+          try { gh api -X DELETE "repos/$REPO/git/refs/tags/$TAG" *> $null } catch { }
+          $global:LASTEXITCODE = 0
+          $ErrorActionPreference = "Stop"
 
           gh release create $TAG $ZIP `
             --repo "${{ github.repository }}" `
