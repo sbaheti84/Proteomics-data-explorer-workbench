@@ -299,6 +299,28 @@ jobs:
 
 
       # ======================================================
+      # Shrink: drop files the app never uses from the staged R
+      # (package docs/help/tests/examples, R manuals).
+      # ======================================================
+
+      - name: Remove unused R files (smaller app)
+        shell: powershell
+        run: |
+          $before = (Get-ChildItem -Recurse r_bundle | Measure-Object Length -Sum).Sum
+          Get-ChildItem r_bundle\library -Directory | ForEach-Object {
+            foreach ($d in @("doc","help","html","tests","demo","examples")) {
+              $p = Join-Path $_.FullName $d
+              if (Test-Path $p) { Remove-Item -Recurse -Force $p }
+            }
+          }
+          foreach ($d in @("r_bundle\R\doc","r_bundle\R\tests","r_bundle\R\share\locale")) {
+            if (Test-Path $d) { Remove-Item -Recurse -Force $d }
+          }
+          $after = (Get-ChildItem -Recurse r_bundle | Measure-Object Length -Sum).Sum
+          Write-Host ("R bundle: {0:N0} MB -> {1:N0} MB" -f ($before/1MB), ($after/1MB))
+
+
+      # ======================================================
       # Python dependencies
       # ======================================================
 
@@ -464,13 +486,12 @@ jobs:
       # Upload
       # ======================================================
 
-      # archive: false stores the ZIP as it is. Without it GitHub wraps the
-      # ZIP in a second ZIP when you download the artifact.
       - name: Upload Windows app
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v6
         with:
+          name: ProteomicsWorkbench-Windows
           path: ProteomicsWorkbench-Windows.zip
-          archive: false
+          compression-level: 0   # already a ZIP; do not compress twice
           if-no-files-found: error
           retention-days: 90
 
@@ -498,9 +519,8 @@ jobs:
           $TAG = "v1.0.${{ github.run_number }}"
           $REPO = "${{ github.repository }}"
 
-          # Keep only the newest Windows build: delete every earlier Windows
-          # release (tags v1.0.N) and its tag, including a leftover release with
-          # this tag (that made "gh release create" fail). macOS releases (mac-...) stay.
+          # Keep only the newest Windows build: delete earlier Windows releases
+          # (tags v1.0.N) and their tags. macOS releases (mac-...) stay.
           $ErrorActionPreference = "Continue"
           $old = gh release list --repo $REPO --limit 1000 --json tagName --jq '.[].tagName'
           foreach ($t in $old) {
@@ -509,7 +529,6 @@ jobs:
               gh release delete $t --repo $REPO --yes --cleanup-tag
             }
           }
-          # A tag can exist without a release; remove it too.
           try { gh api -X DELETE "repos/$REPO/git/refs/tags/$TAG" *> $null } catch { }
           $global:LASTEXITCODE = 0
           $ErrorActionPreference = "Stop"

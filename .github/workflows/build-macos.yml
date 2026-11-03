@@ -104,6 +104,16 @@ jobs:
             echo "STAGED: $pkg"
           done
 
+      # Shrink: drop files the app never uses from the staged packages.
+      - name: Remove unused R files (smaller app)
+        shell: bash
+        run: |
+          du -sh r_bundle
+          for d in doc help html tests demo examples; do
+            find r_bundle/library -mindepth 2 -maxdepth 2 -type d -name "$d" -exec rm -rf {} +
+          done
+          du -sh r_bundle
+
       # ----------------------------------------------------
       # Python dependencies + build
       # ----------------------------------------------------
@@ -156,14 +166,12 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent "dist/$APP_NAME.app" "$ZIP_NAME"
           ls -lh "$ZIP_NAME"
 
-      # archive: false stores the ZIP as it is (no ZIP inside a ZIP when you
-      # download the artifact). The artifact is then named after the file:
-      # ProteomicsWorkbench-macOS-arm64.zip / ProteomicsWorkbench-macOS-x86_64.zip
       - name: Upload macOS app
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v6
         with:
+          name: ProteomicsWorkbench-macOS-${{ matrix.arch }}
           path: ${{ env.ZIP_NAME }}
-          archive: false
+          compression-level: 0   # already a ZIP; do not compress twice
           if-no-files-found: error
           retention-days: 90
 
@@ -178,16 +186,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download builds
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@v7
         with:
           path: out
-          pattern: ProteomicsWorkbench-macOS-*.zip
+          pattern: ProteomicsWorkbench-macOS-*
           merge-multiple: true
-
-      - name: Check downloaded builds
-        run: |
-          ls -lhR out
-          ls out/*.zip >/dev/null 2>&1 || { echo "No macOS ZIP files were downloaded."; exit 1; }
 
       - name: Create release
         env:
@@ -204,9 +207,8 @@ jobs:
           TAG="mac-v1.0.${{ github.run_number }}"
           REPO="${{ github.repository }}"
 
-          # Keep only the newest macOS build: delete every earlier macOS release
-          # (tags mac-...) and its tag, including a leftover one with this tag.
-          # Windows releases (v1.0.N) stay.
+          # Keep only the newest macOS build: delete earlier macOS releases
+          # (tags mac-...) and their tags. Windows releases (v1.0.N) stay.
           gh release list --repo "$REPO" --limit 1000 --json tagName --jq '.[].tagName' \
             | grep '^mac-' | while read -r t; do
                 echo "Deleting old release $t"
