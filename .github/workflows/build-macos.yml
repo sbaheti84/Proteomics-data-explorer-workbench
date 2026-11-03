@@ -160,7 +160,7 @@ jobs:
       # download the artifact). The artifact is then named after the file:
       # ProteomicsWorkbench-macOS-arm64.zip / ProteomicsWorkbench-macOS-x86_64.zip
       - name: Upload macOS app
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           path: ${{ env.ZIP_NAME }}
           archive: false
@@ -178,7 +178,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download builds
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           path: out
           pattern: ProteomicsWorkbench-macOS-*.zip

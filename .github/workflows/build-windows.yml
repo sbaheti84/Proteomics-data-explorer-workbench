@@ -467,7 +467,7 @@ jobs:
       # archive: false stores the ZIP as it is. Without it GitHub wraps the
       # ZIP in a second ZIP when you download the artifact.
       - name: Upload Windows app
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           path: ProteomicsWorkbench-Windows.zip
           archive: false
