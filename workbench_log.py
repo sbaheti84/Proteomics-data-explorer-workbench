@@ -28,6 +28,39 @@ def _log_dir() -> str:
     return os.path.expanduser("~/.proteomics_workbench/logs")
 
 
+def _usable(s) -> bool:
+    try:
+        return s is not None and not s.closed
+    except Exception:
+        return False
+
+
+class _Tee:
+    """Writes to the console and the log file. Other attributes come from the console."""
+
+    def __init__(self, console, logfile):
+        self._console = console
+        self._logfile = logfile
+
+    def write(self, text):
+        for s in (self._logfile, self._console):
+            try:
+                s.write(text)
+            except Exception:
+                pass
+        return len(text)
+
+    def flush(self):
+        for s in (self._logfile, self._console):
+            try:
+                s.flush()
+            except Exception:
+                pass
+
+    def __getattr__(self, name):
+        return getattr(self._console, name)
+
+
 def setup() -> str:
     """Start logging to a file. Safe to call more than once. Returns the log path."""
     if os.environ.get("WORKBENCH_LOG_FILE") and getattr(sys, "_workbench_log_ready", False):
@@ -58,8 +91,10 @@ def setup() -> str:
 
     # A windowed app has no console: sys.stdout/sys.stderr are None, and any
     # print() or warning would crash silently. Send both to the log file.
-    sys.stdout = stream
-    sys.stderr = stream
+    # When there IS a console (the Windows build), write to both, so errors are
+    # still visible on screen and not only hidden in the log file.
+    sys.stdout = _Tee(sys.stdout, stream) if _usable(sys.stdout) else stream
+    sys.stderr = _Tee(sys.stderr, stream) if _usable(sys.stderr) else stream
     try:
         faulthandler.enable(file=stream)  # hard crashes (segfaults) too
     except Exception:
@@ -76,8 +111,17 @@ def setup() -> str:
         logging.getLogger(noisy).setLevel(logging.WARNING)
     log = logging.getLogger("workbench")
 
+    console_err = sys.__stderr__ if _usable(sys.__stderr__) else None
+
     def _excepthook(exc_type, exc, tb):
-        log.critical("Uncaught error:\n%s", "".join(traceback.format_exception(exc_type, exc, tb)))
+        text = "".join(traceback.format_exception(exc_type, exc, tb))
+        log.critical("Uncaught error:\n%s", text)
+        if console_err is not None:  # also show it on screen
+            try:
+                console_err.write(text + f"\nLog file: {path}\n")
+                console_err.flush()
+            except Exception:
+                pass
 
     def _thread_hook(args):
         log.critical(

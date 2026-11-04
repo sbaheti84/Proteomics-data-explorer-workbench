@@ -31,6 +31,7 @@ if (!(Test-Path $placeholder)) {
 
 # Optional logo/example folders are bundled only if they exist, but this keeps assets stable.
 Write-Host "Checking expected paths..."
+if (!(Test-Path (Join-Path $ROOT "desktop_launcher.py"))) { throw "desktop_launcher.py is missing (entry point for the desktop app)." }
 if (!(Test-Path (Join-Path $ROOT "workbench_log.py"))) { throw "workbench_log.py is missing (log file for the desktop app)." }
 if (!(Test-Path (Join-Path $ROOT "download_utility.py"))) { throw "download_utility.py is missing. Put the fixed file at repository root before building." }
 foreach ($d in $requiredDirs) {
@@ -44,23 +45,21 @@ Get-ChildItem -Force $ROOT | Select-Object Name, Mode, Length | Format-Table -Au
 
 Write-Host "Building Windows app..."
 
-streamlit-desktop-app build app.py `
+# Build with PyInstaller directly, around our own desktop_launcher.py.
+# (The wrapper made by "streamlit-desktop-app build" gave the server only
+# 10 seconds to start, then quit with "[PYI-49000] Failed to execute script".
+# Streamlit settings now live in desktop_launcher.py.)
+python -m PyInstaller `
   --name $APP_NAME `
-  --streamlit-options `
-    --server.maxUploadSize=1024 `
-    --server.enableStaticServing=true `
-    --theme.base=light `
-    "--theme.primaryColor=#004b87" `
-    "--theme.backgroundColor=#ffffff" `
-    "--theme.secondaryBackgroundColor=#f0f4f8" `
-    "--theme.textColor=#1e293b" `
-    "--theme.font=sans serif" `
-  --pyinstaller-options `
+  --noconfirm `
     --onedir `
     --paths "$ROOT" `
     --paths "$(Join-Path $ROOT 'ge')" `
     --paths "$(Join-Path $ROOT 'tp')" `
     --paths "$(Join-Path $ROOT 'faq')" `
+    --add-data "$ROOT\app.py;." `
+    --copy-metadata streamlit `
+    --hidden-import streamlit.web.cli `
     --add-data "$ROOT\app_launcher_*.py;." `
     --add-data "$ROOT\download_utility.py;." `
     --add-data "$ROOT\workbench_log.py;." `
@@ -80,14 +79,14 @@ streamlit-desktop-app build app.py `
     --hidden-import app_launcher_TP_LF `
     --hidden-import app_launcher_GMC `
     --hidden-import app_launcher_GPI `
-    --hidden-import app_launcher_FILE `
+    --hidden-import app_launcher_FIIE `
     --hidden-import faq.faq_GE `
     --hidden-import faq.faq_GE_LF `
     --hidden-import faq.faq_TP `
     --hidden-import faq.faq_TP_LF `
     --hidden-import faq.faq_GMC `
     --hidden-import faq.faq_GPI `
-    --hidden-import faq.faq_FILE `
+    --hidden-import faq.faq_FIIE `
     --hidden-import ge.batch_correcttion `
     --hidden-import ge.boxplot `
     --hidden-import ge.data_prep_utility `
@@ -125,7 +124,9 @@ streamlit-desktop-app build app.py `
     --collect-all PIL `
     --collect-submodules streamlit `
     --collect-submodules plotly `
-    --noconfirm
+    "$ROOT\desktop_launcher.py"
+
+if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE" }
 
 Write-Host "Build complete."
 Write-Host "Output folder: dist\$APP_NAME"
