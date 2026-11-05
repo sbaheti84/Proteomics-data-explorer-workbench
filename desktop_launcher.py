@@ -150,6 +150,19 @@ def _message_box(text: str) -> None:
             import ctypes
             ctypes.windll.user32.MessageBoxW(None, text, f"{APP_TITLE} could not start", 0x10)
             return
+        if sys.platform == "darwin":
+            import subprocess
+
+            def _q(s: str) -> str:  # AppleScript string literal
+                return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+            subprocess.run(
+                ["osascript", "-e",
+                 f"display dialog {_q(text)} with title {_q(APP_TITLE + ' could not start')} "
+                 'buttons {"OK"} default button "OK" with icon stop'],
+                timeout=600, check=False,
+            )
+            return
     except Exception:
         pass
     try:
@@ -217,10 +230,15 @@ def main() -> int:
     except Exception:
         tb = traceback.format_exc()
         _log("Could not open the app window:\n" + tb)
-        _message_box(
-            "The app window could not open.\n\n"
+        hint = (
             "On Windows this usually means the Microsoft Edge WebView2 Runtime "
-            "is missing. Install it from microsoft.com/edge/webview2 and try again.\n\n"
+            "is missing. Install it from microsoft.com/edge/webview2 and try again."
+            if sys.platform.startswith("win") else
+            "Make sure you are running the build for your Mac's chip "
+            "(Apple Silicon = arm64, Intel = x86_64)."
+        )
+        _message_box(
+            "The app window could not open.\n\n" + hint + "\n\n"
             + tb.strip().splitlines()[-1]
         )
         return 1
