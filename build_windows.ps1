@@ -31,6 +31,7 @@ if (!(Test-Path $placeholder)) {
 
 # Optional logo/example folders are bundled only if they exist, but this keeps assets stable.
 Write-Host "Checking expected paths..."
+if (!(Test-Path (Join-Path $ROOT "slim_bundle.py"))) { throw "slim_bundle.py is missing." }
 if (!(Test-Path (Join-Path $ROOT "desktop_launcher.py"))) { throw "desktop_launcher.py is missing (entry point for the desktop app)." }
 if (!(Test-Path (Join-Path $ROOT "workbench_log.py"))) { throw "workbench_log.py is missing (log file for the desktop app)." }
 if (!(Test-Path (Join-Path $ROOT "download_utility.py"))) { throw "download_utility.py is missing. Put the fixed file at repository root before building." }
@@ -45,6 +46,11 @@ Get-ChildItem -Force $ROOT | Select-Object Name, Mode, Length | Format-Table -Au
 
 Write-Host "Building Windows app..."
 
+# Fewer files = much faster unzip. "--collect-all" also copied every library's
+# .py source next to the compiled archive (~6,800 duplicate files), so each
+# library now uses --collect-submodules/--collect-data/--collect-binaries
+# (same code and data, no duplicate sources). IPython/jedi are developer tools
+# the app never uses (~1,800 files).
 # Build with PyInstaller directly, around our own desktop_launcher.py.
 # (The wrapper made by "streamlit-desktop-app build" gave the server only
 # 10 seconds to start, then quit with "[PYI-49000] Failed to execute script".
@@ -52,6 +58,7 @@ Write-Host "Building Windows app..."
 python -m PyInstaller `
   --name $APP_NAME `
   --noconfirm `
+    --exclude-module IPython --exclude-module jedi --exclude-module parso `
     --onedir `
     --paths "$ROOT" `
     --paths "$(Join-Path $ROOT 'ge')" `
@@ -112,21 +119,26 @@ python -m PyInstaller `
     --add-data "$(Join-Path $ROOT 'faq');faq" `
     --add-data "$(Join-Path $ROOT 'ge');ge" `
     --add-data "$(Join-Path $ROOT 'tp');tp" `
-    --collect-all streamlit `
-    --collect-all plotly `
-    --collect-all openpyxl `
-    --collect-all matplotlib `
-    --collect-all scipy `
-    --collect-all pandas `
-    --collect-all numpy `
-    --collect-all sklearn `
-    --collect-all statsmodels `
-    --collect-all PIL `
+    --collect-submodules streamlit --collect-data streamlit --collect-binaries streamlit --copy-metadata streamlit `
+    --collect-submodules plotly --collect-data plotly --collect-binaries plotly --copy-metadata plotly `
+    --collect-submodules openpyxl --collect-data openpyxl --collect-binaries openpyxl --copy-metadata openpyxl `
+    --collect-submodules matplotlib --collect-data matplotlib --collect-binaries matplotlib --copy-metadata matplotlib `
+    --collect-submodules scipy --collect-data scipy --collect-binaries scipy --copy-metadata scipy `
+    --collect-submodules pandas --collect-data pandas --collect-binaries pandas --copy-metadata pandas `
+    --collect-submodules numpy --collect-data numpy --collect-binaries numpy --copy-metadata numpy `
+    --collect-submodules sklearn --collect-data sklearn --collect-binaries sklearn --copy-metadata scikit-learn `
+    --collect-submodules statsmodels --collect-data statsmodels --collect-binaries statsmodels --copy-metadata statsmodels `
+    --collect-submodules PIL --collect-data PIL --collect-binaries PIL --copy-metadata pillow `
     --collect-submodules streamlit `
     --collect-submodules plotly `
     "$ROOT\desktop_launcher.py"
 
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit code $LASTEXITCODE" }
+
+# Remove test folders, type-hint files and C++ headers the app never loads.
+Write-Host "Removing files the app does not use..."
+python "$ROOT\slim_bundle.py" "dist\$APP_NAME\_internal"
+if ($LASTEXITCODE -ne 0) { throw "slim_bundle.py failed with exit code $LASTEXITCODE" }
 
 Write-Host "Build complete."
 Write-Host "Output folder: dist\$APP_NAME"

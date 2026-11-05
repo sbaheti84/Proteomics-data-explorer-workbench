@@ -307,7 +307,8 @@ jobs:
         shell: powershell
         run: |
           $before = (Get-ChildItem -Recurse r_bundle | Measure-Object Length -Sum).Sum
-          Get-ChildItem r_bundle\library -Directory | ForEach-Object {
+          # Add-on packages (r_bundle\library) and R's own base packages (r_bundle\R\library).
+          Get-ChildItem r_bundle\library, r_bundle\R\library -Directory | ForEach-Object {
             foreach ($d in @("doc","help","html","tests","demo","examples")) {
               $p = Join-Path $_.FullName $d
               if (Test-Path $p) { Remove-Item -Recurse -Force $p }
@@ -465,8 +466,10 @@ jobs:
             Remove-Item -Force $ZIP
           }
 
+          # Zip the folder itself (not only its contents), so unzipping
+          # creates a ProteomicsWorkbench\ folder.
           Compress-Archive `
-            -Path "$APP_DIR\*" `
+            -Path "$APP_DIR" `
             -DestinationPath $ZIP `
             -Force
 
@@ -533,11 +536,24 @@ jobs:
           $global:LASTEXITCODE = 0
           $ErrorActionPreference = "Stop"
 
+          $notes = @"
+          Windows build from commit ${{ github.sha }}.
+
+          **Install**
+          1. Download ProteomicsWorkbench-Windows.zip to a folder on your own computer, for example Downloads. Do not unzip or run it from a network drive (Q:, \\server\share): that is many times slower.
+          2. Unzip it. Fastest: open Command Prompt in that folder and run ``tar -xf ProteomicsWorkbench-Windows.zip`` (7-Zip is also fast; the built-in Windows "Extract all" is much slower).
+          3. Open the new ProteomicsWorkbench folder and run ProteomicsWorkbench.exe. Keep all files together. The first start can take a minute.
+
+          If it does not start, the log is in %LOCALAPPDATA%\ProteomicsWorkbench\logs.
+          "@
+          # WriteAllText writes UTF-8 without the byte-order mark PowerShell 5 adds.
+          [System.IO.File]::WriteAllText((Join-Path (Get-Location) "release_notes.md"), $notes)
+
           gh release create $TAG $ZIP `
             --repo "${{ github.repository }}" `
             --target "${{ github.sha }}" `
             --title "Proteomics Workbench $TAG (Windows)" `
-            --notes "Windows build from commit ${{ github.sha }}. Download the ZIP, unzip it, then run ProteomicsWorkbench.exe inside the folder. Keep all files together."
+            --notes-file release_notes.md
 
           if ($LASTEXITCODE -ne 0) {
             throw "Release creation failed with exit code $LASTEXITCODE"

@@ -32,6 +32,7 @@ done
 # PyInstaller can fail on an empty data directory.
 [ -f "$ROOT/assets/.keep" ] || echo "placeholder so PyInstaller can bundle assets directory" > "$ROOT/assets/.keep"
 
+[ -f "$ROOT/desktop_launcher.py" ] || { echo "ERROR: desktop_launcher.py is missing."; exit 1; }
 [ -f "$ROOT/download_utility.py" ] || { echo "ERROR: download_utility.py is missing."; exit 1; }
 [ -d "$ROOT/r_bundle/library" ]    || { echo "ERROR: r_bundle/library is missing. Run the 'Stage R package library' step first."; exit 1; }
 
@@ -43,19 +44,20 @@ fi
 
 echo "Building macOS app..."
 
-streamlit-desktop-app build app.py \
+# Fewer files = much faster unzip. "--collect-all" also copied every library's
+# .py source next to the compiled archive (~6,800 duplicate files), so each
+# library now uses --collect-submodules/--collect-data/--collect-binaries
+# (same code and data, no duplicate sources). IPython/jedi are developer tools
+# the app never uses (~1,800 files).
+# Build with PyInstaller directly, around our own desktop_launcher.py.
+# (The wrapper made by "streamlit-desktop-app build" gave the server only
+# 10 seconds to start and then quit. Streamlit settings now live in
+# desktop_launcher.py.)
+python -m PyInstaller \
   --name "$APP_NAME" \
+  --noconfirm \
+    --exclude-module IPython --exclude-module jedi --exclude-module parso \
   ${ICON_ARGS[@]+"${ICON_ARGS[@]}"} \
-  --streamlit-options \
-    --server.maxUploadSize=1024 \
-    --server.enableStaticServing=true \
-    --theme.base=light \
-    "--theme.primaryColor=#004b87" \
-    "--theme.backgroundColor=#ffffff" \
-    "--theme.secondaryBackgroundColor=#f0f4f8" \
-    "--theme.textColor=#1e293b" \
-    "--theme.font=sans serif" \
-  --pyinstaller-options \
     --onedir \
     --windowed \
     --osx-bundle-identifier "$BUNDLE_ID" \
@@ -63,6 +65,9 @@ streamlit-desktop-app build app.py \
     --paths "$ROOT/ge" \
     --paths "$ROOT/tp" \
     --paths "$ROOT/faq" \
+    --add-data "$ROOT/app.py:." \
+    --copy-metadata streamlit \
+    --hidden-import streamlit.web.cli \
     --add-data "$ROOT/app_launcher_*.py:." \
     --add-data "$ROOT/download_utility.py:." \
     --add-data "$ROOT/workbench_log.py:." \
@@ -107,19 +112,19 @@ streamlit-desktop-app build app.py \
     --add-data "$ROOT/faq:faq" \
     --add-data "$ROOT/ge:ge" \
     --add-data "$ROOT/tp:tp" \
-    --collect-all streamlit \
-    --collect-all plotly \
-    --collect-all openpyxl \
-    --collect-all matplotlib \
-    --collect-all scipy \
-    --collect-all pandas \
-    --collect-all numpy \
-    --collect-all sklearn \
-    --collect-all statsmodels \
-    --collect-all PIL \
+    --collect-submodules streamlit --collect-data streamlit --collect-binaries streamlit --copy-metadata streamlit \
+    --collect-submodules plotly --collect-data plotly --collect-binaries plotly --copy-metadata plotly \
+    --collect-submodules openpyxl --collect-data openpyxl --collect-binaries openpyxl --copy-metadata openpyxl \
+    --collect-submodules matplotlib --collect-data matplotlib --collect-binaries matplotlib --copy-metadata matplotlib \
+    --collect-submodules scipy --collect-data scipy --collect-binaries scipy --copy-metadata scipy \
+    --collect-submodules pandas --collect-data pandas --collect-binaries pandas --copy-metadata pandas \
+    --collect-submodules numpy --collect-data numpy --collect-binaries numpy --copy-metadata numpy \
+    --collect-submodules sklearn --collect-data sklearn --collect-binaries sklearn --copy-metadata scikit-learn \
+    --collect-submodules statsmodels --collect-data statsmodels --collect-binaries statsmodels --copy-metadata statsmodels \
+    --collect-submodules PIL --collect-data PIL --collect-binaries PIL --copy-metadata pillow \
     --collect-submodules streamlit \
     --collect-submodules plotly \
-    --noconfirm
+    "$ROOT/desktop_launcher.py"
 
 APP="$ROOT/dist/$APP_NAME.app"
 [ -d "$APP" ] || { echo "ERROR: $APP was not created."; exit 1; }
