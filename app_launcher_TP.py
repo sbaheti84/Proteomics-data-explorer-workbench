@@ -3671,7 +3671,7 @@ def main():
             st.warning("Assign samples to at least two groups in 'Data Filtering & Group Specification' first.")
             st.stop()
 
-        tabs = st.tabs(["Differential Analysis", "Results Visualizations"])
+        tabs = st.tabs(["Differential Analysis", "Results Visualizations", "Pathway Enrichment"])
 
         with tabs[0]:
             expr = ss["expr_processed"]
@@ -4678,6 +4678,13 @@ def main():
                                             f"protein_profile_{safe_filename(pick_gene)}",
                                             include_pdf=True,
                                         )
+
+        # ---------------------------------------------------------------------
+        # PATHWAY ENRICHMENT TAB (shared by all apps: enrichment/ui.py)
+        # ---------------------------------------------------------------------
+        with tabs[2]:
+            from enrichment.ui import render_pathway_enrichment
+            render_pathway_enrichment(ss.get("diff_results"), app_key="proteome-tmt")
 
 
     # =========================================================================

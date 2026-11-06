@@ -33,6 +33,8 @@ done
 [ -f "$ROOT/assets/.keep" ] || echo "placeholder so PyInstaller can bundle assets directory" > "$ROOT/assets/.keep"
 
 [ -f "$ROOT/desktop_launcher.py" ] || { echo "ERROR: desktop_launcher.py is missing."; exit 1; }
+[ -f "$ROOT/gene_sets/manifest.json" ] || { echo "ERROR: gene_sets/manifest.json is missing. Run the 'Update gene sets' workflow on GitHub (or python build_gene_sets.py) first."; exit 1; }
+[ -f "$ROOT/enrichment/ui.py" ] || { echo "ERROR: enrichment/ui.py is missing."; exit 1; }
 [ -f "$ROOT/download_utility.py" ] || { echo "ERROR: download_utility.py is missing."; exit 1; }
 [ -d "$ROOT/r_bundle/library" ]    || { echo "ERROR: r_bundle/library is missing. Run the 'Stage R package library' step first."; exit 1; }
 
@@ -112,6 +114,10 @@ python -m PyInstaller \
     --add-data "$ROOT/faq:faq" \
     --add-data "$ROOT/ge:ge" \
     --add-data "$ROOT/tp:tp" \
+    --add-data "$ROOT/gene_sets:gene_sets" \
+    --hidden-import enrichment.core \
+    --hidden-import enrichment.ui \
+    --collect-submodules gseapy --collect-data gseapy --collect-binaries gseapy --copy-metadata gseapy \
     --collect-submodules streamlit --collect-data streamlit --collect-binaries streamlit --copy-metadata streamlit \
     --collect-submodules plotly --collect-data plotly --collect-binaries plotly --copy-metadata plotly \
     --collect-submodules openpyxl --collect-data openpyxl --collect-binaries openpyxl --copy-metadata openpyxl \

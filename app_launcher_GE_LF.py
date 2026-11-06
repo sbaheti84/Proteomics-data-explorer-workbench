@@ -3271,7 +3271,7 @@ def main():
 
     # ====================== STATISTICAL ANALYSIS SUITE ======================
     if ss["show_suite"]:
-        tabs = st.tabs(["Differential Analysis", "Results Visualization"])
+        tabs = st.tabs(["Differential Analysis", "Results Visualization", "Pathway Enrichment"])
 
         with tabs[0]:
             merged_df = ss.get("merged_df")
@@ -4141,6 +4141,13 @@ def main():
                             fc_thr=wfl_fc_thr,
                             top_n=wfl_top_n,
                         )
+
+        # ---------------------------------------------------------------------
+        # PATHWAY ENRICHMENT TAB (shared by all apps: enrichment/ui.py)
+        # ---------------------------------------------------------------------
+        with tabs[2]:
+            from enrichment.ui import render_pathway_enrichment
+            render_pathway_enrichment(ss.get("diffexp_df"), app_key="glyco-lfq", glyco=True)
 
     # ====================== RESULTS DOWNLOAD (REPORT) ======================
     if ss.get("show_report", False):

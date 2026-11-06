@@ -9,7 +9,7 @@ venv/
 env/
 ENV/
 .python-version
-
+.gene_set_sources/
 # Streamlit
 .streamlit/secrets.toml
 

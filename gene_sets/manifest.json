@@ -1,0 +1,85 @@
+{
+  "builder_version": 1,
+  "built": "2026-11-05",
+  "term_size_limits": [
+    3,
+    3000
+  ],
+  "id_type": "UniProt accession",
+  "species": {
+    "human": {
+      "taxon": "9606",
+      "libraries": {
+        "GO_BP": {
+          "title": "GO Biological Process",
+          "file": "human/GO_BP.gmt.gz",
+          "terms": 9750,
+          "proteins": 17427,
+          "source": "Gene Ontology (releases/2026-07-26); annotations: EBI GOA goa_human.gaf.gz (2026-11-04)",
+          "citation": "Ashburner M, et al. Nat Genet. 2000;25(1):25-29; Gene Ontology Consortium. The Gene Ontology knowledgebase in 2023. Genetics. 2023;224(1):iyad031."
+        },
+        "GO_MF": {
+          "title": "GO Molecular Function",
+          "file": "human/GO_MF.gmt.gz",
+          "terms": 2849,
+          "proteins": 16266,
+          "source": "Gene Ontology (releases/2026-07-26); annotations: EBI GOA goa_human.gaf.gz (2026-11-04)",
+          "citation": "Ashburner M, et al. Nat Genet. 2000;25(1):25-29; Gene Ontology Consortium. The Gene Ontology knowledgebase in 2023. Genetics. 2023;224(1):iyad031."
+        },
+        "GO_CC": {
+          "title": "GO Cellular Component",
+          "file": "human/GO_CC.gmt.gz",
+          "terms": 1571,
+          "proteins": 14428,
+          "source": "Gene Ontology (releases/2026-07-26); annotations: EBI GOA goa_human.gaf.gz (2026-11-04)",
+          "citation": "Ashburner M, et al. Nat Genet. 2000;25(1):25-29; Gene Ontology Consortium. The Gene Ontology knowledgebase in 2023. Genetics. 2023;224(1):iyad031."
+        },
+        "Reactome": {
+          "title": "Reactome pathways",
+          "file": "human/Reactome.gmt.gz",
+          "terms": 2456,
+          "proteins": 11958,
+          "source": "Reactome release 98 (UniProt2Reactome_All_Levels)",
+          "citation": "Milacic M, et al. The Reactome Pathway Knowledgebase 2024. Nucleic Acids Res. 2024;52(D1):D672-D678."
+        }
+      }
+    },
+    "mouse": {
+      "taxon": "10090",
+      "libraries": {
+        "GO_BP": {
+          "title": "GO Biological Process",
+          "file": "mouse/GO_BP.gmt.gz",
+          "terms": 10849,
+          "proteins": 19009,
+          "source": "Gene Ontology (releases/2026-07-26); annotations: EBI GOA goa_mouse.gaf.gz (2026-10-11)",
+          "citation": "Ashburner M, et al. Nat Genet. 2000;25(1):25-29; Gene Ontology Consortium. The Gene Ontology knowledgebase in 2023. Genetics. 2023;224(1):iyad031."
+        },
+        "GO_MF": {
+          "title": "GO Molecular Function",
+          "file": "mouse/GO_MF.gmt.gz",
+          "terms": 2969,
+          "proteins": 17563,
+          "source": "Gene Ontology (releases/2026-07-26); annotations: EBI GOA goa_mouse.gaf.gz (2026-10-11)",
+          "citation": "Ashburner M, et al. Nat Genet. 2000;25(1):25-29; Gene Ontology Consortium. The Gene Ontology knowledgebase in 2023. Genetics. 2023;224(1):iyad031."
+        },
+        "GO_CC": {
+          "title": "GO Cellular Component",
+          "file": "mouse/GO_CC.gmt.gz",
+          "terms": 1593,
+          "proteins": 15208,
+          "source": "Gene Ontology (releases/2026-07-26); annotations: EBI GOA goa_mouse.gaf.gz (2026-10-11)",
+          "citation": "Ashburner M, et al. Nat Genet. 2000;25(1):25-29; Gene Ontology Consortium. The Gene Ontology knowledgebase in 2023. Genetics. 2023;224(1):iyad031."
+        },
+        "Reactome": {
+          "title": "Reactome pathways",
+          "file": "mouse/Reactome.gmt.gz",
+          "terms": 1736,
+          "proteins": 9363,
+          "source": "Reactome release 98 (UniProt2Reactome_All_Levels) - mouse pathways are inferred from human by orthology",
+          "citation": "Milacic M, et al. The Reactome Pathway Knowledgebase 2024. Nucleic Acids Res. 2024;52(D1):D672-D678."
+        }
+      }
+    }
+  }
+}

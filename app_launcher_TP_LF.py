@@ -3429,7 +3429,7 @@ def main():
         if not ss.get("pre_log2", True):
             st.error("Differential analysis requires the log2 preprocessing option to be enabled.")
             st.stop()
-        tabs = st.tabs(["Differential Analysis", "Results Visualization"])
+        tabs = st.tabs(["Differential Analysis", "Results Visualization", "Pathway Enrichment"])
         with tabs[0]:
             expr = ss["expr_processed"]
             groups = [[pretty_labels[c] for c in gcols] for gcols in ss["global_group_samples"]]
@@ -4321,6 +4321,13 @@ def main():
                                             f"lfq_protein_profile_{_safe_download_filename(pick_gene)}",
                                             include_pdf=True,
                                         )
+
+        # ---------------------------------------------------------------------
+        # PATHWAY ENRICHMENT TAB (shared by all apps: enrichment/ui.py)
+        # ---------------------------------------------------------------------
+        with tabs[2]:
+            from enrichment.ui import render_pathway_enrichment
+            render_pathway_enrichment(ss.get("diff_results"), app_key="proteome-lfq")
 
 
     # =========================================================================

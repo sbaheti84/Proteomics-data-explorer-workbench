@@ -2033,7 +2033,7 @@ def main():
 
     # ====================== Step 4: Statistical Analysis Suite ======================
     if ss.get("show_suite"):
-        tabs = st.tabs(["Differential Analysis", "Results Visualizations"])
+        tabs = st.tabs(["Differential Analysis", "Results Visualizations", "Pathway Enrichment"])
 
         def _detect_sample_options(df: pd.DataFrame):
             candidates = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
@@ -2994,6 +2994,13 @@ def main():
                             log2fc_thr=ss.get("wfl_log2fc_thr", 1.0),
                             top_n=ss.get("wfl_top_n", 5),
                         )
+
+        # ---------------------------------------------------------------------
+        # PATHWAY ENRICHMENT TAB (shared by all apps: enrichment/ui.py)
+        # ---------------------------------------------------------------------
+        with tabs[2]:
+            from enrichment.ui import render_pathway_enrichment
+            render_pathway_enrichment(ss.get("diffexp_df"), app_key="glyco-tmt", glyco=True)
 
     if ss.get("show_report", False):
 

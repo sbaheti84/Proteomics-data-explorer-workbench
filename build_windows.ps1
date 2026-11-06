@@ -32,6 +32,8 @@ if (!(Test-Path $placeholder)) {
 # Optional logo/example folders are bundled only if they exist, but this keeps assets stable.
 Write-Host "Checking expected paths..."
 if (!(Test-Path (Join-Path $ROOT "slim_bundle.py"))) { throw "slim_bundle.py is missing." }
+if (!(Test-Path (Join-Path $ROOT "gene_sets\manifest.json"))) { throw "gene_sets\manifest.json is missing. Run the 'Update gene sets' workflow on GitHub (or python build_gene_sets.py) first." }
+if (!(Test-Path (Join-Path $ROOT "enrichment\ui.py"))) { throw "enrichment\ui.py is missing." }
 if (!(Test-Path (Join-Path $ROOT "desktop_launcher.py"))) { throw "desktop_launcher.py is missing (entry point for the desktop app)." }
 if (!(Test-Path (Join-Path $ROOT "workbench_log.py"))) { throw "workbench_log.py is missing (log file for the desktop app)." }
 if (!(Test-Path (Join-Path $ROOT "download_utility.py"))) { throw "download_utility.py is missing. Put the fixed file at repository root before building." }
@@ -119,6 +121,10 @@ python -m PyInstaller `
     --add-data "$(Join-Path $ROOT 'faq');faq" `
     --add-data "$(Join-Path $ROOT 'ge');ge" `
     --add-data "$(Join-Path $ROOT 'tp');tp" `
+    --add-data "$(Join-Path $ROOT 'gene_sets');gene_sets" `
+    --hidden-import enrichment.core `
+    --hidden-import enrichment.ui `
+    --collect-submodules gseapy --collect-data gseapy --collect-binaries gseapy --copy-metadata gseapy `
     --collect-submodules streamlit --collect-data streamlit --collect-binaries streamlit --copy-metadata streamlit `
     --collect-submodules plotly --collect-data plotly --collect-binaries plotly --copy-metadata plotly `
     --collect-submodules openpyxl --collect-data openpyxl --collect-binaries openpyxl --copy-metadata openpyxl `
