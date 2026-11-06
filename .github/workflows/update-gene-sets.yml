@@ -1,0 +1,39 @@
+name: Update gene sets
+
+# Run by hand (Actions -> Update gene sets -> Run workflow) when you want newer
+# GO and Reactome annotations. It rebuilds gene_sets/ with build_gene_sets.py and
+# commits the result if anything changed. Then rebuild the desktop apps.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Build gene sets from GO and Reactome
+        run: python build_gene_sets.py --out gene_sets
+
+      - name: Commit if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add gene_sets
+          if git diff --cached --quiet; then
+            echo "Gene sets are already up to date."
+            exit 0
+          fi
+          git commit -m "Update gene sets ($(date -u +%Y-%m-%d))"
+          git push
