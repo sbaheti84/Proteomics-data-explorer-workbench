@@ -124,6 +124,7 @@ python -m PyInstaller `
     --add-data "$(Join-Path $ROOT 'gene_sets');gene_sets" `
     --hidden-import enrichment.core `
     --hidden-import enrichment.ui `
+    --hidden-import figure_utils `
     --collect-submodules gseapy --collect-data gseapy --collect-binaries gseapy --copy-metadata gseapy `
     --collect-submodules streamlit --collect-data streamlit --collect-binaries streamlit --copy-metadata streamlit `
     --collect-submodules plotly --collect-data plotly --collect-binaries plotly --copy-metadata plotly `

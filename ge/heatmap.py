@@ -14,6 +14,7 @@ from PIL import Image
 
 # Import the centralized helper
 from ge.misc_utility import add_plot_download_buttons
+from figure_utils import show_figure  # draws a figure, then frees it
 
 
 # -------------------------------------------------------------------------
@@ -170,7 +171,7 @@ def _finalize_clustermap(
     g.fig.subplots_adjust(**adjust_kwargs)
     g.fig.suptitle(title, fontsize=16, fontweight="bold", y=0.98)
 
-    st.pyplot(g.fig)
+    show_figure(g.fig)
 
 
 # -------------------------------------------------------------------------
@@ -529,7 +530,7 @@ def create_overview_heatmap(
             fontsize=14, fontweight="bold",y=0.98
         )
 
-        st.pyplot(fig.fig)
+        show_figure(fig.fig)
 
         quant_mode_str = str(quant_mode).lower()
 

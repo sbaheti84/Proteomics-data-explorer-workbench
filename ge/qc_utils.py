@@ -14,6 +14,7 @@ from download_utility import help_popover  # help text behind a small button
 
 # Import the centralized helper
 from ge.misc_utility import *
+from figure_utils import show_figure, close_figure  # draw a figure, then free it
 
 
 def draw_confidence_ellipse(x, y, ax, color, n_std=2.0, **kwargs):
@@ -296,7 +297,7 @@ def create_pca_plot(
     )
 
     plt.tight_layout(rect=[0, 0, 0.85, 1])
-    st.pyplot(fig)
+    show_figure(fig)
 
     if "add_plot_download_buttons" in globals():
         add_plot_download_buttons(
@@ -615,7 +616,7 @@ def create_sample_clustering(
         top=0.90,
     )
 
-    st.pyplot(fig)
+    show_figure(fig)
 
     # ---------------------------------------------------------
     # Download buttons
@@ -696,7 +697,7 @@ def create_sample_corr_heatmap(df: pd.DataFrame, sample_cols: list[str]):
     cbar.ax.tick_params(labelsize=10, left=False, right=True) # Ensure colorbar ticks are visible too
     
     plt.tight_layout()
-    st.pyplot(fig)
+    show_figure(fig)
     
     # Assuming you have this helper function defined elsewhere
     add_plot_download_buttons(fig, base_filename="sample_corr_heatmap", key_suffix="static_corr_matrix")
@@ -764,7 +765,7 @@ def create_abundance_density(df: pd.DataFrame, abundance_cols: list[str]):
     
     # Instruct tight_layout to explicitly reserve the right 15% of the figure for the legend
     plt.tight_layout(rect=[0, 0, 0.85, 1])
-    st.pyplot(fig)
+    show_figure(fig)
     add_plot_download_buttons(fig, base_filename="abundance_density")
     st.session_state["report_abundance_density_fig"] = fig
 
@@ -823,6 +824,10 @@ def create_glycan_class_summary(df: pd.DataFrame, glycan_col: str = "GlycanClass
                 base_filename="glycan_class_distribution",
                 key_suffix="static_glycan_class"
             )
+
+    # The figure is kept in session state for the report and stays usable there,
+    # but Matplotlib no longer needs to hold it.
+    close_figure(fig)
 
     return summary_df
 

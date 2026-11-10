@@ -64,6 +64,7 @@ from ge.diff_results_utility import (
     LIMMA_T, LIMMA_F, CLASSIC_ANOVA, PAIRWISE_TESTS, MULTIGROUP_TESTS, TEST_HELP,
 )
 from ge.batch_correcttion import apply_combat_batch_correction
+from figure_utils import show_figure  # draws a figure, then frees it
 
 # Safely import FAQ
 try:
@@ -1992,7 +1993,7 @@ def render_professional_tp_start_panel(upload_disabled: bool = True):
             <div class="tp-warning-box">
                 No data uploaded yet
                 <div class="tp-warning-box-sub">
-                    Please upload a proteome data file to unlock the workflow.
+                    Please upload a proteome data file to start the workflow.
                 </div>
             </div>
             """,
@@ -2188,7 +2189,7 @@ def render_navigation_buttons() -> None:
         (c1, "show_global_select", "btn_global_select", "Data Filtering & Group Specification", "Assign samples to biological groups and set a control/baseline."),
         (c2, "show_overview", "btn_overview", "Data Integrity Check & Sanity Profiling", "Protein filters, normalization and optional batch correction, then QC: PCA, density, correlation, heatmap, boxplots and missing values."),
         (c3, "show_suite", "btn_suite", "Statistical Analysis Suite", "Perform differential expression testing and visualize results (Volcano, Heatmaps, etc.)."),
-        (c4, "show_report", "btn_report", "Results Download", "Compile and export a comprehensive PDF report and ZIP bundle of your analysis."),
+        (c4, "show_report", "btn_report", "Results Download", "Compile and export a full PDF report and ZIP bundle of your analysis."),
     ]
 
     def _toggle(state_key):
@@ -2787,7 +2788,7 @@ def main():
                 n_groups = st.radio(
                     "Number of groups",
                     [2, 3],
-                    help="Choose 3 to unlock the three-group tests (limma F-test or ANOVA).",
+                    help="Choose 3 to enable the three-group tests (limma F-test or ANOVA).",
                     index=0 if ss["global_n_groups_ui"] == 2 else 1,
                     horizontal=True,
                     key="global_n_groups_ui",
@@ -3351,7 +3352,7 @@ def main():
                                 to_log2_for_display(expr_proc, pre_log2)))
             _fig = loading_boxplot_figure(_panels, _samples, group_of=_group_of,
                                           palette=ss.get("pca_palette") or None)
-            st.pyplot(_fig)
+            show_figure(_fig)
             plt.close(_fig)
             ss["report_norm_fig"] = _fig
             add_figure_download_buttons_tp(_fig, "TMT_sample_loading_normalization", key_suffix="tp_norm")
@@ -3528,7 +3529,7 @@ def main():
                     sns.kdeplot(qc_target[sample].dropna(), ax=ax, label=sample, lw=1.5, alpha=0.6)
                 ax.set_title("Sample Density")
                 ax.legend(bbox_to_anchor=(1.05, 1), loc="upper left", fontsize=8)
-                st.pyplot(fig)
+                show_figure(fig)
                 
                 if qc_target is expr_raw:
                     ss["report_density_raw_fig"] = fig
@@ -3540,7 +3541,7 @@ def main():
             elif qc_mode == "Correlation Matrix":
                 fig, ax = plt.subplots(figsize=(7, 6))
                 sns.heatmap(qc_target.corr(), cmap="vlag", ax=ax, cbar_kws={"shrink": 0.5})
-                st.pyplot(fig)
+                show_figure(fig)
                 
                 ss["report_corr_fig"] = fig  
                 add_plot_download_buttons(fig, "correlation_heatmap")
@@ -3622,7 +3623,7 @@ def main():
                         frameon=True
                     )
 
-                    st.pyplot(fig.fig)
+                    show_figure(fig.fig)
 
                     ss["report_qc_heatmap_fig"] = fig.fig
                     add_plot_download_buttons(fig.fig, "qc_heatmap")
@@ -3631,7 +3632,7 @@ def main():
                 fig, ax = plt.subplots(figsize=(10, 4))
                 sns.boxplot(data=qc_target, ax=ax)
                 ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right")
-                st.pyplot(fig)
+                show_figure(fig)
                 
                 ss["report_qc_boxplot_fig"] = fig
                 add_plot_download_buttons(fig, "qc_boxplot")
@@ -3642,7 +3643,7 @@ def main():
                 sns.barplot(x=miss.index, y=miss.values, ax=ax)
                 ax.set_title("% Missing Values")
                 plt.xticks(rotation=45, ha="right")
-                st.pyplot(fig)
+                show_figure(fig)
                 
                 ss["report_qc_missing_fig"] = fig
                 add_plot_download_buttons(fig, "missing_values")
@@ -3657,7 +3658,7 @@ def main():
                     fig, ax = plt.subplots(figsize=(8, 4))
                     dendrogram(Z, labels=X.index.tolist(), ax=ax)
                     plt.xticks(rotation=45, ha="right")
-                    st.pyplot(fig)
+                    show_figure(fig)
                     
                     ss["report_dendrogram_fig"] = fig
                     add_plot_download_buttons(fig, "dendrogram")
@@ -4291,7 +4292,7 @@ def main():
                                     control_label=control_label,
                                     test_label=test_label,
                                 )
-                                st.pyplot(static_volcano_fig, use_container_width=True)
+                                show_figure(static_volcano_fig, use_container_width=True)
                                 ss["report_volcano_fig"] = static_volcano_fig
                                 add_figure_download_buttons_tp(
                                     static_volcano_fig,
@@ -4323,7 +4324,7 @@ def main():
                                 
                             )
 
-                            st.pyplot(wf_fig, use_container_width=True)
+                            show_figure(wf_fig, use_container_width=True)
 
                             png_buf = BytesIO()
                             wf_fig.savefig(png_buf, format="png", dpi=300, bbox_inches="tight")
@@ -4415,7 +4416,7 @@ def main():
                                         control_label=control_label,
                                         test_label=test_label,
                                     )
-                                    st.pyplot(fig, use_container_width=True)
+                                    show_figure(fig, use_container_width=True)
                                     ss["report_ma_fig"] = fig
                                     add_figure_download_buttons_tp(fig, "ma_plot", "ma_static", include_pdf=True)
                             else:
@@ -4555,7 +4556,7 @@ def main():
                                 frameon=True
                             )
 
-                            st.pyplot(fig.fig)
+                            show_figure(fig.fig)
 
                             ss["report_heatmap_fig"] = fig.fig
                             add_plot_download_buttons(fig.fig, "differential_heatmap")
@@ -4627,7 +4628,7 @@ def main():
                                                 dpi=220,
                                             )
                                             if grid_fig is not None:
-                                                st.pyplot(grid_fig, use_container_width=True)
+                                                show_figure(grid_fig, use_container_width=True)
                                                 ss["report_boxplot_fig"] = grid_fig
                                             else:
                                                 ss["report_boxplot_fig"] = profile_figs[0]
@@ -4670,7 +4671,7 @@ def main():
                                     if fig is None:
                                         st.warning("No expression values found for the selected protein.")
                                     else:
-                                        st.pyplot(fig, use_container_width=True)
+                                        show_figure(fig, use_container_width=True)
                                         ss["report_boxplot_fig"] = fig
                                         add_figure_download_buttons_tp(
                                             fig,

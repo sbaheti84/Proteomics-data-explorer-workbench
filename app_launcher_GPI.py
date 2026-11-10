@@ -34,6 +34,7 @@ import tempfile
 from PIL import Image
 
 import urllib3
+from figure_utils import show_figure, close_figure  # draw a figure, then free it
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 try:
@@ -2187,7 +2188,7 @@ def render_protein_matching_qc(glyco_df: pd.DataFrame, prot_df: pd.DataFrame, me
             plt.setp(ax.get_xticklabels(), rotation=25, ha="right")
             ax.grid(False)
             plt.tight_layout()
-            st.pyplot(fig)
+            show_figure(fig)
             add_plot_download_buttons(fig, "gpi_input_overlap_qc")
 
     with right:
@@ -2399,7 +2400,7 @@ def render_protein_normalized_integration_overview(
             ax_ratio.set_xlabel("Sample/channel")
             ax_ratio.set_ylabel("Protein/gene ID")
             plt.tight_layout()
-            st.pyplot(fig_ratio)
+            show_figure(fig_ratio)
             add_plot_download_buttons(fig_ratio, "gpi_protein_normalized_ratio_heatmap")
             help_popover("This is a relative signal ratio, not absolute glycan occupancy. Use it as supporting evidence only.", label="How to read this plot")
 
@@ -2748,6 +2749,13 @@ def generate_report_bundle(
             "Ratio plots filter likely non-glycopeptide rows when glycan/site annotations exist and can optionally median-center sample intensities before ratio calculation.",
         ]
         zf.writestr("README.txt", "\n".join(manifest))
+
+    # The figures have been written to both the PDF and the ZIP, so release them.
+    # Matplotlib would otherwise hold on to every one of them for the rest of the
+    # session, and each export would add another set.
+    for fig in figure_pack.figures.values():
+        close_figure(fig)
+
     return pdf_bytes, zip_buf.getvalue()
 
 
@@ -3133,7 +3141,7 @@ def render_targeted_site_glycan_matrix(
     ax.set_ylabel("Glycosite")
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right")
     plt.tight_layout()
-    st.pyplot(fig)
+    show_figure(fig)
     add_plot_download_buttons(fig, f"{chosen_gene}_site_glycan_matrix")
     help_popover("Asterisks mark glycopeptide rows passing the selected glyco significance and fold-change thresholds. Empty cells mean no observed row for that site/glycan combination.", label="How to read this plot")
 
@@ -4485,7 +4493,7 @@ def main():
                             n_not_sig = int(((pe["Evidence_Class"] == "Not significant")).sum())
 
                             plt.tight_layout()
-                            st.pyplot(fig_pep)
+                            show_figure(fig_pep)
                             add_plot_download_buttons(fig_pep, f"{chosen_gene}_peptide_evidence")
                             st.caption(
                                 f"Significant up: {n_sig_up} | Significant down: {n_sig_down} | "
@@ -4521,7 +4529,7 @@ def main():
                             ax_ratio.set_title("Scale-aware relative glyco-protein signal by channel", pad=12)
                             plt.setp(ax_ratio.get_xticklabels(), rotation=45, ha="right")
                             plt.tight_layout()
-                            st.pyplot(fig_ratio)
+                            show_figure(fig_ratio)
                             add_plot_download_buttons(fig_ratio, f"{chosen_gene}_log2_ratio")
                             st.dataframe(ratio_df, use_container_width=True, hide_index=True)
                             add_dataframe_download_buttons(ratio_df, f"{chosen_gene}_relative_ratio_table", key_suffix=f"ratio_{chosen_gene}")
@@ -4627,7 +4635,7 @@ def main():
                         else:
                             fig_up = plt.figure(figsize=(7.4, 5.3))
                             UpSet(from_contents(sets), show_counts=True, facecolor="black", shading_color="lightgray").plot(fig=fig_up)
-                            st.pyplot(fig_up, use_container_width=True)
+                            show_figure(fig_up, use_container_width=True)
                             add_plot_download_buttons(fig_up, "directional_upset")
                             help_popover("Direction-aware set overlap is often more informative than a simple binary significant/non-significant overlap.", label="How to read this plot")
 
@@ -4641,7 +4649,7 @@ def main():
                         mat.columns = ["Glyco log2FC", "Protein log2FC"]
                         cg = sns.clustermap(mat, cmap="coolwarm", center=0, linewidths=0.2, figsize=(7, max(5, 0.22 * len(mat))), cbar_kws={"label": "log2FC"})
                         cg.fig.suptitle("Hierarchical clustering of differential signal", y=1.02)
-                        st.pyplot(cg.fig, use_container_width=True)
+                        show_figure(cg.fig, use_container_width=True)
                         add_plot_download_buttons(cg.fig, "hierarchical_clustermap")
 
                 elif vis_choice == "Relative Ratio Heatmap":
@@ -4659,7 +4667,7 @@ def main():
                         ax_occ.set_ylabel("")
                         ax_occ.set_title("Scale-aware relative glyco-protein signal heatmap", pad=12)
                         plt.tight_layout()
-                        st.pyplot(fig_occ)
+                        show_figure(fig_occ)
                         add_plot_download_buttons(fig_occ, "relative_ratio_heatmap")
                         ratio_stats = build_ratio_consistency_table(ratio_mat)
                         help_popover(
@@ -4762,7 +4770,7 @@ def main():
                         ax_d.set_title("Proteins ranked by glyco-protein divergence", pad=12)
                         ax_d.legend()
                         plt.tight_layout()
-                        st.pyplot(fig_d)
+                        show_figure(fig_d)
                         add_plot_download_buttons(fig_d, "discordant_rank_plot")
 
     # ---------------------------------------------------------------------

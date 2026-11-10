@@ -62,6 +62,7 @@ from ge.diff_results_utility import (
     limma_group_test, _bh_adjust, LIMMA_T, LIMMA_F, CLASSIC_ANOVA,
     PAIRWISE_TESTS, MULTIGROUP_TESTS, TEST_HELP,
 )
+from figure_utils import show_figure  # draws a figure, then frees it
 # Safely import FAQ
 try:
     from faq.faq_TP_LF import faq_section
@@ -1748,7 +1749,7 @@ def render_professional_tp_lf_start_panel(upload_disabled: bool = True):
             <div class="tplf-warning-box">
                 No data uploaded yet
                 <div class="tplf-warning-box-sub">
-                    Please upload an LFQ proteome data file to unlock the workflow.
+                    Please upload an LFQ proteome data file to start the workflow.
                 </div>
             </div>
             """,
@@ -2027,7 +2028,7 @@ def render_navigation_buttons_lf():
         (c3, "show_suite", "btn_suite", "Statistical Analysis Suite",
          "Perform differential protein abundance testing and visualize results (Volcano, Heatmaps, etc.)."),
         (c4, "show_report", "btn_report", "Results Download",
-         "Compile and export a comprehensive PDF report and ZIP bundle of your analysis."),
+         "Compile and export a full PDF report and ZIP bundle of your analysis."),
     ]
     all_keys = [p[1] for p in panels]
 
@@ -2758,7 +2759,7 @@ def main():
                             _lbl.set_fontweight("normal")
                         sns.despine(ax=ax_m)
                         fig_m.tight_layout()
-                        st.pyplot(fig_m)
+                        show_figure(fig_m)
                         plt.close(fig_m)
                     with pc2:
                         st.info(missingness_verdict_lfq(profile))
@@ -3211,7 +3212,7 @@ def main():
             with bx_l:
                 _fig = loading_boxplot_figure(_panels, _samples, group_of=_group_of,
                                               palette=ss.get("pca_palette") or None, ylabel="log2 intensity")
-                st.pyplot(_fig)
+                show_figure(_fig)
                 plt.close(_fig)
                 ss["report_norm_fig"] = _fig
                 add_plot_download_buttons(_fig, "LFQ_protein_sample_loading_normalization")
@@ -3329,7 +3330,7 @@ def main():
                         sns.kdeplot(vals, ax=ax, label=sample, lw=1.5, alpha=0.6)
                 ax.set_title(f"Sample LFQ Density — {qc_source_name}")
                 ax.legend(bbox_to_anchor=(1.05, 1), loc="upper left", fontsize=8)
-                st.pyplot(fig)
+                show_figure(fig)
                 ss["report_density_proc_fig"] = fig
                 add_plot_download_buttons(fig, "density_plot")
 
@@ -3337,7 +3338,7 @@ def main():
                 fig, ax = plt.subplots(figsize=(7, 6))
                 sns.heatmap(qc_target.corr(), cmap="vlag", ax=ax, cbar_kws={"shrink": 0.5})
                 ax.set_title(qc_source_name)
-                st.pyplot(fig)
+                show_figure(fig)
                 ss["report_corr_fig"] = fig
                 add_plot_download_buttons(fig, "correlation_heatmap")
 
@@ -3370,7 +3371,7 @@ def main():
                     fig.ax_col_dendrogram.legend(
                         handles=handles, title="Group", loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=True
                     )
-                    st.pyplot(fig.fig)
+                    show_figure(fig.fig)
                     ss["report_qc_heatmap_fig"] = fig.fig
                     add_plot_download_buttons(fig.fig, "qc_heatmap")
 
@@ -3379,7 +3380,7 @@ def main():
                 sns.boxplot(data=qc_target, ax=ax)
                 ax.set_title(qc_source_name)
                 ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right")
-                st.pyplot(fig)
+                show_figure(fig)
                 ss["report_qc_boxplot_fig"] = fig
                 add_plot_download_buttons(fig, "qc_boxplot")
 
@@ -3389,7 +3390,7 @@ def main():
                 sns.barplot(x=miss.index, y=miss.values, ax=ax)
                 ax.set_title(f"% Missing Values — {qc_source_name}")
                 plt.xticks(rotation=45, ha="right")
-                st.pyplot(fig)
+                show_figure(fig)
                 ss["report_qc_missing_fig"] = fig
                 add_plot_download_buttons(fig, "missing_values")
 
@@ -3404,7 +3405,7 @@ def main():
                     dendrogram(Z, labels=X.index.tolist(), ax=ax)
                     ax.set_title(qc_source_name)
                     plt.xticks(rotation=45, ha="right")
-                    st.pyplot(fig)
+                    show_figure(fig)
                     ss["report_dendrogram_fig"] = fig
                     add_plot_download_buttons(fig, "dendrogram")
 
@@ -3983,7 +3984,7 @@ def main():
                                     control_label=control_label,
                                     test_label=test_label,
                                 )
-                                st.pyplot(static_volcano_fig, use_container_width=True)
+                                show_figure(static_volcano_fig, use_container_width=True)
                                 ss["report_volcano_fig"] = static_volcano_fig
                                 add_figure_download_buttons_tp_lf(
                                     static_volcano_fig,
@@ -4014,7 +4015,7 @@ def main():
                                 top_n=top_n,
                             )
 
-                            st.pyplot(wf_fig, use_container_width=True)
+                            show_figure(wf_fig, use_container_width=True)
 
                             png_buf = BytesIO()
                             wf_fig.savefig(png_buf, format="png", dpi=300, bbox_inches="tight")
@@ -4116,7 +4117,7 @@ def main():
                                         control_label=control_label,
                                         test_label=test_label,
                                     )
-                                    st.pyplot(fig, use_container_width=True)
+                                    show_figure(fig, use_container_width=True)
                                     ss["report_ma_fig"] = fig
                                     add_figure_download_buttons_tp_lf(fig, "ma_plot", "ma_static", include_pdf=True)
                             else:
@@ -4197,7 +4198,7 @@ def main():
                             handles = [mpatches.Patch(color=group_palette[g], label=g) for g in unique_groups if g in group_palette]
                             fig.ax_col_dendrogram.legend(handles=handles, title="Group", loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=True)
 
-                            st.pyplot(fig.fig)
+                            show_figure(fig.fig)
                             ss["report_heatmap_fig"] = fig.fig
                             add_plot_download_buttons(fig.fig, "differential_heatmap")
 
@@ -4270,7 +4271,7 @@ def main():
 
                                             if grid_fig is not None:
                                                 # Display one combined figure so double-click/zoom opens the whole grid.
-                                                st.pyplot(grid_fig, use_container_width=True)
+                                                show_figure(grid_fig, use_container_width=True)
                                                 ss["report_boxplot_fig"] = grid_fig
                                             else:
                                                 ss["report_boxplot_fig"] = profile_figs[0]
@@ -4313,7 +4314,7 @@ def main():
                                     if fig is None:
                                         st.warning("No protein abundance values found for the selected protein.")
                                     else:
-                                        st.pyplot(fig, use_container_width=True)
+                                        show_figure(fig, use_container_width=True)
                                         ss["report_boxplot_fig"] = fig
                                         add_figure_download_buttons_tp_lf(
                                             fig,

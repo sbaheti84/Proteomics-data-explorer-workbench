@@ -56,6 +56,7 @@ from ge.report_utility import *
 from ge.batch_correcttion import *
 from faq.faq_GE_LF import *   # label-free FAQ (previously imported the TMT FAQ by mistake)
 from ge.waterfall_lf import *
+from figure_utils import show_figure  # draws a figure, then frees it
 
 # Optional import for ComBat Batch Correction
 try:
@@ -2217,7 +2218,7 @@ def main():
                 n_groups = st.radio(
                     "Number of groups", 
                     [2, 3], 
-                    help="Choose 3 to unlock the three-group tests (limma F-test or ANOVA).",
+                    help="Choose 3 to enable the three-group tests (limma F-test or ANOVA).",
                     index=0 if ss.setdefault("global_n_groups_ui", 2) == 2 else 1, 
                     horizontal=True, 
                     key="global_n_groups_ui"
@@ -2919,7 +2920,7 @@ def main():
                         _filtered_raw, None, _proc_cols, fmt=fmt, group_of=_group_of,
                         palette=ss.get("pca_palette") or None, panels=_panels, ylabel="log2 intensity",
                     )
-                    st.pyplot(_fig)
+                    show_figure(_fig)
                     plt.close(_fig)  # still saved for the report
                     ss["report_norm_fig"] = _fig
                     add_plot_download_buttons(_fig, base_filename="LFQ_sample_loading_normalization",
@@ -3257,7 +3258,7 @@ def main():
                         _gof2 = {c: lbl for lbl, gcols in zip(group_labels, group_samples) for c in (gcols or [])}
                         _mfig = missing_values_figure(df, all_groups, fmt=fmt, group_of=_gof2,
                                                       palette=ss.get("pca_palette") or None)
-                        st.pyplot(_mfig)
+                        show_figure(_mfig)
                         plt.close(_mfig)
                         ss["report_missing_fig"] = _mfig
                         add_plot_download_buttons(_mfig, base_filename="LFQ_missing_values", key_suffix="lf_missing")

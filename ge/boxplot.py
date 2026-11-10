@@ -21,6 +21,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 
 # Import the centralized helper
 from ge.misc_utility import *
+from figure_utils import show_figure  # draws a figure, then frees it
 # -------------------------------------------------------------------------
 # Shared helpers
 # -------------------------------------------------------------------------
@@ -330,7 +331,7 @@ def create_box_plots(
         legend_text = "Significance Level:  ns (p > 0.05)   * (p ≤ 0.05)   ** (p ≤ 0.01)   *** (p ≤ 0.001)   **** (p ≤ 0.0001)"
         fig.text(0.5, 0.02, legend_text, ha="center", va="bottom", fontsize=12, fontweight="bold", color="black")
 
-        st.pyplot(fig)
+        show_figure(fig)
         pdf.savefig(fig, bbox_inches="tight", dpi=600)
         last_fig = fig
         plt.close(fig)
@@ -490,7 +491,7 @@ def create_box_plots_anova(
         legend_text = "Significance Level:  ns (p > 0.05)   * (p ≤ 0.05)   ** (p ≤ 0.01)   *** (p ≤ 0.001)   **** (p ≤ 0.0001)"
         fig.text(0.5, 0.02, legend_text, ha="center", va="bottom", fontsize=12, fontweight="bold", color="black")
 
-        st.pyplot(fig)
+        show_figure(fig)
         pdf.savefig(fig, bbox_inches="tight")
         last_fig = fig
         plt.close(fig)

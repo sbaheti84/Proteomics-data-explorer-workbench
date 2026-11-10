@@ -39,6 +39,10 @@ LOG = logging.getLogger("workbench")
 
 import streamlit as st
 
+# Imported early so the non-interactive Matplotlib backend is chosen before any
+# plotting code runs. close_all_figures() releases figures left by an earlier run.
+from figure_utils import close_all_figures
+
 
 # =============================================================================
 # SETTINGS (edit these)
@@ -117,6 +121,12 @@ def load_module_safely(module_name: str):
 
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
+
+    # Streamlit re-runs the script on every interaction, and this launcher is
+    # re-executed each time. Drop any figures the previous run left behind before
+    # new ones are drawn, so Matplotlib's figure registry cannot grow without
+    # limit. Figures kept in session state for a report stay usable afterwards.
+    close_all_figures()
 
     try:
         spec.loader.exec_module(module)

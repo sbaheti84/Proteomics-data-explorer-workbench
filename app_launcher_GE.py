@@ -38,6 +38,7 @@ from ge.lollipop import *
 from ge.report_utility import *
 from faq.faq_GE import *
 from ge.waterfall import *
+from figure_utils import show_figure  # draws a figure, then frees it
 
 warnings.filterwarnings("ignore")
 Image.MAX_IMAGE_PIXELS = 500_000_000  # safety
@@ -1277,7 +1278,7 @@ def main():
         (c3, "show_suite", "Statistical Analysis Suite",
          'Pairwise tests, ANOVA or limma, then volcano, waterfall, box, heatmap, lollipop and glycan class plots.', "btn_suite"),
         (c4, "show_report", "Results Download",
-         'Generate a comprehensive PDF report and a ZIP bundle of all tables and figures.', "btn_report"),
+         'Generate a full PDF report and a ZIP bundle of all tables and figures.', "btn_report"),
     ]:
         _col.button(
             ("▾ " if ss.get(_name) else "▸ ") + _label,
@@ -1393,7 +1394,7 @@ def main():
                 n_groups = st.radio(
                     "Number of groups",
                     [2, 3],
-                    help="Choose 3 to unlock the three-group tests (ANOVA or limma F-test).",
+                    help="Choose 3 to enable the three-group tests (ANOVA or limma F-test).",
                     index=0 if ss["global_n_groups_ui"] == 2 else 1,
                     horizontal=True,
                     key="global_n_groups_ui",
@@ -1708,7 +1709,7 @@ def main():
                         palette=ss.get("pca_palette") or None,
                         after_title=f"After: {_method}",
                     )
-                    st.pyplot(_fig)
+                    show_figure(_fig)
                     plt.close(_fig)  # still saved for the report; avoids piling up open figures
                     ss["report_norm_fig"] = _fig
                     add_plot_download_buttons(_fig, base_filename="channel_loading_normalization",

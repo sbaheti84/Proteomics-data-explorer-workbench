@@ -19,6 +19,7 @@ from typing import List, Tuple, Optional
 
 # Import the custom FAQ module
 from faq.faq_GMC import faq_section
+from figure_utils import show_figure  # draws a figure, then frees it
 
 # -----------------------------------------------------------------------------
 # Streamlit page config & CSS
@@ -715,7 +716,7 @@ def main():
     with st.container(border=True):
         st.markdown("#### Theoretical Fragmentation Topology")
         fig = plot_fragmentation(peptide)
-        st.pyplot(fig, use_container_width=False)
+        show_figure(fig, use_container_width=False)
         plt.close(fig)
 
     st.markdown("<br>", unsafe_allow_html=True)

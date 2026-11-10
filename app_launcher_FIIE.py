@@ -31,6 +31,7 @@ import plotly.express as px
 from streamlit.errors import StreamlitAPIException
 
 from faq.faq_FIIE import *
+from figure_utils import show_figure  # draws a figure, then frees it
 # -------------------------------------------------------------------------
 # 1. GLOBAL FONT & MATPLOTLIB SETTINGS
 # -------------------------------------------------------------------------
@@ -546,7 +547,7 @@ def plot_detection_frequency(ion_summary: pd.DataFrame):
     ax.set_ylim(0, 100)
     plt.xticks(rotation=45, ha="right")
     plt.tight_layout()
-    st.pyplot(fig)
+    show_figure(fig)
     plt.close(fig)
 
 
@@ -563,7 +564,7 @@ def plot_confidence_scores(ion_summary: pd.DataFrame):
     ax.set_ylim(0, 1.05)
     plt.xticks(rotation=45, ha="right")
     plt.tight_layout()
-    st.pyplot(fig)
+    show_figure(fig)
     plt.close(fig)
 
 
@@ -597,7 +598,7 @@ def plot_codetection_heatmap(long_df: pd.DataFrame, selected_cols: list):
 
     plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     plt.tight_layout()
-    st.pyplot(fig)
+    show_figure(fig)
     plt.close(fig)
 
 
@@ -633,7 +634,7 @@ def plot_rt_profiles(long_df: pd.DataFrame, selected_cols: list, max_ions: int =
         ax.set_xlabel("Retention Time (min)", fontweight="bold")
         ax.set_ylabel("Intensity", fontweight="bold")
         plt.tight_layout()
-        st.pyplot(fig)
+        show_figure(fig)
         plt.close(fig)
 
 
@@ -748,7 +749,7 @@ def render_professional_fiie_start_panel(upload_disabled: bool = True):
             """
             <div class="fiie-warning-box">
                 No raw data uploaded yet
-                <div class="fiie-warning-box-sub">Please upload an mzML or MGF file to unlock file overview, spectral profiling, and targeted extraction.</div>
+                <div class="fiie-warning-box-sub">Please upload an mzML or MGF file to enable file overview, spectral profiling, and targeted extraction.</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -1117,7 +1118,7 @@ def main():
                                 ax3.set_xlabel(f"# targets detected ({'NF' if use_nf else 'RAW'})", fontweight="bold")
                                 ax3.set_ylabel("Count", fontweight="bold")
                                 plt.tight_layout()
-                                st.pyplot(fig3)
+                                show_figure(fig3)
                                 plt.close(fig3)
                                 st.caption(f"**Total Scans:** {len(nz):,} | **Min:** {int(nz.min())} | **Max:** {int(nz.max())} | **Mean:** {nz.mean():.2f}")
 
@@ -1212,7 +1213,7 @@ def main():
                             export_df.to_csv(index=False).encode('utf-8'), 
                             "fiie_per_spectrum_results.csv",
                             use_container_width=True,
-                            help="Download the comprehensive list of extracted values and metadata before pivoting."
+                            help="Download the full list of extracted values and metadata before pivoting."
                         )
 
                         params = {

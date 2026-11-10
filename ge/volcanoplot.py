@@ -15,6 +15,7 @@ import re
 
 # Import the centralized helper
 from ge.misc_utility import add_plot_download_buttons
+from figure_utils import show_figure  # draws a figure, then frees it
 
 
 def get_glycan_legend_handles():
@@ -554,7 +555,7 @@ def create_volcano_plot(
     )
 
     plt.tight_layout()
-    st.pyplot(fig)
+    show_figure(fig)
 
     add_plot_download_buttons(
         fig,

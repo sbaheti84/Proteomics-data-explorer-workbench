@@ -15,6 +15,7 @@ import streamlit as st
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 from pathlib import Path
+from figure_utils import show_figure  # draws a figure, then frees it
 
 # -------------------------------------------------------------------------
 # Global Matplotlib Settings (Centralized)
@@ -276,7 +277,7 @@ def create_pca_plot(
     plt.legend(title="Group", title_fontsize=12, fontsize=11, loc='upper left', bbox_to_anchor=(1.02, 1))
     plt.tight_layout()
 
-    st.pyplot(fig)
+    show_figure(fig)
     add_plot_download_buttons(fig, "pca_plot")
 
     if pc_df["Outlier"].any():
