@@ -101,7 +101,7 @@ def add_plot_download_buttons(fig, base_filename: str = "plot", key_suffix: str 
             file_name=f"{base_filename}.png",
             mime="image/png",
             key=f"save_png_{base_filename}_{key_suffix}",
-            use_container_width=True
+            width="stretch"
         )
         # Show message if clicked
         if png_clicked:
@@ -115,7 +115,7 @@ def add_plot_download_buttons(fig, base_filename: str = "plot", key_suffix: str 
             file_name=f"{base_filename}.svg",
             mime="image/svg+xml",
             key=f"save_svg_{base_filename}_{key_suffix}",
-            use_container_width=True
+            width="stretch"
         )
         # Show message if clicked
         if svg_clicked:
@@ -283,7 +283,7 @@ def create_pca_plot(
     if pc_df["Outlier"].any():
         out = pc_df.loc[pc_df["Outlier"], ["Sample", "Group", pc_x, pc_y]].sort_values(pc_x, ascending=False)
         st.caption("Outliers detected (check these for loading / normalization / missingness issues):")
-        st.dataframe(out, use_container_width=True, hide_index=True)
+        st.dataframe(out, width="stretch", hide_index=True)
 
     st.session_state["report_pca_fig"] = fig
     return fig
@@ -344,7 +344,16 @@ def loading_boxplot_figure(panels, samples, group_of=None, palette=None, ylabel=
     samples = [s for s in samples if all(s in p.columns for _, p in panels)]
     groups = list(dict.fromkeys(group_of.get(s, "") for s in samples))
     base_cols = ["#8dd3c7", "#fdb462", "#bebada", "#fb8072", "#80b1d3", "#b3de69"]
-    palette = palette or {g: base_cols[i % len(base_cols)] for i, g in enumerate(groups)}
+
+    # A colour for every group that is actually plotted. A palette passed in by
+    # the caller is used where it has an entry, but it can be short of one: the
+    # PCA colour pickers only cover the groups present when that panel was last
+    # drawn, so a group added or renamed afterwards would be missing. Falling
+    # back per group keeps the legend working instead of failing on a lookup.
+    palette = {
+        **{g: base_cols[i % len(base_cols)] for i, g in enumerate(groups)},
+        **(palette or {}),
+    }
 
     first = panels[0][1][samples].apply(pd.to_numeric, errors="coerce")
     complete = first.dropna().index
@@ -374,7 +383,7 @@ def loading_boxplot_figure(panels, samples, group_of=None, palette=None, ylabel=
     axes[-1, 0].set_xticks(range(1, len(samples) + 1))
     axes[-1, 0].set_xticklabels([str(s) for s in samples], rotation=45, ha="right", fontsize=7)
     if groups and any(groups):
-        axes[0, 0].legend(handles=[Patch(facecolor=palette[g], edgecolor="#555555", label=g) for g in groups if g],
+        axes[0, 0].legend(handles=[Patch(facecolor=palette.get(g, "#d9d9d9"), edgecolor="#555555", label=g) for g in groups if g],
                           fontsize=7, frameon=False, loc="upper left", bbox_to_anchor=(1.0, 1.0))
     plt.tight_layout()
     return fig

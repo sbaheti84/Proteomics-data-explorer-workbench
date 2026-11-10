@@ -1749,7 +1749,7 @@ def _hosted_download_button(data, filename, label=None, key_prefix="hosted_downl
         file_name=safe_name,
         mime=_guess_mime_from_filename(safe_name),
         key=f"{key_prefix}_{safe_name}_{uuid.uuid4().hex[:8]}",
-        use_container_width=True,
+        width="stretch",
     )
     st.info("Hosted mode detected: use the browser download button above. Direct server-side saving is disabled.")
     return f"{safe_name} ready for browser download"
@@ -1807,10 +1807,10 @@ def add_hosted_safe_file_download_button(label, data, file_name, key, use_contai
             file_name=safe_name,
             mime=_guess_mime_from_filename(safe_name),
             key=key,
-            use_container_width=use_container_width,
+            width=("stretch" if use_container_width else "content"),
         )
 
-    if st.button(label, key=key, use_container_width=use_container_width):
+    if st.button(label, key=key, width=("stretch" if use_container_width else "content")):
         try:
             outpath = _save_bytes_to_downloads(file_bytes, safe_name)
             st.success(f"Saved to: {outpath}")
@@ -2385,7 +2385,7 @@ def main():
                     })
 
                 meta_df = pd.DataFrame(rows)
-                st.dataframe(meta_df, use_container_width=True, hide_index=True)
+                st.dataframe(meta_df, width="stretch", hide_index=True)
                 add_download_button(
                     meta_df.to_csv(index=False).encode("utf-8"),
                     "sample_metadata_mapping.csv",
@@ -2940,7 +2940,7 @@ def main():
                         _det.insert(2, "Missing (%)", _mt["Missing (%)"].to_numpy())
                         _det = _det.rename(columns={"Factor applied": "Normalization factor",
                                                     "Median log2 after": "Median log2 after processing"})
-                        st.dataframe(_det, hide_index=True, use_container_width=True)
+                        st.dataframe(_det, hide_index=True, width="stretch")
 
             st.divider()
 
@@ -2976,7 +2976,7 @@ def main():
                             if assigned_df.empty:
                                 st.info("No selected samples are assigned to a group yet.")
                             else:
-                                st.dataframe(assigned_df, use_container_width=True, hide_index=True)
+                                st.dataframe(assigned_df, width="stretch", hide_index=True)
 
                     # Updated to mirror the TMT module options (Removed Heatmap, added Sample Clustering)
                     mode = st.radio(
@@ -3279,7 +3279,7 @@ def main():
                         add_plot_download_buttons(_mfig, base_filename="LFQ_missing_values", key_suffix="lf_missing")
                         with st.expander("Missing values per sample (table)", expanded=False):
                             st.dataframe(missing_value_table(df, all_groups, fmt=fmt, group_of=_gof2),
-                                         hide_index=True, use_container_width=True)
+                                         hide_index=True, width="stretch")
                     else:
                         st.info("No samples available.")
                 else:
@@ -4265,7 +4265,7 @@ def main():
                     return zip_buffer.getvalue()
 
                 if "final_pdf_bytes" not in ss:
-                    if st.button("Compile PDF Report", use_container_width=True, type="primary"):
+                    if st.button("Compile PDF Report", width="stretch", type="primary"):
                         with st.spinner("Compiling plots and generating PDF..."):
                             try:
                                 from ge.report_utility import generate_final_pdf

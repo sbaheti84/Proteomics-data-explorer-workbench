@@ -118,11 +118,11 @@ def _plot_elbow_curve(data, max_k=10, checkbox_key="zoom_heatmap"):
     fig.savefig(buf, format="png", dpi=150)
     buf.seek(0)
     thumb = Image.open(buf).resize((250, 200))
-    st.image(thumb, caption="Click to enlarge", use_container_width=False)
+    st.image(thumb, caption="Click to enlarge", width="content")
 
     show_zoom = st.checkbox("Show full-size elbow plot", key=checkbox_key)
     if show_zoom:
-        st.image(buf, caption="Elbow Plot (Zoomed)", use_container_width=True)
+        st.image(buf, caption="Elbow Plot (Zoomed)", width="stretch")
 
     plt.close(fig)
 
@@ -240,13 +240,19 @@ def create_heatmap(
     if cluster_option == "K-Means":
         st.subheader("Elbow Plot to Select Number of Clusters")
         _plot_elbow_curve(df_data, max_k=10, checkbox_key="zoom_standard")
-        selected_k = st.slider(
-            "Select number of clusters (k)",
-            min_value=1,
-            max_value=min(len(df_data), 10),
-            value=min(4, max(1, len(df_data))),
-            key="heatmap_k"
-        )
+        k_max = min(len(df_data), 10)
+        if k_max > 1:
+            selected_k = st.slider(
+                "Select number of clusters (k)",
+                min_value=1,
+                max_value=k_max,
+                value=min(4, k_max),
+                key="heatmap_k"
+            )
+        else:
+            # One row, or none, cannot be split: the slider would have no range.
+            selected_k = 1
+            st.caption("Too few rows to cluster, so they are shown as one group.")
         kmeans = KMeans(n_clusters=selected_k, random_state=42, n_init="auto")
         cluster_labels = kmeans.fit_predict(df_data)
         sorted_idx = pd.Series(cluster_labels, index=df_data.index).sort_values().index
@@ -358,13 +364,19 @@ def create_heatmap_anova(
     if cluster_option == "K-Means":
         st.subheader("Elbow Plot to Select Number of Clusters")
         _plot_elbow_curve(df_data, max_k=10, checkbox_key="zoom_anova")
-        selected_k = st.slider(
-            "Select number of clusters (k)",
-            min_value=1,
-            max_value=min(len(df_data), 10),
-            value=min(4, max(1, len(df_data))),
-            key="heatmap_k_anova"
-        )
+        k_max = min(len(df_data), 10)
+        if k_max > 1:
+            selected_k = st.slider(
+                "Select number of clusters (k)",
+                min_value=1,
+                max_value=k_max,
+                value=min(4, k_max),
+                key="heatmap_k_anova"
+            )
+        else:
+            # One row, or none, cannot be split: the slider would have no range.
+            selected_k = 1
+            st.caption("Too few rows to cluster, so they are shown as one group.")
         kmeans = KMeans(n_clusters=selected_k, random_state=42, n_init="auto")
         cluster_labels = kmeans.fit_predict(df_data)
         sorted_idx = pd.Series(cluster_labels, index=df_data.index).sort_values().index

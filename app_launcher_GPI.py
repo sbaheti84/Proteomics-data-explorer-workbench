@@ -354,7 +354,7 @@ def _browser_download_button(label: str, data, file_name: str, key: str, use_con
         file_name=safe_name,
         mime=mime,
         key=key,
-        use_container_width=use_container_width,
+        width=("stretch" if use_container_width else "content"),
     )
 
 
@@ -1971,7 +1971,7 @@ def render_glycoproteome_first_summary(
                     height=max(420, 20 * len(support)),
                 )
                 fig_support.update_layout(plot_bgcolor="white", paper_bgcolor="white")
-                st.plotly_chart(fig_support, use_container_width=True, config={"displaylogo": False})
+                st.plotly_chart(fig_support, width="stretch", config={"displaylogo": False})
                 add_plotly_download_buttons(fig_support, "glycoproteome_first_top_supported_proteins")
                 add_dataframe_download_buttons(support, "glycoproteome_first_top_supported_proteins", key_suffix="glyco_first_support")
 
@@ -2078,7 +2078,7 @@ def render_glycoproteome_first_summary(
                         xaxis_tickangle=45,
                         margin=dict(l=10, r=10, t=40, b=120),
                     )
-                    st.plotly_chart(fig_glycoform, use_container_width=True, config={"displaylogo": False})
+                    st.plotly_chart(fig_glycoform, width="stretch", config={"displaylogo": False})
                     add_plotly_download_buttons(fig_glycoform, "glycosite_centric_glycoform_map")
 
                     export_cols = [
@@ -2114,7 +2114,7 @@ def render_glycoproteome_first_summary(
                     .sort_values(["significant_glycoforms", "unique_glycan_annotations", "best_metric"], ascending=[False, False, True])
                     .head(50)
                 )
-                st.dataframe(site_diversity, use_container_width=True, hide_index=True)
+                st.dataframe(site_diversity, width="stretch", hide_index=True)
                 add_dataframe_download_buttons(site_diversity, "site_level_glycoform_diversity_summary", key_suffix="site_diversity")
             else:
                 st.info(
@@ -2141,7 +2141,7 @@ def render_glycoproteome_first_summary(
             ] if c and c in view.columns
         ]
         view = view.sort_values(["Glyco_Significant", g_metric_col, g_lfc_col], ascending=[False, True, False], na_position="last")
-        st.dataframe(view[keep_cols].head(300), use_container_width=True, hide_index=True)
+        st.dataframe(view[keep_cols].head(300), width="stretch", hide_index=True)
         add_dataframe_download_buttons(view[keep_cols], "glycoproteome_first_feature_table", key_suffix="glyco_first_features")
 
 
@@ -2212,7 +2212,7 @@ def render_protein_matching_qc(glyco_df: pd.DataFrame, prot_df: pd.DataFrame, me
                     "Rows available for direct glyco-vs-protein fold-change comparison.",
                 ],
             })
-            st.dataframe(qc, use_container_width=True, hide_index=True)
+            st.dataframe(qc, width="stretch", hide_index=True)
             add_dataframe_download_buttons(qc, "gpi_mapping_qc", key_suffix="mapping_qc")
 
     with st.container(border=True):
@@ -2226,7 +2226,7 @@ def render_protein_matching_qc(glyco_df: pd.DataFrame, prot_df: pd.DataFrame, me
             "Glyco-only": _preview_ids(glyco_only),
             "Protein-only": _preview_ids(prot_only),
         })
-        st.dataframe(example_df, use_container_width=True, hide_index=True)
+        st.dataframe(example_df, width="stretch", hide_index=True)
 
 
 def render_protein_normalized_integration_overview(
@@ -2274,7 +2274,7 @@ def render_protein_normalized_integration_overview(
                 height=max(450, 24 * len(counts)),
             )
             fig_counts.update_layout(plot_bgcolor="white", paper_bgcolor="white")
-            st.plotly_chart(fig_counts, use_container_width=True, config={"displaylogo": False})
+            st.plotly_chart(fig_counts, width="stretch", config={"displaylogo": False})
             add_plotly_download_buttons(fig_counts, "gpi_biological_interpretation_distribution")
 
     with right:
@@ -2308,7 +2308,7 @@ def render_protein_normalized_integration_overview(
                 fig_sc.add_hline(y=glyco_lfc_thr, line_dash="dot", line_color="#444")
                 fig_sc.add_hline(y=-glyco_lfc_thr, line_dash="dot", line_color="#444")
                 fig_sc.update_layout(plot_bgcolor="white", paper_bgcolor="white", margin=dict(t=25, b=20, l=10, r=10))
-                st.plotly_chart(fig_sc, use_container_width=True, config={"displaylogo": False})
+                st.plotly_chart(fig_sc, width="stretch", config={"displaylogo": False})
                 add_plotly_download_buttons(fig_sc, "gpi_protein_normalized_scatter")
 
                 cor_df = df_scatter[["log2FC_prot", "log2FC_glyco"]].dropna()
@@ -2339,7 +2339,7 @@ def render_protein_normalized_integration_overview(
             )
             fig_delta.add_vline(x=0, line_dash="dash", line_color="black")
             fig_delta.update_layout(plot_bgcolor="white", paper_bgcolor="white")
-            st.plotly_chart(fig_delta, use_container_width=True, config={"displaylogo": False})
+            st.plotly_chart(fig_delta, width="stretch", config={"displaylogo": False})
             add_plotly_download_buttons(fig_delta, "gpi_protein_normalized_delta_ranking")
 
     with st.container(border=True):
@@ -2373,7 +2373,7 @@ def render_protein_normalized_integration_overview(
             ] if c in view.columns
         ]
         view = view.sort_values("Abs_Protein_Normalized_Delta", ascending=False, na_position="last")
-        st.dataframe(view[cols].head(500), use_container_width=True, hide_index=True)
+        st.dataframe(view[cols].head(500), width="stretch", hide_index=True)
         add_dataframe_download_buttons(view[cols], "gpi_protein_normalized_integrated_table", key_suffix="bio_interpretation_table")
 
     with st.container(border=True):
@@ -2440,7 +2440,7 @@ def render_differential_input_qc(
     with c1:
         with st.container(border=True):
             st.markdown("#### Differential-result summary")
-            st.dataframe(qc, use_container_width=True, hide_index=True)
+            st.dataframe(qc, width="stretch", hide_index=True)
             add_dataframe_download_buttons(qc, "gpi_input_differential_qc", key_suffix="input_diff_qc")
 
             for _, row in qc.iterrows():
@@ -2461,7 +2461,7 @@ def render_differential_input_qc(
     with c2:
         with st.container(border=True):
             st.markdown("#### Intensity scale check")
-            st.dataframe(scale_qc, use_container_width=True, hide_index=True)
+            st.dataframe(scale_qc, width="stretch", hide_index=True)
             add_dataframe_download_buttons(scale_qc, "gpi_intensity_scale_qc", key_suffix="scale_qc")
 
             scales = dict(zip(scale_qc["Dataset"], scale_qc["Inferred scale"]))
@@ -2500,7 +2500,7 @@ def render_differential_input_qc(
             fig.add_vline(x=glyco_lfc_thr, line_dash="dot", line_color="gray")
             fig.add_vline(x=-glyco_lfc_thr, line_dash="dot", line_color="gray")
             fig.update_layout(plot_bgcolor="white", paper_bgcolor="white")
-            st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+            st.plotly_chart(fig, width="stretch", config={"displaylogo": False})
             add_plotly_download_buttons(fig, "gpi_input_log2fc_distribution")
 
 
@@ -2815,10 +2815,10 @@ def render_glycopeptide_volcano(
     fig_vol.add_vline(x=-lfc_thr, line_dash="dash", line_color="gray")
     fig_vol.add_hline(y=-np.log10(alpha), line_dash="dash", line_color="gray")
     fig_vol.update_layout(plot_bgcolor="white", paper_bgcolor="white", margin=dict(t=35, l=45, r=40, b=55))
-    st.plotly_chart(fig_vol, use_container_width=True, config={"displaylogo": False})
+    st.plotly_chart(fig_vol, width="stretch", config={"displaylogo": False})
     add_plotly_download_buttons(fig_vol, "glycopeptide_volcano_interactive")
     show_cols = [c for c in [g_gene_col, g_peptide_col, "Glycosite", g_lfc_col, metric_col, "VolcanoStatus"] if c and c in vdf.columns]
-    st.dataframe(vdf.sort_values(metric_col).head(100)[show_cols], use_container_width=True, hide_index=True)
+    st.dataframe(vdf.sort_values(metric_col).head(100)[show_cols], width="stretch", hide_index=True)
     add_dataframe_download_buttons(vdf[show_cols], "glycopeptide_volcano_table", key_suffix="glycopeptide_volcano")
 
 
@@ -2846,10 +2846,21 @@ def render_evidence_score_landscape(merged_gene: pd.DataFrame):
         st.info("No proteins have both delta and evidence-score values.")
         return
 
+    # The top of the range follows the data, so it has to be checked: if every
+    # evidence score is the same, or zero, the range would be empty and the
+    # slider cannot be drawn.
+    score_cap = (
+        float(np.nanpercentile(plot_df["Evidence_Score"], 99))
+        if plot_df["Evidence_Score"].notna().any()
+        else 1.0
+    )
+    if not np.isfinite(score_cap) or score_cap <= 0.0:
+        score_cap = 1.0
+
     min_score = st.slider(
         "Minimum evidence score to display",
         min_value=0.0,
-        max_value=float(np.nanpercentile(plot_df["Evidence_Score"], 99)) if plot_df["Evidence_Score"].notna().any() else 1.0,
+        max_value=score_cap,
         value=0.0,
         step=0.5,
         key="evidence_score_min_display",
@@ -2881,7 +2892,7 @@ def render_evidence_score_landscape(merged_gene: pd.DataFrame):
     )
     fig.update_layout(plot_bgcolor="white", paper_bgcolor="white")
     fig.add_vline(x=1.0, line_dash="dash", line_color="gray")
-    st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+    st.plotly_chart(fig, width="stretch", config={"displaylogo": False})
     add_plotly_download_buttons(fig, "gpi_evidence_score_landscape")
 
     top_tbl = plot_df.sort_values("Evidence_Score", ascending=False).head(50)
@@ -2890,7 +2901,7 @@ def render_evidence_score_landscape(merged_gene: pd.DataFrame):
         "log2FC_glyco", "log2FC_prot", "Delta_log2FC", "glyco_significant_peptides",
         "glyco_significant_sites", "glyco_consistency", "metric_glyco_best", "metric_prot_best",
     ] if c in top_tbl.columns]
-    st.dataframe(top_tbl[show_cols], use_container_width=True, hide_index=True)
+    st.dataframe(top_tbl[show_cols], width="stretch", hide_index=True)
     add_dataframe_download_buttons(top_tbl[show_cols], "gpi_top_evidence_score_candidates", key_suffix="evidence_score_landscape")
 
 
@@ -2973,7 +2984,7 @@ def render_protein_normalized_glycopeptide_volcano(
     if glyco_alpha > 0:
         fig.add_hline(y=-np.log10(glyco_alpha), line_dash="dot", line_color="gray")
     fig.update_layout(plot_bgcolor="white", paper_bgcolor="white")
-    st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+    st.plotly_chart(fig, width="stretch", config={"displaylogo": False})
     add_plotly_download_buttons(fig, "protein_normalized_glycopeptide_volcano")
 
     help_popover(
@@ -2985,7 +2996,7 @@ def render_protein_normalized_glycopeptide_volcano(
         g_lfc_col, "Total_Protein_log2FC", "Glyco_minus_Protein_log2FC",
         g_metric_col, "Protein_Normalized_Class", "Protein_Context_Interpretation",
     ] if c and c in plot_df.columns]
-    st.dataframe(plot_df.sort_values("neg_log10_metric", ascending=False)[show_cols].head(500), use_container_width=True, hide_index=True)
+    st.dataframe(plot_df.sort_values("neg_log10_metric", ascending=False)[show_cols].head(500), width="stretch", hide_index=True)
     add_dataframe_download_buttons(plot_df[show_cols], "protein_normalized_glycopeptide_table", key_suffix="protein_normalized_volcano")
 
 
@@ -3044,7 +3055,7 @@ def render_global_glycan_composition_summary(
         title="Dominant glycan compositions among glycopeptide calls",
     )
     fig.update_layout(yaxis={"categoryorder": "total ascending"}, plot_bgcolor="white", paper_bgcolor="white")
-    st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False})
+    st.plotly_chart(fig, width="stretch", config={"displaylogo": False})
     add_plotly_download_buttons(fig, "glycan_composition_summary")
 
     summary = (
@@ -3059,7 +3070,7 @@ def render_global_glycan_composition_summary(
         .reset_index()
         .sort_values(["glycopeptide_count", "best_metric"], ascending=[False, True])
     )
-    st.dataframe(summary.head(100), use_container_width=True, hide_index=True)
+    st.dataframe(summary.head(100), width="stretch", hide_index=True)
     add_dataframe_download_buttons(summary, "glycan_composition_summary_table", key_suffix="glycan_composition_summary")
 
 
@@ -3146,7 +3157,7 @@ def render_targeted_site_glycan_matrix(
     help_popover("Asterisks mark glycopeptide rows passing the selected glyco significance and fold-change thresholds. Empty cells mean no observed row for that site/glycan combination.", label="How to read this plot")
 
     export_cols = [c for c in ["Site_Label", "Glycan_Label", g_lfc_col, "Total_Protein_log2FC", "Glyco_minus_Protein_log2FC", g_metric_col, "Significant"] if c in df.columns]
-    st.dataframe(df[export_cols].sort_values(["Site_Label", "Glycan_Label"]), use_container_width=True, hide_index=True)
+    st.dataframe(df[export_cols].sort_values(["Site_Label", "Glycan_Label"]), width="stretch", hide_index=True)
     add_dataframe_download_buttons(df[export_cols], f"{chosen_gene}_site_glycan_matrix_table", key_suffix=f"site_glycan_{chosen_gene}")
 
 def render_professional_gpi_start_panel(upload_disabled: bool = True):
@@ -3518,7 +3529,7 @@ def _hosted_download_button(data, filename, label=None, key_prefix="hosted_downl
         file_name=safe_name,
         mime=_guess_mime_from_filename(safe_name),
         key=f"{key_prefix}_{safe_name}_{uuid.uuid4().hex[:8]}",
-        use_container_width=True,
+        width="stretch",
     )
     st.info("Hosted mode detected: use the browser download button above. Direct server-side saving is disabled.")
     return f"{safe_name} ready for browser download"
@@ -3576,10 +3587,10 @@ def add_hosted_safe_file_download_button(label, data, file_name, key, use_contai
             file_name=safe_name,
             mime=_guess_mime_from_filename(safe_name),
             key=key,
-            use_container_width=use_container_width,
+            width=("stretch" if use_container_width else "content"),
         )
 
-    if st.button(label, key=key, use_container_width=use_container_width):
+    if st.button(label, key=key, width=("stretch" if use_container_width else "content")):
         try:
             outpath = _save_bytes_to_downloads(file_bytes, safe_name)
             st.success(f"Saved to: {outpath}")
@@ -3902,7 +3913,7 @@ def main():
         if preview_n > 0:
             st.dataframe(
                 merged_gene.sort_values("Evidence_Score", ascending=False, na_position="last").head(preview_n),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 height=430,
             )
@@ -4203,7 +4214,7 @@ def main():
                     margin=dict(t=50, l=45, r=150, b=55)
                 )
 
-                st.plotly_chart(fig_wfl, use_container_width=True, config={"displaylogo": False})
+                st.plotly_chart(fig_wfl, width="stretch", config={"displaylogo": False})
                 add_plotly_download_buttons(fig_wfl, "glycopeptide_waterfall_interactive")
 
             # -----------------------------
@@ -4504,7 +4515,7 @@ def main():
                                 g_lfc_col, "Total_Protein_log2FC", "Glyco_minus_Protein_log2FC",
                                 g_metric_col, "Significant", "Evidence_Class"
                             ] if c and c in pe.columns]
-                            st.dataframe(pe[targeted_export_cols], use_container_width=True, hide_index=True)
+                            st.dataframe(pe[targeted_export_cols], width="stretch", hide_index=True)
                             add_dataframe_download_buttons(
                                 pe[targeted_export_cols],
                                 f"{chosen_gene}_glycopeptide_protein_normalized_evidence",
@@ -4531,7 +4542,7 @@ def main():
                             plt.tight_layout()
                             show_figure(fig_ratio)
                             add_plot_download_buttons(fig_ratio, f"{chosen_gene}_log2_ratio")
-                            st.dataframe(ratio_df, use_container_width=True, hide_index=True)
+                            st.dataframe(ratio_df, width="stretch", hide_index=True)
                             add_dataframe_download_buttons(ratio_df, f"{chosen_gene}_relative_ratio_table", key_suffix=f"ratio_{chosen_gene}")
                             ratio_consistency = directional_consistency(ratio_df["log2Ratio"])
                             ratio_cv = ratio_df["log2Ratio"].std() / abs(ratio_df["log2Ratio"].mean()) if ratio_df["log2Ratio"].mean() != 0 else np.nan
@@ -4563,7 +4574,7 @@ def main():
                                 ] if c in gene_row.columns
                             ]
                             summary_download_df = gene_row[summary_cols].T.rename(columns={gene_row.index[0]: "Value"})
-                            st.dataframe(summary_download_df, use_container_width=True)
+                            st.dataframe(summary_download_df, width="stretch")
                             add_dataframe_download_buttons(summary_download_df.reset_index().rename(columns={"index": "Field"}), f"{chosen_gene}_protein_gene_summary", key_suffix=f"summary_{chosen_gene}")
 
                 with tabs[3]:
@@ -4576,10 +4587,10 @@ def main():
                     with st.container(border=True):
                         st.markdown("#### Raw evidence tables")
                         st.markdown("**Glycoproteome rows**")
-                        st.dataframe(glyco_sub, use_container_width=True)
+                        st.dataframe(glyco_sub, width="stretch")
                         add_dataframe_download_buttons(glyco_sub, f"{chosen_gene}_glycoproteome_rows", key_suffix=f"glyco_rows_{chosen_gene}")
                         st.markdown("**Proteome rows**")
-                        st.dataframe(prot_sub, use_container_width=True)
+                        st.dataframe(prot_sub, width="stretch")
                         add_dataframe_download_buttons(prot_sub, f"{chosen_gene}_proteome_rows", key_suffix=f"prot_rows_{chosen_gene}")
 
     # ---------------------------------------------------------------------
@@ -4675,7 +4686,7 @@ def main():
                             "This is not glycan occupancy; it is a relative signal ratio after filtering likely non-glycopeptide rows where annotations permit.", label="How to read this plot"
                         )
                         with st.expander("Per-gene sample consistency table", expanded=False):
-                            st.dataframe(ratio_stats, use_container_width=True, hide_index=True)
+                            st.dataframe(ratio_stats, width="stretch", hide_index=True)
                             add_dataframe_download_buttons(ratio_stats, "relative_ratio_consistency_table", key_suffix="ratio_heatmap_consistency")
 
                 elif vis_choice == "Ratio Consistency Dot Plot":
@@ -4706,10 +4717,10 @@ def main():
                         fig_rc.add_vline(x=0, line_dash="dash", line_color="gray")
                         fig_rc.add_hline(y=0.5, line_dash="dot", line_color="gray")
                         fig_rc.update_layout(plot_bgcolor="white", paper_bgcolor="white")
-                        st.plotly_chart(fig_rc, use_container_width=True, config={"displaylogo": False})
+                        st.plotly_chart(fig_rc, width="stretch", config={"displaylogo": False})
                         add_plotly_download_buttons(fig_rc, "ratio_consistency_dotplot")
                         help_popover("This view flags genes where the average ratio hides sample disagreement. Values near 0.5 mean samples split between up and down.", label="How to read this plot")
-                        st.dataframe(ratio_stats.sort_values(["sample_direction_consistency", "sd_log2Ratio"], ascending=[True, False]), use_container_width=True, hide_index=True)
+                        st.dataframe(ratio_stats.sort_values(["sample_direction_consistency", "sd_log2Ratio"], ascending=[True, False]), width="stretch", hide_index=True)
                         add_dataframe_download_buttons(ratio_stats, "ratio_consistency_table", key_suffix="ratio_consistency")
 
                 elif vis_choice == "Protein/Gene Set Enrichment":
@@ -4744,12 +4755,12 @@ def main():
                         if enrich_df.empty:
                             st.info("No enriched gene sets had at least one overlapping selected gene.")
                         else:
-                            st.dataframe(enrich_df.head(100), use_container_width=True, hide_index=True)
+                            st.dataframe(enrich_df.head(100), width="stretch", hide_index=True)
                             add_dataframe_download_buttons(enrich_df, "gpi_gene_set_enrichment", key_suffix="gene_set_enrichment")
                             top_plot = enrich_df.head(20).copy()
                             top_plot["neg_log10_p"] = -np.log10(top_plot["p_value"].clip(lower=1e-300))
                             fig_en = px.bar(top_plot.iloc[::-1], x="neg_log10_p", y="GeneSet", orientation="h", hover_data=["Overlap", "SetSizeInBackground", "Genes"], labels={"neg_log10_p": "-log10(p-value)", "GeneSet": "Gene set"}, height=max(420, 24 * len(top_plot)))
-                            st.plotly_chart(fig_en, use_container_width=True, config={"displaylogo": False})
+                            st.plotly_chart(fig_en, width="stretch", config={"displaylogo": False})
                             add_plotly_download_buttons(fig_en, "gpi_gene_set_enrichment")
 
                 elif vis_choice == "Discordant Rank Plot":
@@ -4797,7 +4808,7 @@ def main():
                 )
             with col_action:
                 if ss.get("gpi_pdf_bytes") is None:
-                    if st.button("Compile PDF & ZIP Bundle", type="primary", use_container_width=True):
+                    if st.button("Compile PDF & ZIP Bundle", type="primary", width="stretch"):
                         with st.spinner("Generating report bundle..."):
                             figure_pack = generate_standard_figures(
                                 merged_gene, glyco_df, prot_df,
@@ -4834,7 +4845,7 @@ def main():
                             f"GPI_Report_Bundle_{ts}.zip",
                             key_suffix="gpi_zip_bundle",
                         )
-                    if st.button("Regenerate report", use_container_width=True):
+                    if st.button("Regenerate report", width="stretch"):
                         ss["gpi_pdf_bytes"] = None
                         ss["gpi_zip_bytes"] = None
                         st.rerun()

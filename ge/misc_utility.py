@@ -237,7 +237,7 @@ def add_browser_download_button(
         file_name=_safe_filename(file_name),
         mime=mime,
         key=key,
-        use_container_width=use_container_width,
+        width=("stretch" if use_container_width else "content"),
     )
 
 
@@ -258,7 +258,7 @@ def add_direct_save_button(
     if st.button(
         label,
         key=key,
-        use_container_width=use_container_width,
+        width=("stretch" if use_container_width else "content"),
         help="Standalone mode only: save directly to the local Downloads folder.",
     ):
         try:

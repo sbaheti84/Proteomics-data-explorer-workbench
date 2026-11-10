@@ -2005,7 +2005,7 @@ def render_lfq_matrix_panel(df: pd.DataFrame, numeric_cols: list):
             )
 
         st.markdown("<br>", unsafe_allow_html=True)
-        st.dataframe(df, use_container_width=True, height=450)
+        st.dataframe(df, width="stretch", height=450)
 
     st.markdown("<br>", unsafe_allow_html=True)
 
@@ -2376,7 +2376,7 @@ def add_bytes_download_button_tp_lf(
         key=key,
         help=help_text,
         type=type,
-        use_container_width=use_container_width,
+        width=("stretch" if use_container_width else "content"),
     )
     if clicked:
         st.success(f"Downloaded {safe_name}")
@@ -2689,7 +2689,7 @@ def main():
                     if assigned_df.empty:
                         st.info("No selected samples are assigned to a group yet.")
                     else:
-                        st.dataframe(assigned_df, use_container_width=True, hide_index=True)
+                        st.dataframe(assigned_df, width="stretch", hide_index=True)
     # =========================================================================
     # PILLAR 2: PREPROCESSING, QC & OPTIONAL BATCH CORRECTION
     # =========================================================================
@@ -2911,7 +2911,7 @@ def main():
             setup_col, run_col = st.columns([0.35, 0.65])
             with setup_col:
                 if mmeta and mmeta["engine"] == "R":
-                    if st.button("Re-check R setup", use_container_width=True, key="check_naguider_r_lfq",
+                    if st.button("Re-check R setup", width="stretch", key="check_naguider_r_lfq",
                                  help="Run the R package check again (for example after installing a package)."):
                         ok, msg = r_method_status_lfq(imputation_method, refresh=True)
                         method_ready = ok
@@ -2922,7 +2922,7 @@ def main():
                 run_preprocessing = st.button(
                     "Run Normalization + Imputation",
                     type="primary",
-                    use_container_width=True,
+                    width="stretch",
                     key="run_preprocessing_lfq",
                     disabled=not method_ready,
                 )
@@ -3158,7 +3158,7 @@ def main():
                         "Run Batch Correction",
                         type="primary",
                         disabled=not can_run_batch,
-                        use_container_width=True,
+                        width="stretch",
                         key="run_batch_correction_btn_lfq",
                     ):
                         corrected = apply_batch_correction(
@@ -3635,7 +3635,7 @@ def main():
                             "**AveExpr** = mean log2 abundance; **t** = moderated t statistic; "
                             "**q-value** = Benjamini-Hochberg adjusted p-value.", label="Column guide"
                         )
-                st.dataframe(_res, use_container_width=True)
+                st.dataframe(_res, width="stretch")
 
                 with st.expander("📥 Download Full Dataset (Unfiltered)", expanded=False):
                     download_diff_df = ss["diff_results"].copy()
@@ -3750,15 +3750,25 @@ def main():
                                 res["log2FC"].abs() >= ss["volcano_fc_thresh"]
                             )
                             max_annot = int(sig_tmp.sum())
-                            ss["volcano_top_n_annot"] = st.slider(
-                                "Number of significant proteins to annotate in downloaded static plot",
-                                min_value=0,
-                                max_value=max(0, min(max_annot, 100)),
-                                value=min(10, max_annot),
-                                step=1,
-                                key="volcano_top_n_annot_ui",
-                                help="Annotations are applied to the static Matplotlib volcano plot and exported PNG/SVG/PDF."
-                            )
+                            if max_annot > 0:
+                                ss["volcano_top_n_annot"] = st.slider(
+                                    "Number of significant proteins to annotate in downloaded static plot",
+                                    min_value=0,
+                                    max_value=min(max_annot, 100),
+                                    value=min(10, max_annot),
+                                    step=1,
+                                    key="volcano_top_n_annot_ui",
+                                    help="Annotations are applied to the static Matplotlib volcano plot and exported PNG/SVG/PDF."
+                                )
+                            else:
+                                # No protein passes both thresholds, so there is nothing
+                                # to annotate and the slider would have an empty range.
+                                ss["volcano_top_n_annot"] = 0
+                                st.caption(
+                                    "No proteins pass both thresholds, so there is nothing to annotate. "
+                                    "Raise the significance threshold or lower the |log2FC| cutoff to "
+                                    "include some."
+                                )
 
                         elif ss.get("show_waterfall", False):
                             st.markdown("**Waterfall Plot Options**")
@@ -3872,15 +3882,26 @@ def main():
                                 if ss["prof_plot_mode"] == "Single selected protein":
                                     st.selectbox("Search for a Protein:", options=opts, key="pick_gene")
                                 else:
-                                    max_prof_genes = max(1, min(len(sig_gene_opts), 50))
-                                    ss["prof_top_n_genes"] = st.slider(
-                                        "Number of significant proteins to plot",
-                                        min_value=1,
-                                        max_value=max_prof_genes,
-                                        value=min(6, max_prof_genes),
-                                        step=1,
-                                        key="prof_top_n_genes_ui"
-                                    )
+                                    max_prof_genes = min(len(sig_gene_opts), 50)
+                                    if max_prof_genes > 1:
+                                        ss["prof_top_n_genes"] = st.slider(
+                                            "Number of significant proteins to plot",
+                                            min_value=1,
+                                            max_value=max_prof_genes,
+                                            value=min(6, max_prof_genes),
+                                            step=1,
+                                            key="prof_top_n_genes_ui"
+                                        )
+                                    else:
+                                        # One protein or none leaves the slider nothing to
+                                        # choose between, and its range would be empty.
+                                        ss["prof_top_n_genes"] = max_prof_genes
+                                        st.caption(
+                                            "Only one protein is significant, so it is plotted on its own."
+                                            if max_prof_genes == 1 else
+                                            "No proteins are significant at the current thresholds, so "
+                                            "there is nothing to plot."
+                                        )
                                     st.caption("Top proteins are selected by the chosen significance metric and exported as a multi-page PDF.")
 
                 # --- RIGHT PANEL ---
@@ -3970,7 +3991,7 @@ def main():
                                     test_label=test_label,
                                 )
 
-                                st.plotly_chart(fig, use_container_width=True)
+                                st.plotly_chart(fig, width="stretch")
                                 add_plotly_html_download_button_tp_lf(fig, "lfq_total_protein_volcano_interactive", "volcano_interactive")
 
                             else:
@@ -4038,7 +4059,7 @@ def main():
                                 numbered_wf_table = wf_label_df[display_cols].copy()
                                 st.dataframe(
                                     numbered_wf_table,
-                                    use_container_width=True,
+                                    width="stretch",
                                     hide_index=True,
                                 )
 
@@ -4102,7 +4123,7 @@ def main():
                                         test_label=test_label,
                                     )
 
-                                    st.plotly_chart(fig, use_container_width=True)
+                                    st.plotly_chart(fig, width="stretch")
                                     add_plotly_html_download_button_tp_lf(fig, "ma_plot_interactive", "ma_interactive")
 
                                 else:
@@ -4450,7 +4471,7 @@ def main():
                 if "final_pdf_bytes" not in ss:
                     if st.button(
                         "Compile PDF Report & ZIP Bundle",
-                        use_container_width=True,
+                        width="stretch",
                         type="primary",
                         help="Generate a PDF document and ZIP bundle containing all currently selected plots and parameters.",
                     ):
@@ -4522,7 +4543,7 @@ def main():
 
                     if st.button(
                         "Regenerate Report",
-                        use_container_width=True,
+                        width="stretch",
                         help="Discard the current report and generate a new one with updated data/plots.",
                         key="regenerate_final_report",
                     ):

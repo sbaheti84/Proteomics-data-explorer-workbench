@@ -344,7 +344,7 @@ def add_download_button(
         if st.button(
             label=label or f"Save {safe_name}",
             key=button_key,
-            use_container_width=use_container_width,
+            width=("stretch" if use_container_width else "content"),
             help=help,
             type=type,
         ):
@@ -369,7 +369,7 @@ def add_download_button(
         file_name=safe_name,
         mime=mime or guess_mime(safe_name),
         key=button_key,
-        use_container_width=use_container_width,
+        width=("stretch" if use_container_width else "content"),
         help=help,
         type=type,
     )

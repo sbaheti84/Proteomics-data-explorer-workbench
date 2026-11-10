@@ -107,7 +107,7 @@ def save_bytes_to_downloads(data, filename: str) -> Path:
             file_name=filename,
             mime="application/octet-stream",
             key=f"hosted_download_{filename}_{uuid.uuid4().hex[:8]}",
-            use_container_width=True,
+            width="stretch",
         )
         st.info("Hosted mode detected: use the browser download button above. Direct server-side saving is disabled.")
         return Path(f"browser_download_ready/{filename}")
@@ -171,7 +171,7 @@ def add_figure_download_buttons_common(
     def _button(label, data, filename, mime, key, help_text):
         # Hosted/RConnect must always use browser download; direct save would write to server.
         if save_to_downloads and not is_hosted_mode():
-            clicked = st.button(label, key=key, use_container_width=True, help=help_text)
+            clicked = st.button(label, key=key, width="stretch", help=help_text)
             if clicked:
                 try:
                     outpath = save_bytes_to_downloads(data, filename)
@@ -185,7 +185,7 @@ def add_figure_download_buttons_common(
                 file_name=filename,
                 mime=mime,
                 key=key,
-                use_container_width=True,
+                width="stretch",
                 help=help_text,
             )
             if clicked:
@@ -251,7 +251,7 @@ def add_plotly_html_download_button_common(
         if st.button(
             "Download Interactive HTML",
             key=key,
-            use_container_width=True,
+            width="stretch",
             help="Save the interactive Plotly figure to your local Downloads folder.",
         ):
             try:
@@ -266,7 +266,7 @@ def add_plotly_html_download_button_common(
             file_name=filename,
             mime="text/html",
             key=key,
-            use_container_width=True,
+            width="stretch",
         )
         if clicked:
             st.success(f"Downloaded {filename}")

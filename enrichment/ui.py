@@ -293,7 +293,7 @@ def render_pathway_enrichment(results, app_key: str, glyco: bool = False) -> Non
             color = "Glycan group"
         fig = _bar_chart(shown if not shown.empty else table, ORA if s["method"] == "ORA" else GSEA, top_n, color)
         if fig is not None:
-            st.plotly_chart(fig, use_container_width=True, key=k("plot"))
+            st.plotly_chart(fig, width="stretch", key=k("plot"))
 
         from download_utility import add_dataframe_download_buttons, add_plotly_download_buttons
         st.markdown("###### Download")

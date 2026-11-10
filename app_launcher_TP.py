@@ -1217,7 +1217,7 @@ def add_figure_download_buttons_tp(fig, base_filename: str, key_suffix: str = ""
             file_name=f"{base_filename}.png",
             mime="image/png",
             key=f"save_png_{base_filename}_{key_suffix}",
-            use_container_width=True
+            width="stretch"
         )
         if png_clicked:
             st.success(f"Downloaded {base_filename}.png")
@@ -1229,7 +1229,7 @@ def add_figure_download_buttons_tp(fig, base_filename: str, key_suffix: str = ""
             file_name=f"{base_filename}.svg",
             mime="image/svg+xml",
             key=f"save_svg_{base_filename}_{key_suffix}",
-            use_container_width=True
+            width="stretch"
         )
         if svg_clicked:
             st.success(f"Downloaded {base_filename}.svg")
@@ -1242,7 +1242,7 @@ def add_figure_download_buttons_tp(fig, base_filename: str, key_suffix: str = ""
                 file_name=f"{base_filename}.pdf",
                 mime="application/pdf",
                 key=f"save_pdf_{base_filename}_{key_suffix}",
-                use_container_width=True
+                width="stretch"
             )
             if pdf_clicked:
                 st.success(f"Downloaded {base_filename}.pdf")
@@ -1268,7 +1268,7 @@ def add_plotly_html_download_button_tp(fig, base_filename: str, key_suffix: str 
         file_name=f"{base_filename}.html",
         mime="text/html",
         key=f"save_html_{base_filename}_{key_suffix}",
-        use_container_width=True
+        width="stretch"
     )
     if html_clicked:
         st.success(f"Downloaded {base_filename}.html")
@@ -1297,7 +1297,7 @@ def add_bytes_download_button_tp(
         key=key,
         help=help_text,
         type=type,
-        use_container_width=True,
+        width="stretch",
     )
     if clicked:
         st.success(f"Downloaded {safe_name}")
@@ -2178,7 +2178,7 @@ def render_uploaded_matrix_panel(df: pd.DataFrame, numeric_cols: list, downstrea
             add_download_button(excel_bytes, "uploaded_proteomics_data.xlsx", label="Download Excel", key="save_uploaded_excel", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
         st.markdown("<br>", unsafe_allow_html=True)
-        st.dataframe(df, use_container_width=True, height=450)
+        st.dataframe(df, width="stretch", height=450)
 
 
 def render_navigation_buttons() -> None:
@@ -2609,7 +2609,7 @@ def _hosted_download_button(data, filename, label=None, key_prefix="hosted_downl
         file_name=safe_name,
         mime=_guess_mime_from_filename(safe_name),
         key=f"{key_prefix}_{safe_name}_{uuid.uuid4().hex[:8]}",
-        use_container_width=True,
+        width="stretch",
     )
     st.info("Hosted mode detected: use the browser download button above. Direct server-side saving is disabled.")
     return f"{safe_name} ready for browser download"
@@ -2678,7 +2678,7 @@ def add_hosted_safe_file_download_button(
             key=key,
             help=help_text,
             type=type,
-            use_container_width=use_container_width,
+            width=("stretch" if use_container_width else "content"),
         )
 
     if st.button(
@@ -2686,7 +2686,7 @@ def add_hosted_safe_file_download_button(
         key=key,
         help=help_text,
         type=type,
-        use_container_width=use_container_width,
+        width=("stretch" if use_container_width else "content"),
     ):
         try:
             outpath = _save_bytes_to_downloads(file_bytes, safe_name)
@@ -2943,7 +2943,7 @@ def main():
                     if assigned_df.empty:
                         st.info("No selected samples are assigned to a group yet.")
                     else:
-                        st.dataframe(assigned_df, use_container_width=True, hide_index=True)
+                        st.dataframe(assigned_df, width="stretch", hide_index=True)
 
     # =========================================================================
     # PILLAR 2: DATA INTEGRITY CHECK & SANITY PROFILING
@@ -3943,7 +3943,7 @@ def main():
                             "whole compared group. They are listed at the bottom. Tick *Replace 0/NA* and re-run "
                             "to test them with filled-in values."
                         )
-                st.dataframe(ss["diff_results"], use_container_width=True)
+                st.dataframe(ss["diff_results"], width="stretch")
                 
                 with st.expander("Download Full Dataset (Unfiltered)", expanded=False):
                     download_diff_df = ss["diff_results"].copy()
@@ -4055,15 +4055,25 @@ def main():
                                 res["log2FC"].abs() >= ss["volcano_fc_thresh"]
                             )
                             max_annot = int(sig_tmp.sum())
-                            ss["volcano_top_n_annot"] = st.slider(
-                                "Number of significant proteins to annotate in downloaded static plot",
-                                min_value=0,
-                                max_value=max(0, min(max_annot, 100)),
-                                value=min(10, max_annot),
-                                step=1,
-                                key="volcano_top_n_annot_ui",
-                                help="Annotations are applied to the static Matplotlib volcano plot and exported PNG/SVG/PDF."
-                            )
+                            if max_annot > 0:
+                                ss["volcano_top_n_annot"] = st.slider(
+                                    "Number of significant proteins to annotate in downloaded static plot",
+                                    min_value=0,
+                                    max_value=min(max_annot, 100),
+                                    value=min(10, max_annot),
+                                    step=1,
+                                    key="volcano_top_n_annot_ui",
+                                    help="Annotations are applied to the static Matplotlib volcano plot and exported PNG/SVG/PDF."
+                                )
+                            else:
+                                # No protein passes both thresholds, so there is nothing
+                                # to annotate and the slider would have an empty range.
+                                ss["volcano_top_n_annot"] = 0
+                                st.caption(
+                                    "No proteins pass both thresholds, so there is nothing to annotate. "
+                                    "Raise the significance threshold or lower the |log2FC| cutoff to "
+                                    "include some."
+                                )
 
                         elif ss.get("show_waterfall", False):
                             st.markdown("**Waterfall Plot Options**")
@@ -4177,15 +4187,26 @@ def main():
                                 if ss["prof_plot_mode"] == "Single selected protein":
                                     st.selectbox("Search for a Protein:", options=opts, key="pick_gene")
                                 else:
-                                    max_prof_genes = max(1, min(len(sig_gene_opts), 50))
-                                    ss["prof_top_n_genes"] = st.slider(
-                                        "Number of significant proteins to plot",
-                                        min_value=1,
-                                        max_value=max_prof_genes,
-                                        value=min(6, max_prof_genes),
-                                        step=1,
-                                        key="prof_top_n_genes_ui"
-                                    )
+                                    max_prof_genes = min(len(sig_gene_opts), 50)
+                                    if max_prof_genes > 1:
+                                        ss["prof_top_n_genes"] = st.slider(
+                                            "Number of significant proteins to plot",
+                                            min_value=1,
+                                            max_value=max_prof_genes,
+                                            value=min(6, max_prof_genes),
+                                            step=1,
+                                            key="prof_top_n_genes_ui"
+                                        )
+                                    else:
+                                        # One protein or none leaves the slider nothing to
+                                        # choose between, and its range would be empty.
+                                        ss["prof_top_n_genes"] = max_prof_genes
+                                        st.caption(
+                                            "Only one protein is significant, so it is plotted on its own."
+                                            if max_prof_genes == 1 else
+                                            "No proteins are significant at the current thresholds, so "
+                                            "there is nothing to plot."
+                                        )
                                     st.caption("Top proteins are selected by the chosen significance metric and exported as a multi-page PDF.")
 
                 # --- RIGHT PANEL ---
@@ -4273,7 +4294,7 @@ def main():
                                     control_label=control_label,
                                     test_label=test_label,
                                 )
-                                st.plotly_chart(fig, use_container_width=True)
+                                st.plotly_chart(fig, width="stretch")
                                 add_plotly_html_download_button_tp(
                                     fig,
                                     "total_protein_volcano_interactive",
@@ -4347,7 +4368,7 @@ def main():
                                 numbered_wf_table = wf_label_df[display_cols].copy()
                                 st.dataframe(
                                     numbered_wf_table,
-                                    use_container_width=True,
+                                    width="stretch",
                                     hide_index=True,
                                 )
 
@@ -4397,7 +4418,7 @@ def main():
                                         control_label=control_label,
                                         test_label=test_label,
                                     )
-                                    st.plotly_chart(fig, use_container_width=True)
+                                    st.plotly_chart(fig, width="stretch")
                                     add_plotly_html_download_button_tp(
                                         fig,
                                         "ma_plot_interactive",
@@ -4821,7 +4842,7 @@ def main():
                     return zip_buffer.getvalue()
 
                 if "final_pdf_bytes" not in ss:
-                    if st.button("Compile PDF Report & ZIP Bundle", use_container_width=True, type="primary", help="Generate a PDF document and ZIP bundle containing all currently selected plots and parameters."):
+                    if st.button("Compile PDF Report & ZIP Bundle", width="stretch", type="primary", help="Generate a PDF document and ZIP bundle containing all currently selected plots and parameters."):
                         with st.spinner("Compiling plots and generating PDF... this may take a moment."):
                             try:
                                 from tp.report_utility import generate_final_pdf
@@ -4883,7 +4904,7 @@ def main():
 
                     if st.button(
                         "Regenerate Report",
-                        use_container_width=True,
+                        width="stretch",
                         help="Discard the current report and generate a new one with updated data and plots.",
                         key="regenerate_final_report",
                     ):

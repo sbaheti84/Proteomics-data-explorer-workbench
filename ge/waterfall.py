@@ -423,7 +423,7 @@ def render_ge_structural_waterfall(
             paper_bgcolor="white",
             margin=dict(t=45, l=20, r=110, b=45),
         )
-        st.plotly_chart(fig_wfl, use_container_width=True)
+        st.plotly_chart(fig_wfl, width="stretch")
 
     with col_table:
         if label_df.empty:

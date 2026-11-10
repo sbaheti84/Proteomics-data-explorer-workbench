@@ -126,7 +126,7 @@ def show_grid(df, page_size=20, height=500):
             theme="material",
         )
     else:
-        st.dataframe(df, use_container_width=True, height=height)
+        st.dataframe(df, width="stretch", height=height)
 
 def df_is_nonempty(df):
     return isinstance(df, pd.DataFrame) and not df.empty

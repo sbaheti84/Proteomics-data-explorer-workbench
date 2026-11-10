@@ -808,7 +808,7 @@ def _hosted_download_button(data, filename, label=None, key_prefix="hosted_downl
         file_name=safe_name,
         mime=_guess_mime_from_filename(safe_name),
         key=f"{key_prefix}_{safe_name}_{uuid.uuid4().hex[:8]}",
-        use_container_width=True,
+        width="stretch",
     )
     st.info("Hosted mode detected: use the browser download button above. Direct server-side saving is disabled.")
     return f"{safe_name} ready for browser download"
@@ -866,10 +866,10 @@ def add_hosted_safe_file_download_button(label, data, file_name, key, use_contai
             file_name=safe_name,
             mime=_guess_mime_from_filename(safe_name),
             key=key,
-            use_container_width=use_container_width,
+            width=("stretch" if use_container_width else "content"),
         )
 
-    if st.button(label, key=key, use_container_width=use_container_width):
+    if st.button(label, key=key, width=("stretch" if use_container_width else "content")):
         try:
             outpath = _save_bytes_to_downloads(file_bytes, safe_name)
             st.success(f"Saved to: {outpath}")
@@ -1725,12 +1725,12 @@ def main():
                         st.dataframe(
                             ge_loading_summary(_raw, _norm if _norm is not None else _raw, _cols, fmt=fmt,
                                                group_of=_group_of, factors=ss.get("ge_norm_factors")),
-                            hide_index=True, use_container_width=True,
+                            hide_index=True, width="stretch",
                         )
                         if not _offs.empty:
                             st.markdown("**Group offsets before normalization** (a group-wide offset shifts "
                                         "every log2FC of that group by about this much)")
-                            st.dataframe(_offs, hide_index=True, use_container_width=True)
+                            st.dataframe(_offs, hide_index=True, width="stretch")
 
             st.divider()
 

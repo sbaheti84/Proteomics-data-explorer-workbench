@@ -372,7 +372,7 @@ def create_pca_plot(
             .reset_index(drop=True)
         )
         st.caption("Outliers detected. Check these samples for loading, normalization, missingness, or batch effects.")
-        st.dataframe(outlier_table, use_container_width=True, hide_index=True)
+        st.dataframe(outlier_table, width="stretch", hide_index=True)
 
     st.session_state["report_pca_fig"] = fig
     st.session_state["report_pca_scores"] = pc_df
@@ -706,7 +706,7 @@ def create_sample_clustering(
     })
 
     with st.expander("Clustered sample order", expanded=False):
-        st.dataframe(order_df, use_container_width=True, hide_index=True)
+        st.dataframe(order_df, width="stretch", hide_index=True)
 
     st.session_state["report_sample_clustering_fig"] = fig
     st.session_state["report_sample_clustering_order"] = order_df
@@ -849,7 +849,7 @@ def create_glycan_class_summary(df: pd.DataFrame, glycan_col: str = "GlycanClass
         st.dataframe(
             summary_df,
             hide_index=True,
-            use_container_width=True,
+            width="stretch",
             height=min(35 * (len(summary_df) + 1) + 3, 360),
             column_config={
                 "Count": st.column_config.NumberColumn("Glycoforms", format="%d"),
@@ -1002,7 +1002,7 @@ def render_glycan_class_breakdown(plot_df: pd.DataFrame, is_anova: bool, sig_col
         plot_bgcolor="white",
     )
     fig.update_traces(textposition="inside")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
     help_popover(
         "Enrichment: one-sided Fisher's exact test of whether a class holds more significant glycoforms than "
@@ -1012,7 +1012,7 @@ def render_glycan_class_breakdown(plot_df: pd.DataFrame, is_anova: bool, sig_col
     show_cols = ["Class", "Glycoforms"] + [c for c in table.columns if c.endswith("(n)") or c.endswith("% of class)") or c.endswith("enrichment q")]
     st.dataframe(
         table[show_cols].style.format({c: "{:.3g}" for c in show_cols if c.endswith("enrichment q")}),
-        use_container_width=True, hide_index=True,
+        width="stretch", hide_index=True,
     )
     csv_bytes = table.to_csv(index=False).encode("utf-8")
     csv_name = f"glycan_{'class' if group_by == 'Glycan class' else 'trait'}_breakdown.csv"

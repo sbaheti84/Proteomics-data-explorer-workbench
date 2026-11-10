@@ -760,20 +760,20 @@ def main():
 
         with tabs[0]:
             st.markdown("**Unmodified Peptide Fragments**")
-            st.dataframe(df_backbone, use_container_width=True, hide_index=True)
+            st.dataframe(df_backbone, width="stretch", hide_index=True)
 
         with tabs[1]:
             st.markdown("**Site-Specific Backbone + HexNAc Modification**")
-            st.dataframe(df_stub, use_container_width=True, hide_index=True)
+            st.dataframe(df_stub, width="stretch", hide_index=True)
 
         with tabs[2]:
             st.markdown("**Y-ion Series (Peptide + Truncated Glycan)**")
             st.caption(f"Calculated unique fragments: {c_total} (With Fucose: {c_with} | Without: {c_without})")
-            st.dataframe(df_frag, use_container_width=True, hide_index=True)
+            st.dataframe(df_frag, width="stretch", hide_index=True)
 
         with tabs[3]:
             st.markdown("**Diagnostic Oxonium Reporter Ions**")
-            st.dataframe(df_ox, use_container_width=True, hide_index=True)
+            st.dataframe(df_ox, width="stretch", hide_index=True)
 
     # ============================================================
     # Export Module
@@ -803,7 +803,7 @@ def main():
                 label="Download Skyline Matrix (Excel)", 
                 data=excel_data, 
                 file_name=file_name,
-                use_container_width=True,
+                width="stretch",
                 type="primary",
                 help="Compile and export the in-silico transition lists for all backbone, stub, Y-ion, and oxonium fragments."
             )

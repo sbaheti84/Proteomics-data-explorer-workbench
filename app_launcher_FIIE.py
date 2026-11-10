@@ -922,11 +922,11 @@ def main():
             if meta_df.empty:
                 st.info("No spectra found for the current filter.")
             else:
-                st.dataframe(meta_df, use_container_width=True, height=420)
+                st.dataframe(meta_df, width="stretch", height=420)
                 
                 with st.expander("Available Metadata Columns"):
                     col_df = pd.DataFrame({"Column": list(meta_df.columns)})
-                    st.dataframe(col_df, use_container_width=True)
+                    st.dataframe(col_df, width="stretch")
                     st.download_button("Download column list (CSV)", col_df.to_csv(index=False), "metadata_columns.csv", mime="text/csv")
 
 
@@ -978,11 +978,11 @@ def main():
                         # Plotly Chart
                         fig = px.line(x=mzs, y=ints, labels={"x": "m/z", "y": "Intensity"})
                         fig.update_layout(font=dict(family="Arial", size=12), margin=dict(t=10, b=20, l=20, r=20), height=350)
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, width="stretch")
                         
                         # Top-N Table
                         df_spec = pd.DataFrame({"m/z": mzs, "Intensity": ints})
-                        st.dataframe(df_spec.sort_values("Intensity", ascending=False).head(n_peaks_preview), use_container_width=True)
+                        st.dataframe(df_spec.sort_values("Intensity", ascending=False).head(n_peaks_preview), width="stretch")
                         st.markdown("---")
                         plotted += 1
 
@@ -1005,7 +1005,7 @@ def main():
                 with st.container(border=True):
                     st.markdown("#### Extracted Per-Spectrum Data (Metadata + Query Ions)")
                     export_df = build_export_table(long_df, include_nf=True)
-                    st.dataframe(export_df.head(200), use_container_width=True)
+                    st.dataframe(export_df.head(200), width="stretch")
 
                 st.markdown("<br>", unsafe_allow_html=True)
                 
@@ -1100,7 +1100,7 @@ def main():
                     with col_mat:
                         with st.container(border=True):
                             st.markdown(f"#### Quantitative Pivot Matrix ({'Filtered' if use_nf else 'Raw'})")
-                            st.dataframe(out.head(150), use_container_width=True)
+                            st.dataframe(out.head(150), width="stretch")
                     
                     with col_plot:
                         with st.container(border=True):
@@ -1144,14 +1144,14 @@ def main():
                             if scan_summary.empty:
                                 st.info("No run-level summary available.")
                             else:
-                                st.dataframe(scan_summary, use_container_width=True, hide_index=True)
+                                st.dataframe(scan_summary, width="stretch", hide_index=True)
 
                         with s2:
                             st.markdown("**Ion Summary Table**")
                             if ion_summary.empty:
                                 st.info("No ion summary available.")
                             else:
-                                st.dataframe(ion_summary, use_container_width=True, height=320, hide_index=True)
+                                st.dataframe(ion_summary, width="stretch", height=320, hide_index=True)
 
                         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -1186,7 +1186,7 @@ def main():
                                 st.markdown("**Top ions**")
                                 st.dataframe(
                                     ion_summary.head(5)[[c for c in ["Ion", "Detection_%", "Confidence_Label", "Annotation"] if c in ion_summary.columns]],
-                                    use_container_width=True,
+                                    width="stretch",
                                     hide_index=True,
                                 )
 
