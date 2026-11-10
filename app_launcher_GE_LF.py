@@ -344,6 +344,7 @@ ss.setdefault("waterfall_logfc", 1.0)
 ss.setdefault("waterfall_topn", 5)
 ss.setdefault("pca_hide_outliers", False)
 ss.setdefault("pca_label_outliers", True)
+ss.setdefault("pca_label_all_samples", False)
 ss.setdefault("pca_zoom_q", 1.0)
 ss.setdefault("cluster_palette", {})
 
@@ -944,7 +945,7 @@ def compute_diffexp(
         "Not Significant": 2
     }).fillna(3)
 
-    base_cols = ["Peptide", "Glycan", "Genes", "Proteins", "ProSites", "GlycanClass"]
+    base_cols = ["Feature_ID", "Peptide", "Glycan", "Genes", "Proteins", "ProSites", "GlycanClass"]
     stats_cols = [control_label, test_label, "log2FC", "p-value", "q-value", "Regulation"]
     debug_cols = ["__row_min_pos__", "__impute_fill__", "__zeros_or_na_before__", "__zeros_or_na_after__"] if add_debug_cols else []
     
@@ -1032,10 +1033,10 @@ def compute_diffexp_anova(
     df["q-value"] = df["adj.p-value"]
     df["Regulation"] = np.where(df["q-value"] < 0.05, "Significant", "Not Significant")
     
-    base_cols = ["Peptide", "Glycan", "Genes", "Proteins", "ProSites", "GlycanClass"]
+    base_cols = ["Feature_ID", "Peptide", "Glycan", "Genes", "Proteins", "ProSites", "GlycanClass"]
     keep = (
-        [c for c in base_cols if c in df.columns] + 
-        [group1_label, group2_label, group3_label, "p-value", "q-value", "Regulation"] + 
+        [c for c in base_cols if c in df.columns] +
+        [group1_label, group2_label, group3_label, "p-value", "q-value", "Regulation"] +
         all_cols
     )
     return df.sort_values("adj.p-value", na_position="last")[keep]
@@ -1953,11 +1954,14 @@ def main():
                         st.stop()
 
                     merged = build_label_free_matrix_from_pglyco(
-                        pglyco_df, 
-                        species=species, 
+                        pglyco_df,
+                        species=species,
                         version_label=version_label
                     )
-                    
+                    # Row key carried into every downstream table, so results can
+                    # be traced back to this table.
+                    merged = add_feature_id(merged)
+
                     ss["merged_df"] = merged
                     ss["raw_merged_df"] = merged.copy()
                     ss["merged_ready"] = True
@@ -1984,6 +1988,9 @@ def main():
                         if merged.empty:
                             st.error("No valid glycopeptides found after parsing the uploaded files.")
                         else:
+                            # Row key carried into every downstream table.
+                            merged = add_feature_id(merged)
+
                             ss["merged_df"] = merged
                             ss["raw_merged_df"] = merged.copy()
                             ss["merged_ready"] = True
@@ -3069,6 +3076,11 @@ def main():
                                 "Label outliers", value=True, key="pca_label_outliers_ui",
                                 help="Add sample names next to detected outliers."
                             )
+                        ss["pca_label_all_samples"] = st.checkbox(
+                            "Label every sample", value=False, key="pca_label_all_ui",
+                            help="Name every point, not just the outliers. Use this to see whether a "
+                                 "sample sits with a group it was not assigned to."
+                        )
                         ss["pca_zoom_q"] = st.slider(
                             "Zoom view", min_value=0.80, max_value=1.00, value=1.00, step=0.01,
                             key="pca_zoom_q_ui",
@@ -3170,6 +3182,9 @@ def main():
                             ),
                             label_outliers=ss.get(
                                 "pca_label_outliers", True
+                            ),
+                            label_all_samples=ss.get(
+                                "pca_label_all_samples", False
                             ),
                             zoom_q=ss.get("pca_zoom_q", 1.0),
                             palette=ss.get("pca_palette", None),

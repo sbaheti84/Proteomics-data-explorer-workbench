@@ -42,6 +42,38 @@ def clean_key_cols(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
                      .str.replace(r"\s+", " ", regex=True))
     return df
 
+
+FEATURE_ID_COL = "Feature_ID"
+
+
+def add_feature_id(df: pd.DataFrame, prefix: str = "GP", column: str = FEATURE_ID_COL) -> pd.DataFrame:
+    """
+    Put a short unique row identifier in the first column of a merged table.
+
+    Every downstream table keeps this column, so a row in the differential
+    expression results can be traced back to the row of the merged table it came
+    from. Without it the only way to match the two is to compare peptide, glycan,
+    gene, protein and site together.
+
+    Identifiers look like GP000001 and follow the row order of the merged table.
+    They are text rather than numbers, so they are never mistaken for an
+    abundance column and Excel will not reformat them.
+
+    Re-merging the same files gives the same identifiers. Merging a different
+    file, or a different version of one, does not, so compare tables from the
+    same merge.
+    """
+    if df is None or getattr(df, "empty", True):
+        return df
+
+    out = df.drop(columns=[column], errors="ignore").copy()
+
+    width = max(6, len(str(len(out))))
+    out.insert(0, column, [f"{prefix}{i:0{width}d}" for i in range(1, len(out) + 1)])
+
+    return out
+
+
 # -----------------------------------------------------------------------------
 # Merge pGlyco + PD
 # -----------------------------------------------------------------------------

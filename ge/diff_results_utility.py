@@ -90,7 +90,7 @@ def compute_diffexp(df: pd.DataFrame,
     df["reg_sort"] = df["Regulation"].map(regulation_order)
     sorted_df = df.sort_values(by=["reg_sort", "adj.p-value"], ascending=[True, True]).drop(columns="reg_sort")
 
-    metadata_cols = ["Peptide", "Glycan", "Genes", "Proteins", "ProSites", "GlycanClass"]
+    metadata_cols = ["Feature_ID", "Peptide", "Glycan", "Genes", "Proteins", "ProSites", "GlycanClass"]
     computed_cols = [control_label, test_label, "log2FC", "p-value", "q-value", "Regulation"]
     keep_cols = [c for c in metadata_cols if c in df.columns] + computed_cols + control_cols + test_cols
     
@@ -168,7 +168,7 @@ def compute_diffexp_anova(df: pd.DataFrame,
             for ridx, pval in values:
                 df.loc[ridx, col] = pval
 
-    metadata_cols = ["Peptide", "Glycan", "Genes", "Proteins", "ProSites", "GlycanClass"]
+    metadata_cols = ["Feature_ID", "Peptide", "Glycan", "Genes", "Proteins", "ProSites", "GlycanClass"]
     computed_cols = [group1_label, group2_label, group3_label, "p-value", "q-value", "Regulation"] + \
                     [c for c in df.columns if c.startswith("Tukey_")]
     keep_cols = [c for c in metadata_cols if c in df.columns] + computed_cols + group1_cols + group2_cols + group3_cols
@@ -466,7 +466,7 @@ def compute_diffexp_limma(df: pd.DataFrame,
     df = df.sort_values(by=["reg_sort", "adj.p-value"], ascending=[True, True],
                         na_position="last").drop(columns="reg_sort")
 
-    metadata_cols = ["Peptide", "Glycan", "Genes", "Proteins", "ProSites", "GlycanClass"]
+    metadata_cols = ["Feature_ID", "Peptide", "Glycan", "Genes", "Proteins", "ProSites", "GlycanClass"]
     computed_cols = [control_label, test_label, "log2FC", "AveExpr", "t",
                      "p-value", "q-value", "Regulation"]
     keep_cols = [c for c in metadata_cols if c in df.columns] + computed_cols + control_cols + test_cols
@@ -545,7 +545,7 @@ def compute_diffexp_limma_f(df: pd.DataFrame,
         df[f"q-value ({name})"] = _bh_adjust(res_pairs["p"][:, k])
         contrast_cols += [f"log2FC ({name})", f"q-value ({name})"]
 
-    metadata_cols = ["Peptide", "Glycan", "Genes", "Proteins", "ProSites", "GlycanClass"]
+    metadata_cols = ["Feature_ID", "Peptide", "Glycan", "Genes", "Proteins", "ProSites", "GlycanClass"]
     computed_cols = [group_labels[gi] for gi in keep] + ["AveExpr", "F", "p-value", "q-value", "Regulation"] + contrast_cols
     keep_cols = [c for c in metadata_cols if c in df.columns] + computed_cols + all_cols
     df = df.sort_values(by="adj.p-value", na_position="last")

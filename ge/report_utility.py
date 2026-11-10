@@ -272,7 +272,7 @@ def _add_dataframe_table(pdf, df, title, max_rows=25, note: Optional[str] = None
 
     # Keep table readable: limit to common informative columns first, then any remaining.
     preferred = [
-        "Point_ID", "Gene", "Genes", "Peptide", "Glycan", "Glycan(H,N,A,F)", "GlycanClass",
+        "Feature_ID", "Point_ID", "Gene", "Genes", "Peptide", "Glycan", "Glycan(H,N,A,F)", "GlycanClass",
         "ProSites", "Proteins", "log2FC", "Mean_log2FC", "p-value", "q-value",
         "adj.p-value", "Best_q_value", "Regulation", "Status", "Rank",
         "Significant_Peptides", "Significant_Features", "Upregulated_Hits", "Downregulated_Hits",
@@ -545,7 +545,7 @@ def _build_diff_summary(diff_df: pd.DataFrame) -> dict:
 
         pairwise_cols = [
             c for c in [
-                "Peptide", "Glycan", "Glycan(H,N,A,F)", "GlycanClass", "Genes", "ProSites",
+                "Feature_ID", "Peptide", "Glycan", "Glycan(H,N,A,F)", "GlycanClass", "Genes", "ProSites",
                 "log2FC", "p-value", "q-value", "adj.p-value", "Regulation"
             ] if c in df.columns
         ]
@@ -613,7 +613,7 @@ def _build_diff_summary(diff_df: pd.DataFrame) -> dict:
     else:
         anova_cols = [
             c for c in [
-                "Peptide", "Glycan", "Glycan(H,N,A,F)", "GlycanClass", "Genes", "ProSites",
+                "Feature_ID", "Peptide", "Glycan", "Glycan(H,N,A,F)", "GlycanClass", "Genes", "ProSites",
                 "p-value", "q-value", "adj.p-value", "Regulation"
             ] if c in df.columns
         ]
@@ -690,7 +690,7 @@ def _build_waterfall_top_table(diff_df: pd.DataFrame, ss) -> pd.DataFrame:
     out["Point_ID"] = range(1, len(out) + 1)
     keep = [
         c for c in [
-            "Point_ID", "Genes", "Peptide", "Glycan", "Glycan(H,N,A,F)", "GlycanClass", "ProSites",
+            "Feature_ID", "Point_ID", "Genes", "Peptide", "Glycan", "Glycan(H,N,A,F)", "GlycanClass", "ProSites",
             "log2FC", sig_col, "Status", "Rank"
         ] if c in out.columns
     ]
@@ -910,7 +910,7 @@ def generate_final_pdf():
 
         important_cols = [
             c for c in [
-                "Peptide", "Glycan", "Glycan(H,N,A,F)", "GlycanClass", "Genes", "ProSites",
+                "Feature_ID", "Peptide", "Glycan", "Glycan(H,N,A,F)", "GlycanClass", "Genes", "ProSites",
                 "log2FC", "p-value", "q-value", "adj.p-value", "Regulation"
             ] if c in diff_df.columns
         ]

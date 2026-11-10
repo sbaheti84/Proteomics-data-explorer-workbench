@@ -16,6 +16,64 @@ from download_utility import help_popover  # help text behind a small button
 from ge.misc_utility import *
 from figure_utils import show_figure, close_figure  # draw a figure, then free it
 
+# Used to pull apart sample labels that would otherwise sit on top of each other.
+try:
+    from adjustText import adjust_text
+    HAS_ADJUST_TEXT = True
+except Exception:
+    HAS_ADJUST_TEXT = False
+
+
+def sample_display_name(name) -> str:
+    """
+    Short form of a sample column, for use as a label on a plot.
+
+    Quantitation columns usually arrive as "Abundance: 127N" or
+    "Abundances (Grouped): Control_1". The prefix is the same on every column,
+    so it carries no information and only makes labels wider. Anything that does
+    not look like that is returned unchanged.
+    """
+    s = re.sub(r"(?i)^\s*abundances?\s*(\([^)]*\))?\s*:\s*", "", str(name))
+    return s.strip() or str(name)
+
+
+def _place_sample_labels(ax, rows, pc_x, pc_y, fontsize=8):
+    """Write one sample name per row, then pull the labels apart if they collide."""
+    texts = [
+        ax.text(
+            row[pc_x],
+            row[pc_y],
+            sample_display_name(row["Sample"]),
+            fontsize=fontsize,
+            ha="left",
+            va="bottom",
+            zorder=4,
+        )
+        for _, row in rows.iterrows()
+    ]
+
+    if not (HAS_ADJUST_TEXT and len(texts) > 1):
+        return
+
+    arrow = dict(arrowstyle="-", color="#888888", lw=0.6)
+    try:
+        adjust_text(
+            texts,
+            ax=ax,
+            expand=(1.3, 1.6),
+            force_text=(0.4, 0.6),
+            ensure_inside_axes=True,
+            arrowprops=arrow,
+        )
+    except TypeError:
+        # Older adjustText releases take a smaller set of arguments.
+        try:
+            adjust_text(texts, ax=ax, arrowprops=arrow)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
 
 def draw_confidence_ellipse(x, y, ax, color, n_std=2.0, **kwargs):
     """
@@ -52,6 +110,7 @@ def create_pca_plot(
     pc_y: str = "PC2",
     hide_outliers: bool = False,
     label_outliers: bool = True,
+    label_all_samples: bool = False,
     draw_ellipses: bool = False,
     zoom_q: float = 1.0,
     palette: dict = None,
@@ -67,6 +126,8 @@ def create_pca_plot(
       - robust outlier detection using IQR on the plotted PCs
       - optional outlier hiding
       - optional sample-name labels for outliers
+      - optional sample-name labels on every point (label_all_samples), which
+        shows whether a sample sits with a group it does not belong to
       - optional quantile zoom
       - optional group confidence ellipses
       - selectable PCs such as PC1 vs PC2, PC1 vs PC3, etc.
@@ -246,19 +307,16 @@ def create_pca_plot(
         ax.relim()
         ax.autoscale_view()
 
-    # Label outliers with sample names
-    if label_outliers and not hide_outliers:
-        outlier_df = pc_df[pc_df["Outlier"]].copy()
-        for _, row in outlier_df.iterrows():
-            ax.text(
-                row[pc_x],
-                row[pc_y],
-                str(row["Sample"]),
-                fontsize=9,
-                ha="left",
-                va="bottom",
-                zorder=4
-            )
+    # Sample names on the points.
+    #
+    # label_all_samples names every plotted sample, which is how you spot a
+    # sample sitting inside a group it was not assigned to. It takes precedence
+    # over label_outliers, because labelling everything already covers them.
+    if label_all_samples:
+        _place_sample_labels(ax, plot_df, pc_x, pc_y, fontsize=8)
+
+    elif label_outliers and not hide_outliers:
+        _place_sample_labels(ax, pc_df[pc_df["Outlier"]].copy(), pc_x, pc_y, fontsize=9)
 
     # Quantile zoom based on plotted points
     zoom_q = float(zoom_q)
@@ -1032,6 +1090,34 @@ def ge_channel_key(col) -> str:
         return m.group(0).upper()
     s = re.sub(r"(?i)^\s*abundances?\s*(\(grouped\))?\s*:?\s*", "", s)
     return s.strip().lower()
+
+
+# Within one nominal mass the reagents run light before heavy: 127N comes before
+# 127C. Sorting the column names as text puts 127C first, which is not the order
+# the channels are pipetted or reported in.
+_TMT_SUFFIX_ORDER = {"": 0, "N": 1, "C": 2}
+
+
+def ge_channel_sort_key(col):
+    """
+    Sort key that puts TMT channels in reagent order.
+
+    Gives 126, 127N, 127C, 128N, 128C, ... 134N, 134C, 135N, which is the order
+    the channels appear in the TMT and TMTpro kits. Column names may carry a
+    prefix, so "Abundance: 127N" sorts the same as "127N".
+
+    Columns with no channel in the name keep their alphabetical order and are
+    placed after the channels, so a mixed selection stays predictable.
+    """
+    s = str(col)
+    m = re.search(r"(?<![0-9])(12[6-9]|13[0-5])([NC]?)(?![0-9A-Za-z])", s)
+
+    if m:
+        mass = int(m.group(1))
+        suffix = m.group(2).upper()
+        return (0, mass, _TMT_SUFFIX_ORDER.get(suffix, 3), s.lower())
+
+    return (1, 0, 0, s.lower())
 
 
 def _log2_positive(df: pd.DataFrame, cols: list) -> pd.DataFrame:

@@ -1109,6 +1109,9 @@ def main():
                             pd_df = pd_df[required_pd_cols]
 
                         merged = merge_pglyco_pd(pglyco_df, pd_df, version_label, species)
+                        # Row key carried into every downstream table, so results
+                        # can be traced back to this table.
+                        merged = add_feature_id(merged)
 
                         ss["merged_df"] = merged
                         ss["merged_ready"] = True
@@ -1136,6 +1139,8 @@ def main():
 
                             tmt_channels = detect_tmt_channels(psm_df)
                             merged = build_glyco_id_table(psm_df, peptide_df, tmt_channels)
+                            # Row key carried into every downstream table.
+                            merged = add_feature_id(merged)
 
                             abundance_cols = [c for c in merged.columns if c.startswith('Abundance:')]
 
@@ -1315,7 +1320,9 @@ def main():
 
         numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
         numeric_cols = list(numeric_cols)
-        numeric_cols = sorted(numeric_cols, key=lambda x: str(x))
+        # Reagent order (126, 127N, 127C, 128N, ...) rather than alphabetical,
+        # which would put 127C ahead of 127N.
+        numeric_cols = sorted(numeric_cols, key=ge_channel_sort_key)
 
         def clean_label(name: str) -> str:
             s = str(name)
@@ -1870,6 +1877,14 @@ def main():
                                 help="Add sample names next to detected outliers."
                             )
 
+                        ss["pca_label_all_samples"] = st.checkbox(
+                            "Label every sample",
+                            value=False,
+                            key="pca_label_all_ui",
+                            help="Name every point, not just the outliers. Use this to see whether a "
+                                 "sample sits with a group it was not assigned to."
+                        )
+
                         ss["pca_zoom_q"] = st.slider(
                             "Zoom view",
                             min_value=0.80,
@@ -1971,6 +1986,7 @@ def main():
                             draw_ellipses=ss.get("pca_draw_ellipses", False),
                             hide_outliers=ss.get("pca_hide_outliers", False),
                             label_outliers=ss.get("pca_label_outliers", True),
+                            label_all_samples=ss.get("pca_label_all_samples", False),
                             zoom_q=ss.get("pca_zoom_q", 1.0),
                             palette=ss.get("pca_palette", None),
                             quant_mode="TMT",

@@ -80,13 +80,50 @@ def _prepare_plot_matrix(
     return X, y_col, y_label, y_limits, y_ticks
 
 
+# How large the glycan drawings are rendered.
+#
+# An OffsetImage is sized at one point per source pixel times the zoom, and
+# Streamlit draws figures at 200 dpi. At 0.36 (= 72/200) one source pixel lands
+# on one screen pixel, which is as sharp as these files can be shown: the drawings
+# are about 230 x 330 pixels, so anything larger is interpolation rather than
+# detail. The earlier value of 0.15 shrank them to well under half that, which is
+# what made them hard to read.
+GLYCAN_IMAGE_ZOOM = 0.36
+
+
+def _trim_empty_border(image: "Image.Image", margin: int = 6) -> "Image.Image":
+    """
+    Cut the blank border off a glycan drawing.
+
+    The drawings sit on a fixed canvas, and a small glycan can take up as little
+    as a tenth of it. Trimming to the drawing means the space on the plot is
+    spent on the structure instead of on empty pixels. Drawings keep their size
+    relative to each other, so a large glycan still appears larger than a small
+    one.
+    """
+    alpha = image.getchannel("A")
+    box = alpha.getbbox()
+
+    if not box:
+        # Either fully transparent or no alpha to go on; leave it alone.
+        return image
+
+    left, upper, right, lower = box
+    return image.crop((
+        max(0, left - margin),
+        max(0, upper - margin),
+        min(image.width, right + margin),
+        min(image.height, lower + margin),
+    ))
+
+
 def _add_glycan_image(
     ax,
     glycan_image_dir: str,
     glycan: str,
     xy=(0.5, 1.38),
-    zoom=0.18,
-    crop=False,
+    zoom=GLYCAN_IMAGE_ZOOM,
+    crop=True,
     upscale=4
 ):
     image_path = Path(glycan_image_dir) / f"{glycan}.png"
@@ -96,7 +133,7 @@ def _add_glycan_image(
             image = Image.open(image_path).convert("RGBA")
 
             if crop:
-                image = image.crop((10, 10, image.width - 10, image.height - 10))
+                image = _trim_empty_border(image)
 
             # Upscale before embedding to reduce blur in PDF zoom
             if upscale and upscale > 1:
@@ -116,7 +153,10 @@ def _add_glycan_image(
                 glycan_img,
                 xy,
                 frameon=False,
-                box_alignment=(0.5, 0.5),
+                # Anchored by its bottom edge, so xy is the point the drawing sits
+                # on and it grows upward. Centring it instead would push a large
+                # glycan down into the text below, which is what used to happen.
+                box_alignment=(0.5, 0.0),
                 xycoords="axes fraction",
             )
             ax.add_artist(ab)
@@ -319,7 +359,7 @@ def create_box_plots(
 
             _add_glycan_image(
                 ax, glycan_image_dir, label_glycan,
-                xy=(0.5, 1.50), zoom=0.15, crop=False
+                xy=(0.5, 1.28),
             )
 
         for k in range(len(current_peptides), n_rows * cols_per_row):
@@ -479,7 +519,7 @@ def create_box_plots_anova(
 
             _add_glycan_image(
                 ax, glycan_image_dir, glycan,
-                xy=(0.5, 1.55), zoom=0.15, crop=True
+                xy=(0.5, 1.38),
             )
 
         for k in range(len(current_peptides), n_rows * cols_per_row):
@@ -632,7 +672,7 @@ def create_box_plots_top_n(
 
                     _add_glycan_image(
                         ax, glycan_image_dir, glycan,
-                        xy=(0.5, 1.50), zoom=0.15, crop=True
+                        xy=(0.5, 1.28),
                     )
 
                 for j in range(i + 1, nrows * ncols):
@@ -787,7 +827,7 @@ def create_box_plots_top_n_anova(
 
                     _add_glycan_image(
                         ax, glycan_image_dir, glycan,
-                        xy=(0.5, 1.50), zoom=0.15, crop=True
+                        xy=(0.5, 1.28),
                     )
 
                 for j in range(i + 1, nrows * ncols):
