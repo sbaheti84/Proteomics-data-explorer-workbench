@@ -37,40 +37,83 @@ def env_to_bool(value: Optional[str]) -> Optional[bool]:
     return None
 
 
+def is_desktop_build() -> bool:
+    """
+    True only for the packaged desktop application.
+
+    This is the one question that decides how a download has to work. Writing a
+    file to a folder reaches the person using the app only when the Streamlit
+    process runs on their own computer, and that is the packaged build. Anywhere
+    else - Streamlit Community Cloud, Posit Connect, Docker, a server someone
+    runs for a group - the process is on another machine, so a file written to a
+    folder there is unreachable and is lost when the container restarts.
+
+    PyInstaller sets these two attributes, so the packaged build is the one case
+    that can be recognised with certainty rather than guessed at. Set
+    GLYCOEXPLORER_DESKTOP=1 to claim it anyway, which is useful when running from
+    source on your own computer.
+    """
+    override = env_to_bool(os.environ.get("GLYCOEXPLORER_DESKTOP"))
+    if override is not None:
+        return override
+
+    return bool(getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS"))
+
+
 def is_hosted_mode() -> bool:
-    """Detect RConnect/Posit Connect hosted mode."""
+    """
+    True when the app is not running on the user's own computer.
+
+    The inverse of is_desktop_build(), and deliberately so. This used to look for
+    Posit Connect environment variables and assume a local machine when it found
+    none. Streamlit Community Cloud sets no such variable, so the app concluded
+    it was local and the save buttons wrote files into the server container,
+    where the user could never find them. Assuming a server unless the packaged
+    build is recognised fails the safe way instead.
+
+    GLYCOEXPLORER_HOSTED still overrides, which is what the Dockerfile sets.
+    """
     explicit = env_to_bool(os.environ.get("GLYCOEXPLORER_HOSTED"))
     if explicit is not None:
         return explicit
-    if os.environ.get("POSIT_PRODUCT", "").upper() == "CONNECT":
-        return True
-    if os.environ.get("RSTUDIO_PRODUCT", "").upper() == "CONNECT":
-        return True
-    return any(os.environ.get(v) for v in [
-        "CONNECT_CONTENT_GUID", "RSCONNECT_CONTENT_GUID", "RSCONNECT_APP_NAME",
-        "CONNECT_SERVER", "POSIT_CONNECT", "RSTUDIO_CONNECT",
-    ])
+
+    return not is_desktop_build()
 
 
 def get_save_mode() -> str:
     """
-    Return browser/local/dialog.
+    Return browser/local/dialog/hybrid.
 
-    browser:
-        Use Streamlit/browser download. Required for Posit Connect/RConnect.
-    local:
-        Save automatically to Downloads or GLYCOEXPLORER_DOWNLOAD_DIR.
     dialog:
-        Local executable mode. Open a native Save As dialog and let the user
-        choose the output path. This only works when the Streamlit process is
-        running on the user's own computer.
+        Open a native Save As dialog and let the user pick the folder. Only
+        possible when the process runs on the user's own computer, so this is the
+        default for the packaged build.
+    browser:
+        Hand the file to the browser with st.download_button. The only option
+        that works on a server, so it is the default everywhere else. Whether the
+        browser then asks for a folder is the browser's setting to make, not
+        something the app can control.
+    local:
+        Write straight to the Downloads folder without asking.
+    hybrid:
+        Offer a browser download and a save button side by side.
+
+    Set GLYCOEXPLORER_SAVE_MODE to choose. Previously this defaulted to browser
+    even in the packaged build, and two other copies of this function read a
+    different set of names, so "dialog" meant Save As in some places and
+    something else in others. That is why some buttons asked for a folder and
+    others did not.
     """
-    mode = os.environ.get("GLYCOEXPLORER_SAVE_MODE", "browser").strip().lower()
-    if mode in {"browser", "local", "dialog", "saveas", "save_as"}:
-        if mode in {"saveas", "save_as"}:
-            return "dialog"
+    mode = os.environ.get("GLYCOEXPLORER_SAVE_MODE", "").strip().lower()
+
+    if mode in {"dialog", "saveas", "save_as"}:
+        return "dialog"
+    if mode in {"browser", "local", "hybrid"}:
         return mode
-    return "browser"
+
+    # Unset, or a name nobody recognises: ask where to save when that is possible
+    # at all, and otherwise let the browser handle it.
+    return "dialog" if is_desktop_build() else "browser"
 
 
 def safe_filename(filename: str) -> str:
@@ -164,8 +207,30 @@ def dataframe_to_excel_bytes(df: pd.DataFrame, sheet_name: str = "Sheet1") -> by
     return buffer.getvalue()
 
 
+class NotRunningLocallyError(RuntimeError):
+    """Raised when something tries to write a file to a folder on a server."""
+
+
 def _get_downloads_dir() -> Path:
-    """Local-only compatibility helper. Do not use in hosted mode."""
+    """
+    The folder a direct save writes to on this computer.
+
+    Every direct save in the project resolves its destination here, so this is
+    the one place that can make an unreachable write impossible. It refuses
+    outside the packaged build, because the folder would be on the server rather
+    than on the user's computer.
+
+    The buttons check the save mode before they reach this, so a correctly wired
+    one never trips the refusal. It is here because the project carries eleven
+    copies of this helper and not all of them checked anything; an error the user
+    can see is better than a file that silently goes nowhere.
+    """
+    if is_hosted_mode():
+        raise NotRunningLocallyError(
+            "This app is not running on your computer, so it cannot save a file to "
+            "a folder here. Use the browser download button instead."
+        )
+
     custom_dir = os.environ.get("GLYCOEXPLORER_DOWNLOAD_DIR", "").strip()
     if custom_dir:
         p = Path(custom_dir).expanduser()
@@ -340,7 +405,7 @@ def add_download_button(
     save_mode = get_save_mode()
     button_key = make_streamlit_key(key or "download", safe_name, caller_depth=3)
 
-    if save_mode in {"dialog", "local"} and not is_hosted_mode():
+    if save_mode in {"dialog", "local", "hybrid"} and not is_hosted_mode():
         if st.button(
             label=label or f"Save {safe_name}",
             key=button_key,
@@ -349,7 +414,9 @@ def add_download_button(
             type=type,
         ):
             try:
-                if save_mode == "dialog":
+                # hybrid asks as well: a button that saves without saying where
+                # is the behaviour this is meant to remove.
+                if save_mode in {"dialog", "hybrid"}:
                     outpath = save_bytes_with_dialog(file_bytes, safe_name)
                     if outpath is None:
                         st.info("Save cancelled.")
@@ -598,9 +665,17 @@ def add_plotly_html_download_button_common(fig, base_filename: str, key_suffix: 
 
 
 def explain_download_location():
+    """One line telling the user where a file will go, and who decides."""
+    if not is_hosted_mode():
+        st.caption("Each download asks you where to save the file.")
+        return
+
     st.caption(
-        "Downloads are handled by your browser. To choose a folder every time, enable your browser setting "
-        "'Ask where to save each file before downloading'. In RConnect, the app cannot directly open a local file picker."
+        "This app runs on a server, so downloads go through your browser and it "
+        "decides where they land. To be asked for a folder every time, turn on "
+        "\"Ask where to save each file before downloading\" in your browser settings "
+        "(Chrome and Edge: Settings, Downloads; Safari: Settings, General, File download "
+        "location, Ask for each download). Otherwise files go to your usual Downloads folder."
     )
 
 # Backward-compatible wrappers. These no longer write to server in hosted/browser mode.

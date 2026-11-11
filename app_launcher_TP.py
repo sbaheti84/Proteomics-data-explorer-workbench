@@ -86,11 +86,14 @@ ss = st.session_state
 
 
 def _get_downloads_dir() -> Path:
-    """Return a safe Downloads folder path for macOS/Windows/Linux."""
-    downloads = Path.home() / "Downloads"
-    if downloads.exists():
-        return downloads
-    return Path.home()
+    """The folder a direct save writes to on this computer.
+
+    Delegates so every direct save resolves its destination the same way, and so
+    none can write to a server. See download_utility._get_downloads_dir.
+    """
+    from download_utility import _get_downloads_dir as _shared
+
+    return _shared()
 
 
 def _safe_download_filename(filename: str) -> str:
@@ -2481,59 +2484,25 @@ def _env_to_bool_for_downloads(value):
 
 
 def _is_hosted_mode() -> bool:
-    import os
+    """True when the app is not running on the user's own computer.
 
-    # Explicit application-specific override. Keep the GlycoExplorer variable as
-    # a backward-compatible fallback for shared deployments.
-    for env_name in (
-        "TOTALPROTEOMICS_HOSTED",
-        "TOTAL_PROTEOMICS_HOSTED",
-        "GLYCOEXPLORER_HOSTED",
-    ):
-        explicit = _env_to_bool_for_downloads(os.environ.get(env_name))
-        if explicit is not None:
-            return explicit
+    Delegates so every download button in the project answers this the same way.
+    See download_utility.is_hosted_mode.
+    """
+    from download_utility import is_hosted_mode as _shared
 
-    if os.environ.get("POSIT_PRODUCT", "").upper() == "CONNECT":
-        return True
-    if os.environ.get("RSTUDIO_PRODUCT", "").upper() == "CONNECT":
-        return True
-
-    hosted_env_vars = [
-        "CONNECT_CONTENT_GUID",
-        "RSCONNECT_CONTENT_GUID",
-        "RSCONNECT_APP_NAME",
-        "CONNECT_SERVER",
-        "POSIT_CONNECT",
-        "RSTUDIO_CONNECT",
-    ]
-    if any(os.environ.get(v) for v in hosted_env_vars):
-        return True
-
-    # Posit Connect installations do not always expose the same environment
-    # variables. The deployed application path is a reliable final check.
-    runtime_text = " ".join(
-        [str(globals().get("__file__", "")), os.getcwd()]
-    ).lower()
-    return "rstudio-connect" in runtime_text or "/mnt/app" in runtime_text
+    return _shared()
 
 
 def _get_downloads_dir():
-    import os
-    from pathlib import Path
+    """The folder a direct save writes to on this computer.
 
-    custom_dir = (
-        os.environ.get("TOTALPROTEOMICS_DOWNLOAD_DIR", "").strip()
-        or os.environ.get("TOTAL_PROTEOMICS_DOWNLOAD_DIR", "").strip()
-        or os.environ.get("GLYCOEXPLORER_DOWNLOAD_DIR", "").strip()
-    )
-    if custom_dir:
-        custom_path = Path(custom_dir).expanduser()
-        custom_path.mkdir(parents=True, exist_ok=True)
-        return custom_path
+    Delegates so every direct save resolves its destination the same way, and so
+    none can write to a server. See download_utility._get_downloads_dir.
+    """
+    from download_utility import _get_downloads_dir as _shared
 
-    downloads = Path.home() / "Downloads"
-    return downloads if downloads.exists() else Path.home()
+    return _shared()
 
 
 def _safe_download_filename(filename):

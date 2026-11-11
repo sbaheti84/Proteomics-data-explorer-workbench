@@ -55,90 +55,39 @@ def _env_to_bool(value):
 
 
 def _is_hosted_mode() -> bool:
+    """True when the app is not running on the user's own computer.
+
+    Delegates so every download button in the project answers this the same way.
+    See download_utility.is_hosted_mode.
     """
-    Return True when running on RStudio/Posit Connect or another hosted server.
+    from download_utility import is_hosted_mode as _shared
 
-    Recommended:
-        Set this on RConnect:
-            GLYCOEXPLORER_HOSTED=1
-
-    Why:
-        In hosted mode, direct file writing saves to the server/container,
-        not to the user's laptop. Browser download is the correct method.
-    """
-
-    explicit = _env_to_bool(os.environ.get("GLYCOEXPLORER_HOSTED"))
-    if explicit is not None:
-        return explicit
-
-    # Conservative auto-detection for common hosted environments.
-    # You should still set GLYCOEXPLORER_HOSTED=1 on RConnect for reliability.
-    hosted_env_vars = [
-        "RSCONNECT_CONTENT_GUID",
-        "RSCONNECT_APP_NAME",
-        "CONNECT_SERVER",
-        "POSIT_CONNECT",
-        "RSTUDIO_CONNECT",
-    ]
-
-    return any(os.environ.get(v) for v in hosted_env_vars)
+    return _shared()
 
 
 def _get_save_mode() -> str:
+    """How downloads should be delivered: dialog, browser, local or hybrid.
+
+    Delegates so every download button in the project answers this the same way.
+    See download_utility.get_save_mode.
     """
-    Return one of:
-        browser  -> browser download buttons only
-        local    -> direct save-to-Downloads buttons only
-        hybrid   -> both browser download and direct save buttons
+    from download_utility import get_save_mode as _shared
 
-    Defaults:
-        Hosted/RConnect: browser
-        Local standalone: hybrid
-
-    Optional override:
-        GLYCOEXPLORER_SAVE_MODE=browser
-        GLYCOEXPLORER_SAVE_MODE=local
-        GLYCOEXPLORER_SAVE_MODE=hybrid
-    """
-
-    mode = os.environ.get("GLYCOEXPLORER_SAVE_MODE", "").strip().lower()
-
-    if mode in {"browser", "local", "hybrid"}:
-        return mode
-
-    if _is_hosted_mode():
-        return "browser"
-
-    return "browser"
+    return _shared()
 
 
 # -------------------------------------------------------------------------
 # File Path / Filename Helpers
 # -------------------------------------------------------------------------
 def _get_downloads_dir() -> Path:
+    """The folder a direct save writes to on this computer.
+
+    Delegates so every direct save resolves its destination the same way, and so
+    none can write to a server. See download_utility._get_downloads_dir.
     """
-    Return user's Downloads folder if available.
+    from download_utility import _get_downloads_dir as _shared
 
-    Local standalone only:
-        You can optionally override this using:
-            GLYCOEXPLORER_DOWNLOAD_DIR=/path/to/folder
-
-    Do not use this for hosted/RConnect mode.
-    """
-
-    custom_dir = os.environ.get("GLYCOEXPLORER_DOWNLOAD_DIR", "").strip()
-
-    if custom_dir:
-        custom_path = Path(custom_dir).expanduser()
-        custom_path.mkdir(parents=True, exist_ok=True)
-        return custom_path
-
-    downloads = Path.home() / "Downloads"
-
-    if downloads.exists():
-        return downloads
-
-    return Path.home()
+    return _shared()
 
 
 def _safe_filename(filename: str) -> str:
@@ -179,6 +128,21 @@ def _coerce_to_bytes(data: Union[bytes, bytearray, BytesIO, str]) -> bytes:
         return data.encode("utf-8")
 
     raise TypeError(f"Unsupported data type for saving/downloading: {type(data)}")
+
+
+def _as_save_label(label: str) -> str:
+    """
+    Reword a download button for the mode that asks where to put the file.
+
+    "Download PNG" becomes "Save PNG as...", which is what the button now does.
+    """
+    text = str(label).strip()
+
+    if text.lower().startswith("download"):
+        rest = text[len("download"):].strip()
+        return f"Save {rest} as..." if rest else "Save as..."
+
+    return f"Save {text} as..." if text else "Save as..."
 
 
 def _save_bytes_to_downloads(data: Union[bytes, bytearray, BytesIO, str], filename: str) -> Path:
@@ -301,8 +265,9 @@ def add_file_download_buttons(
             use_container_width=True,
         )
 
-    if mode in {"local", "hybrid"}:
-        direct_label = "Save to Downloads" if mode == "hybrid" else label
+    if mode in {"local", "hybrid", "dialog"}:
+        # dialog opens a Save As box, so name the button for what it does.
+        direct_label = label if mode == "local" else _as_save_label(label)
 
         add_direct_save_button(
             label=direct_label,
@@ -385,11 +350,12 @@ def add_plot_download_buttons(fig, base_filename: str = "plot", key_suffix: str 
     # ------------------------------------------------------------------
     # Local direct save buttons
     # ------------------------------------------------------------------
-    if mode in {"local", "hybrid"}:
+    if mode in {"local", "hybrid", "dialog"}:
         save_col1, save_col2 = st.columns(2)
 
-        png_label = "Save PNG to Downloads" if mode == "hybrid" else "Download PNG"
-        svg_label = "Save SVG to Downloads" if mode == "hybrid" else "Download SVG"
+        asks = mode in {"hybrid", "dialog"}
+        png_label = "Save PNG as..." if asks else "Download PNG"
+        svg_label = "Save SVG as..." if asks else "Download SVG"
 
         with save_col1:
             add_direct_save_button(

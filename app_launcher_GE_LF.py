@@ -76,13 +76,14 @@ sns.set_style("ticks", {"axes.grid": False})
 # DESKTOP-SAFE FILE SAVE HELPERS
 # =============================================================================
 def _get_downloads_dir():
+    """The folder a direct save writes to on this computer.
+
+    Delegates so every direct save resolves its destination the same way, and so
+    none can write to a server. See download_utility._get_downloads_dir.
     """
-    Return a safe Downloads folder path for macOS/Windows/Linux.
-    """
-    downloads = Path.home() / "Downloads"
-    if downloads.exists():
-        return downloads
-    return Path.home()
+    from download_utility import _get_downloads_dir as _shared
+
+    return _shared()
 
 
 def _safe_download_filename(filename):
@@ -1640,40 +1641,25 @@ def _env_to_bool_for_downloads(value):
 
 
 def _is_hosted_mode() -> bool:
-    import os
+    """True when the app is not running on the user's own computer.
 
-    explicit = _env_to_bool_for_downloads(os.environ.get("GLYCOEXPLORER_HOSTED"))
-    if explicit is not None:
-        return explicit
+    Delegates so every download button in the project answers this the same way.
+    See download_utility.is_hosted_mode.
+    """
+    from download_utility import is_hosted_mode as _shared
 
-    if os.environ.get("POSIT_PRODUCT", "").upper() == "CONNECT":
-        return True
-    if os.environ.get("RSTUDIO_PRODUCT", "").upper() == "CONNECT":
-        return True
-
-    hosted_env_vars = [
-        "CONNECT_CONTENT_GUID",
-        "RSCONNECT_CONTENT_GUID",
-        "RSCONNECT_APP_NAME",
-        "CONNECT_SERVER",
-        "POSIT_CONNECT",
-        "RSTUDIO_CONNECT",
-    ]
-    return any(os.environ.get(v) for v in hosted_env_vars)
+    return _shared()
 
 
 def _get_downloads_dir():
-    import os
-    from pathlib import Path
+    """The folder a direct save writes to on this computer.
 
-    custom_dir = os.environ.get("GLYCOEXPLORER_DOWNLOAD_DIR", "").strip()
-    if custom_dir:
-        custom_path = Path(custom_dir).expanduser()
-        custom_path.mkdir(parents=True, exist_ok=True)
-        return custom_path
+    Delegates so every direct save resolves its destination the same way, and so
+    none can write to a server. See download_utility._get_downloads_dir.
+    """
+    from download_utility import _get_downloads_dir as _shared
 
-    downloads = Path.home() / "Downloads"
-    return downloads if downloads.exists() else Path.home()
+    return _shared()
 
 
 def _safe_download_filename(filename):

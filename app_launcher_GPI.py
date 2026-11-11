@@ -268,9 +268,14 @@ def format_structural_html_table(df, img_dir, gene_col, pep_col, lfc_col, metric
 # Generic helpers
 # -----------------------------------------------------------------------------
 def _get_downloads_dir() -> Path:
-    """Return a reliable local Downloads folder for macOS/Windows/Linux."""
-    downloads = Path.home() / "Downloads"
-    return downloads if downloads.exists() else Path.home()
+    """The folder a direct save writes to on this computer.
+
+    Delegates so every direct save resolves its destination the same way, and so
+    none can write to a server. See download_utility._get_downloads_dir.
+    """
+    from download_utility import _get_downloads_dir as _shared
+
+    return _shared()
 
 
 def _safe_download_filename(filename: str) -> str:
@@ -3393,67 +3398,36 @@ def _env_to_bool_for_downloads(value):
 
 
 def _is_hosted_mode() -> bool:
-    import os
+    """True when the app is not running on the user's own computer.
 
-    explicit = _env_to_bool_for_downloads(os.environ.get("GLYCOEXPLORER_HOSTED"))
-    if explicit is not None:
-        return explicit
+    Delegates so every download button in the project answers this the same way.
+    See download_utility.is_hosted_mode.
+    """
+    from download_utility import is_hosted_mode as _shared
 
-    if os.environ.get("POSIT_PRODUCT", "").upper() == "CONNECT":
-        return True
-    if os.environ.get("RSTUDIO_PRODUCT", "").upper() == "CONNECT":
-        return True
-
-    hosted_env_vars = [
-        "CONNECT_CONTENT_GUID",
-        "RSCONNECT_CONTENT_GUID",
-        "RSCONNECT_APP_NAME",
-        "CONNECT_SERVER",
-        "POSIT_CONNECT",
-        "RSTUDIO_CONNECT",
-    ]
-    return any(os.environ.get(v) for v in hosted_env_vars)
+    return _shared()
 
 
 def _get_save_mode() -> str:
+    """How downloads should be delivered: dialog, browser, local or hybrid.
+
+    Delegates so every download button in the project answers this the same way.
+    See download_utility.get_save_mode.
     """
-    Match GlycoExplorer download behavior.
+    from download_utility import get_save_mode as _shared
 
-    Returns:
-        browser -> browser download buttons only
-        local   -> direct Save-to-Downloads buttons only
-        hybrid  -> browser download plus local Save-to-Downloads fallback
-
-    Defaults:
-        Hosted/RConnect: browser
-        Local standalone: hybrid
-
-    Optional override:
-        GLYCOEXPLORER_SAVE_MODE=browser|local|hybrid
-    """
-    import os
-
-    mode = os.environ.get("GLYCOEXPLORER_SAVE_MODE", "").strip().lower()
-    # Keep the GPI UI simple by default: one browser download button per file.
-    # Local/hybrid save modes can still be forced through the environment, but
-    # regular use should not expose duplicate local-save sections.
-    if mode in {"browser", "local", "hybrid"}:
-        return mode
-    return "browser"
+    return _shared()
 
 
 def _get_downloads_dir():
-    import os
-    from pathlib import Path
+    """The folder a direct save writes to on this computer.
 
-    custom_dir = os.environ.get("GLYCOEXPLORER_DOWNLOAD_DIR", "").strip()
-    if custom_dir:
-        custom_path = Path(custom_dir).expanduser()
-        custom_path.mkdir(parents=True, exist_ok=True)
-        return custom_path
+    Delegates so every direct save resolves its destination the same way, and so
+    none can write to a server. See download_utility._get_downloads_dir.
+    """
+    from download_utility import _get_downloads_dir as _shared
 
-    downloads = Path.home() / "Downloads"
-    return downloads if downloads.exists() else Path.home()
+    return _shared()
 
 
 def _safe_download_filename(filename):

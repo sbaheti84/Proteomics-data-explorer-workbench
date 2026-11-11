@@ -33,14 +33,14 @@ mpl.rcParams.update({
 })
 
 def _get_downloads_dir() -> Path:
+    """The folder a direct save writes to on this computer.
+
+    Delegates so every direct save resolves its destination the same way, and so
+    none can write to a server. See download_utility._get_downloads_dir.
     """
-    Return user's Downloads folder if available.
-    Falls back to home directory.
-    """
-    downloads = Path.home() / "Downloads"
-    if downloads.exists():
-        return downloads
-    return Path.home()
+    from download_utility import _get_downloads_dir as _shared
+
+    return _shared()
 
 
 def safe_filename(filename: str) -> str:

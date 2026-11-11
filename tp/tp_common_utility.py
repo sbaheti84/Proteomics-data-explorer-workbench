@@ -42,26 +42,25 @@ def _tp_env_to_bool(value):
 
 
 def is_hosted_mode() -> bool:
-    import os
-    explicit = _tp_env_to_bool(os.environ.get("GLYCOEXPLORER_HOSTED"))
-    if explicit is not None:
-        return explicit
-    if os.environ.get("POSIT_PRODUCT", "").upper() == "CONNECT":
-        return True
-    if os.environ.get("RSTUDIO_PRODUCT", "").upper() == "CONNECT":
-        return True
-    return any(os.environ.get(v) for v in [
-        "CONNECT_CONTENT_GUID", "RSCONNECT_CONTENT_GUID", "RSCONNECT_APP_NAME",
-        "CONNECT_SERVER", "POSIT_CONNECT", "RSTUDIO_CONNECT",
-    ])
+    """True when the app is not running on the user's own computer.
+
+    Delegates so every download button in the project answers this the same way.
+    See download_utility.is_hosted_mode.
+    """
+    from download_utility import is_hosted_mode as _shared
+
+    return _shared()
 
 
 def get_save_mode() -> str:
-    import os
-    mode = os.environ.get("GLYCOEXPLORER_SAVE_MODE", "").strip().lower()
-    if mode in {"browser", "local", "hybrid"}:
-        return mode
-    return "browser" if is_hosted_mode() else "hybrid"
+    """How downloads should be delivered: dialog, browser, local or hybrid.
+
+    Delegates so every download button in the project answers this the same way.
+    See download_utility.get_save_mode.
+    """
+    from download_utility import get_save_mode as _shared
+
+    return _shared()
 
 
 # -----------------------------------------------------------------------------
@@ -80,8 +79,14 @@ def safe_filename(filename: str) -> str:
 
 
 def get_downloads_dir() -> Path:
-    downloads = Path.home() / "Downloads"
-    return downloads if downloads.exists() else Path.home()
+    """The folder a direct save writes to on this computer.
+
+    Delegates so every direct save resolves its destination the same way, and so
+    none can write to a server. See download_utility._get_downloads_dir.
+    """
+    from download_utility import _get_downloads_dir as _shared
+
+    return _shared()
 
 
 def save_bytes_to_downloads(data, filename: str) -> Path:
