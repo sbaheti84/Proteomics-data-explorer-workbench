@@ -30,6 +30,62 @@ except Exception:
 # =============================================================================
 # Hosted-safe download mode helpers
 # =============================================================================
+# The y axis the glycopeptide box plots use, and now the protein box plots too:
+# zero at the bottom, 100 for the highest sample, and room above the data for a
+# significance bar.
+RELATIVE_ABUNDANCE_LIMITS = (0.0, 120.0)
+RELATIVE_ABUNDANCE_TICKS = [0, 20, 40, 60, 80, 100]
+RELATIVE_ABUNDANCE_LABEL = "Relative Abundance (%)"
+
+
+def to_relative_abundance(values, is_log2: bool):
+    """
+    Rescale abundances so the highest one is 100 and everything else is its
+    share of that, which is how the glycopeptide box plots are drawn.
+
+    is_log2 must say whether the values are on a log2 scale, because a
+    percentage of a logarithm is not a percentage of anything. On log2 data an
+    eight-fold difference is three units, and dividing three by the largest log
+    value describes no quantity at all. Log2 values are raised back to a linear
+    scale first, then scaled, so the percentages mean what they appear to mean.
+    Both proteome apps log2 by default, so this matters in the usual case.
+
+    Returns the rescaled values, or None when there is nothing positive to scale
+    against, so the caller can leave the plot on its original scale.
+    """
+    series = pd.Series(values, dtype="float64")
+
+    linear = np.power(2.0, series) if is_log2 else series
+    linear = linear.where(np.isfinite(linear))
+
+    peak = linear.max()
+    if not np.isfinite(peak) or peak <= 0:
+        return None
+
+    return linear / float(peak) * 100.0
+
+
+def tp_values_are_log2() -> bool:
+    """
+    Whether the processed matrix is on a log2 scale.
+
+    Both proteome apps offer a log2 step that is on by default, under a
+    different session key in each.
+    """
+    for key in ("tp_pre_log2", "pre_log2"):
+        if key in st.session_state:
+            return bool(st.session_state[key])
+
+    return True
+
+
+def style_relative_abundance_axis(ax):
+    """Zero at the bottom, 100 for the highest sample, ticks every 20."""
+    ax.set_ylim(*RELATIVE_ABUNDANCE_LIMITS)
+    ax.set_yticks(RELATIVE_ABUNDANCE_TICKS)
+    ax.set_ylabel(RELATIVE_ABUNDANCE_LABEL, fontweight="bold", fontsize=11)
+
+
 def _tp_env_to_bool(value):
     if value is None:
         return None

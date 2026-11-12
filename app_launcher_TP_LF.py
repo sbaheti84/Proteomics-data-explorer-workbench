@@ -1324,6 +1324,15 @@ def create_protein_profile_figure_tp_lf(
     if plot_data.empty:
         return None
 
+    # Drawn as a share of the highest sample in this panel, so the scale reads
+    # the same way as the glycopeptide box plots: the top point is 100% and the
+    # axis starts at zero. Falls back to the raw values if there is nothing
+    # positive to scale against.
+    relative = to_relative_abundance(plot_data["Abundance"], is_log2=tp_values_are_log2())
+    use_relative = relative is not None
+    if use_relative:
+        plot_data["Abundance"] = relative.to_numpy()
+
     fig, ax = plt.subplots(figsize=(5.2, 4.8))
     ax.grid(False)
 
@@ -1383,26 +1392,25 @@ def create_protein_profile_figure_tp_lf(
 
                 star_label = _p_to_star_label(gene_metric_val)
 
-                ymin, ymax = ax.get_ylim()
-                y_range = ymax - ymin
-                y = ymax + 0.08 * y_range
-                h = 0.04 * y_range
-
                 # For 2 groups, draw bracket between group 1 and group 2.
                 # For 3+ groups, draw bracket from first to last group.
                 x1 = 0
                 x2 = len(unique_groups) - 1
 
-                _add_manual_sig_bar(
-                    ax=ax,
-                    x1=x1,
-                    x2=x2,
-                    y=y,
-                    h=h,
-                    label=star_label
-                )
-
-                ax.set_ylim(ymin, ymax + 0.25 * y_range)
+                if use_relative:
+                    # The axis is fixed at 0-120, so the bar goes in the space
+                    # kept above the data rather than stretching the axis, which
+                    # would move 100% away from the top of the data.
+                    _add_manual_sig_bar(ax=ax, x1=x1, x2=x2, y=106.0, h=4.0, label=star_label)
+                else:
+                    ymin, ymax = ax.get_ylim()
+                    y_range = ymax - ymin if ymax > ymin else 1.0
+                    _add_manual_sig_bar(
+                        ax=ax, x1=x1, x2=x2,
+                        y=ymax + 0.08 * y_range, h=0.04 * y_range,
+                        label=star_label,
+                    )
+                    ax.set_ylim(ymin, ymax + 0.25 * y_range)
 
         except Exception as e:
             st.warning(f"Could not add significance stars for {gene_name}: {e}")
@@ -1414,11 +1422,14 @@ def create_protein_profile_figure_tp_lf(
         fontsize=13
     )
 
-    ax.set_ylabel(
-        "Normalized Abundance",
-        fontweight="bold",
-        fontsize=11
-    )
+    if use_relative:
+        style_relative_abundance_axis(ax)
+    else:
+        ax.set_ylabel(
+            "Normalized Abundance",
+            fontweight="bold",
+            fontsize=11
+        )
 
     ax.set_xlabel("")
 

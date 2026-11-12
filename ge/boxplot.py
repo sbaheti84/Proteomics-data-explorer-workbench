@@ -74,7 +74,9 @@ def _prepare_plot_matrix(
 
         y_col = "Relative Abundance (%)"
         y_label = "Relative Abundance (%)"
-        y_limits = (-5, 120)
+        # Zero sits on the axis rather than below it. The headroom above 100 is
+        # where the significance bars go.
+        y_limits = (0, 120)
         y_ticks = [0, 20, 40, 60, 80, 100]
 
     return X, y_col, y_label, y_limits, y_ticks

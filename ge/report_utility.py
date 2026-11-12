@@ -606,7 +606,8 @@ def _build_diff_summary(diff_df: pd.DataFrame) -> dict:
                 )
                 out["top_gene_hits"] = (
                     gene_long.sort_values(["q-value"], ascending=True)
-                    [["Gene", "Peptide", "log2FC", "q-value", "Regulation"]]
+                    [[c for c in ["Feature_ID", "Gene", "Peptide", "log2FC", "q-value", "Regulation"]
+                      if c in gene_long.columns]]
                     .head(20)
                 )
 
@@ -647,7 +648,8 @@ def _build_diff_summary(diff_df: pd.DataFrame) -> dict:
                 )
                 out["top_gene_hits"] = (
                     gene_long.sort_values(["q-value"], ascending=True)
-                    [["Gene", "Peptide", "q-value"]]
+                    [[c for c in ["Feature_ID", "Gene", "Peptide", "q-value"]
+                      if c in gene_long.columns]]
                     .head(20)
                 )
 
