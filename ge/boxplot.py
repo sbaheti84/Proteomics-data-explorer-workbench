@@ -167,6 +167,73 @@ def _add_glycan_image(
             pass
 
 
+_STAR_CUTOFFS = [(1e-4, "****"), (1e-3, "***"), (1e-2, "**"), (5e-2, "*")]
+
+
+def _stars_for(value) -> str:
+    """Star notation for a significance value, or 'ns' if it clears 0.05."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "ns"
+
+    if not np.isfinite(number):
+        return "ns"
+
+    for cutoff, stars in _STAR_CUTOFFS:
+        if number <= cutoff:
+            return stars
+
+    return "ns"
+
+
+def _lookup_metric(top_hits: pd.DataFrame, glycopeptide: str, pval_col: str):
+    """The significance value this glycopeptide was given in the results table."""
+    try:
+        matches = top_hits.loc[top_hits["Glycopeptide"] == glycopeptide, pval_col]
+        return matches.iloc[0] if len(matches) else None
+    except Exception:
+        return None
+
+
+def _annotate_pair_significance(ax, value, color="black"):
+    """
+    Draw the significance bracket for a two-group panel.
+
+    The value has to be the one from the results table, which is what the volcano
+    plot reads. This used to be a t-test that statannotations ran here on the
+    plotted values, and it ignored two things: the test the user picked, and the
+    multiple-testing correction. So a glycopeptide could be significant in the
+    volcano plot and 'ns' here, and others could be starred here while the
+    volcano plot left them out. Reading the stored value removes the second
+    opinion rather than trying to make the two agree.
+
+    Placed as a fraction of the axis so it works on both the percentage scale and
+    the log2 scale.
+    """
+    bottom, top = ax.get_ylim()
+    span = (top - bottom) or 1.0
+
+    y = bottom + 0.86 * span
+    h = 0.03 * span
+
+    ax.plot([0, 0, 1, 1], [y, y + h, y + h, y], lw=1.2, c=color, clip_on=False)
+    ax.text(
+        0.5, y + h, _stars_for(value),
+        ha="center", va="bottom",
+        fontsize=11, fontweight="bold", color=color, clip_on=False,
+    )
+
+
+def _significance_legend(pval_col: str) -> str:
+    """Footer naming the column the stars came from, so the scale is not assumed."""
+    metric = str(pval_col) if pval_col else "p-value"
+    return (
+        f"Significance from {metric} in the results table:  "
+        f"ns ({metric} > 0.05)   * (≤ 0.05)   ** (≤ 0.01)   *** (≤ 0.001)   **** (≤ 0.0001)"
+    )
+
+
 def _style_axis(
     ax,
     y_label: str,
@@ -320,14 +387,6 @@ def create_box_plots(
                 order=group_order
             )
 
-            try:
-                pairs = [(control_label, test_label)]
-                annotator = Annotator(ax, pairs, data=subset, x="Group", y=y_col, order=group_order)
-                annotator.configure(test="t-test_ind", text_format="star", loc="inside", verbose=0)
-                annotator.apply_and_annotate()
-            except Exception:
-                pass
-
             ax.set_xticks([0, 1])
             _style_axis(
                 ax,
@@ -338,6 +397,10 @@ def create_box_plots(
                 y_ticks=y_ticks,
                 rotation=0,
             )
+
+            # After the axis is styled, so the bracket is placed against the
+            # final limits. The value is the one the volcano plot uses.
+            _annotate_pair_significance(ax, _lookup_metric(top_hits, glycopeptide, pval_col))
 
             text_y = 1.06
             ax.text(
@@ -370,7 +433,7 @@ def create_box_plots(
         fig.tight_layout()
         fig.subplots_adjust(top=0.80, bottom=0.15, hspace=1.3)
 
-        legend_text = "Significance Level:  ns (p > 0.05)   * (p ≤ 0.05)   ** (p ≤ 0.01)   *** (p ≤ 0.001)   **** (p ≤ 0.0001)"
+        legend_text = _significance_legend(pval_col)
         fig.text(0.5, 0.02, legend_text, ha="center", va="bottom", fontsize=12, fontweight="bold", color="black")
 
         show_figure(fig)
@@ -631,14 +694,6 @@ def create_box_plots_top_n(
                         size=4, jitter=0.08, ax=ax, order=group_order
                     )
 
-                    try:
-                        pairs = [(control_label, test_label)]
-                        annotator = Annotator(ax, pairs, data=df_melt, x="Group", y=y_col, order=group_order)
-                        annotator.configure(test="t-test_ind", text_format="star", loc="inside", verbose=0)
-                        annotator.apply_and_annotate()
-                    except Exception:
-                        pass
-
                     ax.set_xticks([0, 1])
                     _style_axis(
                         ax,
@@ -649,6 +704,12 @@ def create_box_plots_top_n(
                         y_ticks=y_ticks,
                         rotation=0,
                     )
+
+                    # After the axis is styled, so the bracket is placed against
+                    # the final limits. Looked up in df_top, which is the frame
+                    # carrying the Glycopeptide key here. The value is the one
+                    # the volcano uses.
+                    _annotate_pair_significance(ax, _lookup_metric(df_top, glyco, pval_col))
 
                     gene_name, site, glycan = _safe_gp_parts(glyco)
 
@@ -685,7 +746,7 @@ def create_box_plots_top_n(
                 fig.suptitle(f"Gene: {gene}", fontsize=18, fontweight="bold", y=0.98)
                 fig.tight_layout(rect=[0, 0.05, 1, 0.95], pad=3.5, h_pad=8.0, w_pad=2.5)
 
-                legend_text = "Significance Level:  ns (p > 0.05)   * (p ≤ 0.05)   ** (p ≤ 0.01)   *** (p ≤ 0.001)   **** (p ≤ 0.0001)"
+                legend_text = _significance_legend(pval_col)
                 fig.text(0.5, 0.02, legend_text, ha="center", va="bottom", fontsize=12, fontweight="bold", color="black")
 
                 pdf.savefig(fig, bbox_inches="tight")
