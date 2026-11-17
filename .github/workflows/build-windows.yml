@@ -336,7 +336,11 @@ jobs:
 
           python -m pip install -r requirements.txt
 
-          python -m pip install streamlit-desktop-app pyinstaller
+          # pywebview draws the app window. It used to arrive as a dependency of
+          # streamlit-desktop-app, which this project no longer uses and which
+          # held pywebview below 6.0 while pinning no exact version, so two
+          # builds could ship different rendering behaviour. Pinned here instead.
+          python -m pip install "pywebview==5.4" "pyinstaller==6.11.1"
 
 
       # ======================================================
@@ -356,7 +360,7 @@ jobs:
 
           python -m pip show streamlit
 
-          python -m pip show streamlit-desktop-app
+          python -m pip show pywebview
 
           python -m pip show pyinstaller
 
@@ -466,6 +470,23 @@ jobs:
             Remove-Item -Force $ZIP
           }
 
+          # The app draws its window with the Edge WebView2 Runtime. Without it
+          # pywebview silently falls back to the Internet Explorer engine, which
+          # renders the page wrongly: it stops scrolling part of the way down.
+          # Shipping the installer alongside means the fix is already in the
+          # folder rather than something to go and find.
+          Write-Host "Adding the WebView2 Runtime installer..."
+          try {
+            Invoke-WebRequest `
+              -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" `
+              -OutFile (Join-Path $APP_DIR "MicrosoftEdgeWebview2Setup.exe") `
+              -UseBasicParsing
+            Write-Host "  added MicrosoftEdgeWebview2Setup.exe"
+          } catch {
+            # Not fatal: the app still tells the user where to get it.
+            Write-Host "  could not download it: $($_.Exception.Message)"
+          }
+
           # Zip the folder itself (not only its contents), so unzipping
           # creates a ProteomicsWorkbench\ folder.
           Compress-Archive `
@@ -544,7 +565,16 @@ jobs:
           2. Unzip it. Fastest: open Command Prompt in that folder and run ``tar -xf ProteomicsWorkbench-Windows.zip`` (7-Zip is also fast; the built-in Windows "Extract all" is much slower).
           3. Open the new ProteomicsWorkbench folder and run ProteomicsWorkbench.exe. Keep all files together. The first start can take a minute.
 
-          If it does not start, the log is in %LOCALAPPDATA%\ProteomicsWorkbench\logs.
+          **If the page stops scrolling partway down**
+          The app draws its window with the Microsoft Edge WebView2 Runtime. Most Windows 10 and 11 machines already have it. Where it is missing, the window falls back to the old Internet Explorer engine, which lays the page out wrongly: it scrolls only part of the way and the rest cannot be reached.
+
+          The installer is included in the folder. Open Command Prompt there and run:
+
+          ``MicrosoftEdgeWebview2Setup.exe /silent /install``
+
+          Then start the app again. From this build onward the app checks for the runtime and says so instead of opening a window that does not work.
+
+          If it does not start, the log is in %LOCALAPPDATA%\ProteomicsWorkbench\logs. It now records which engine drew the window.
           "@
           # WriteAllText writes UTF-8 without the byte-order mark PowerShell 5 adds.
           [System.IO.File]::WriteAllText((Join-Path (Get-Location) "release_notes.md"), $notes)

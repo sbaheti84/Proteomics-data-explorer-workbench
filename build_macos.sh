@@ -129,6 +129,7 @@ python -m PyInstaller \
     --collect-submodules sklearn --collect-data sklearn --collect-binaries sklearn --copy-metadata scikit-learn \
     --collect-submodules statsmodels --collect-data statsmodels --collect-binaries statsmodels --copy-metadata statsmodels \
     --collect-submodules PIL --collect-data PIL --collect-binaries PIL --copy-metadata pillow \
+    --collect-submodules webview --collect-data webview --collect-binaries webview \
     --collect-submodules streamlit \
     --collect-submodules plotly \
     "$ROOT/desktop_launcher.py"

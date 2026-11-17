@@ -32,6 +32,17 @@ try:
 except ValueError:
     START_TIMEOUT = 300
 
+# Set WORKBENCH_DEBUG=1 to open the window with developer tools available, so a
+# layout problem that only shows up in the packaged app can be inspected the way
+# it would be in a browser. Off by default.
+DEBUG_WINDOW = os.environ.get("WORKBENCH_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
+
+# Set WORKBENCH_GUI to force the rendering engine, for example "edgechromium" or
+# "mshtml" on Windows and "cocoa" on macOS. Left empty, pywebview picks one, and
+# which one it picks depends on what is installed on that computer. That is worth
+# being able to pin down when one machine behaves differently from another.
+FORCED_GUI = os.environ.get("WORKBENCH_GUI", "").strip() or None
+
 # Same settings as .streamlit/config.toml. They are passed on the command line
 # because Streamlit only reads config.toml from the folder the app is started
 # from, and that folder is not the app folder for a packaged build.
@@ -171,9 +182,63 @@ def _message_box(text: str) -> None:
         pass
 
 
+WEBVIEW2_URL = "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+
+WEBVIEW2_MESSAGE = (
+    "This app needs the Microsoft Edge WebView2 Runtime, and it is not installed "
+    "on this computer.\n\n"
+    "Without it the window falls back to the Internet Explorer engine, which "
+    "cannot lay the page out correctly: the page stops scrolling part of the way "
+    "down and the rest of the content cannot be reached.\n\n"
+    "To fix it, run the installer included next to this app:\n\n"
+    '    MicrosoftEdgeWebview2Setup.exe /silent /install\n\n'
+    "or download it from " + WEBVIEW2_URL + "\n\n"
+    "Then start the app again."
+)
+
+
+def _windows_renderer():
+    """
+    Which engine the Windows build will draw with: 'edgechromium' or 'mshtml'.
+
+    pywebview decides this when its WinForms backend is imported, by looking in
+    the registry for the WebView2 Runtime. If the runtime is missing it drops
+    back to MSHTML, the Internet Explorer engine, and says so only in a log
+    message that nothing here was reading. The window then opens and renders a
+    modern page with a browser engine that cannot do it.
+
+    Returns None when the renderer cannot be determined, which is not treated as
+    a failure.
+    """
+    if not sys.platform.startswith("win"):
+        return None
+
+    try:
+        import webview.platforms.winforms as winforms
+
+        return getattr(winforms, "renderer", None)
+    except Exception:
+        return None
+
+
+def _describe_engine() -> str:
+    """Engine name for the log, specific enough to be worth reading."""
+    try:
+        import webview as _wv
+
+        name = getattr(getattr(_wv, "guilib", None), "__name__", "unknown")
+    except Exception:
+        name = "unknown"
+
+    renderer = _windows_renderer()
+    return f"{name} ({renderer})" if renderer else name
+
+
 def _wait_then_load(window, proc, port: int, closed: threading.Event) -> None:
     """Runs in a background thread once the window is open."""
     start = time.time()
+    _log(f"Rendering engine: {_describe_engine()}" + (" (debug window)" if DEBUG_WINDOW else ""))
+
     try:
         while not closed.is_set():
             if _server_is_up(port):
@@ -220,19 +285,36 @@ def main() -> int:
     try:
         import webview
 
+        # Checked before the window opens. Opening it anyway would show a page
+        # that looks almost right and scrolls only part of the way down, which is
+        # far harder to work out than being told what is wrong.
+        if _windows_renderer() == "mshtml" and FORCED_GUI != "mshtml":
+            _log("WebView2 Runtime is missing; refusing to render with MSHTML.")
+            _message_box(WEBVIEW2_MESSAGE)
+            return 1
+
         window = webview.create_window(
             APP_TITLE, html=_loading_page(), width=1280, height=860, min_size=(900, 600)
         )
         closed = threading.Event()
         window.events.closed += lambda *a: closed.set()
-        webview.start(_wait_then_load, (window, proc, port, closed))
+
+        start_kwargs = {}
+        if DEBUG_WINDOW:
+            start_kwargs["debug"] = True
+        if FORCED_GUI:
+            start_kwargs["gui"] = FORCED_GUI
+            _log(f"Rendering engine forced to {FORCED_GUI} by WORKBENCH_GUI")
+
+        webview.start(_wait_then_load, (window, proc, port, closed), **start_kwargs)
         return 0
     except Exception:
         tb = traceback.format_exc()
         _log("Could not open the app window:\n" + tb)
         hint = (
             "On Windows this usually means the Microsoft Edge WebView2 Runtime "
-            "is missing. Install it from microsoft.com/edge/webview2 and try again."
+            "is missing. Run MicrosoftEdgeWebview2Setup.exe /silent /install from "
+            "the folder next to this app, or get it from " + WEBVIEW2_URL
             if sys.platform.startswith("win") else
             "Make sure you are running the build for your Mac's chip "
             "(Apple Silicon = arm64, Intel = x86_64)."

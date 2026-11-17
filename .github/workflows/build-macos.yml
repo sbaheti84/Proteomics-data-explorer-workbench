@@ -122,7 +122,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip setuptools wheel
           python -m pip install -r requirements.txt
-          python -m pip install streamlit-desktop-app pyinstaller
+          # pywebview draws the app window. It used to arrive as a dependency of
+          # streamlit-desktop-app, which this project no longer uses and which
+          # held pywebview below 6.0 while pinning no exact version, so two
+          # builds could ship different rendering behaviour. Pinned here instead.
+          python -m pip install "pywebview==5.4" "pyinstaller==6.11.1"
           python -m PyInstaller --version
 
       - name: Build macOS app
