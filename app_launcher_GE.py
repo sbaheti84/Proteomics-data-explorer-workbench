@@ -3033,18 +3033,44 @@ def main():
                 # Helper functions
                 # ---------------------------
                 def _fig_to_png_bytes(fig):
-                    buf = BytesIO()
-                    fig.savefig(buf, format="png", dpi=300, bbox_inches="tight")
-                    buf.seek(0)
-                    return buf.getvalue()
+                    """
+                    PNG bytes for a report slot, which may hold any of three things.
+
+                    Raw PNG bytes are passed straight through: a plot that already
+                    rendered itself for its own download button does not need
+                    drawing twice. A matplotlib figure is drawn. A plotly figure
+                    can only be exported with kaleido and a Chrome install, which
+                    a hosted deployment and a packaged build do not have, so it
+                    returns None and the caller leaves that plot out.
+                    """
+                    if isinstance(fig, (bytes, bytearray)):
+                        return bytes(fig)
+                    if hasattr(fig, "savefig"):
+                        buf = BytesIO()
+                        fig.savefig(buf, format="png", dpi=300, bbox_inches="tight")
+                        buf.seek(0)
+                        return buf.getvalue()
+                    if hasattr(fig, "write_image"):
+                        try:
+                            return fig.to_image(format="png", scale=2)
+                        except Exception:
+                            return None
+                    return None
 
                 def _add_fig_to_zip(zf, folder, name, fig):
+                    # A figure that cannot be converted is skipped. Before, an
+                    # unconvertible figure raised out of here and the whole report
+                    # failed with nothing to say which plot caused it.
                     try:
                         png_bytes = _fig_to_png_bytes(fig)
-                        zf.writestr(f"{folder}/{name}.png", png_bytes)
+                        if png_bytes:
+                            zf.writestr(f"{folder}/{name}.png", png_bytes)
+                    except Exception:
+                        pass
                     finally:
                         try:
-                            plt.close(fig)
+                            if hasattr(fig, "savefig"):
+                                plt.close(fig)
                         except Exception:
                             pass
 
@@ -3083,6 +3109,24 @@ def main():
                                 "tables/filtered_results.csv",
                                 ss["filtered_df"].to_csv(index=False)
                             )
+
+                        # Tables from the later modules, none of which used to reach
+                        # the bundle. Pathway enrichment in particular produced a
+                        # table, a plot and its own download buttons and left nothing
+                        # behind for the report.
+                        for state_key, csv_name in (
+                            ("report_enrichment_table", "tables/pathway_enrichment.csv"),
+                            ("report_waterfall_table", "tables/waterfall_features.csv"),
+                            ("report_normalized_stats_table", "tables/normalized_statistics.csv"),
+                            ("ge_norm_proteome_df", "tables/normalized_proteome.csv"),
+                        ):
+                            extra = ss.get(state_key)
+                            if isinstance(extra, pd.DataFrame) and not extra.empty:
+                                zf.writestr(csv_name, extra.to_csv(index=False))
+
+                        methods_text = ss.get("report_enrichment_methods")
+                        if isinstance(methods_text, str) and methods_text.strip():
+                            zf.writestr("tables/pathway_enrichment_methods.txt", methods_text)
 
                         # Sample mapping metadata
                         if (
@@ -3126,12 +3170,18 @@ def main():
                                     sample_map_df.to_csv(index=False)
                                 )
 
+                        # Kept in step with the PDF's own list in ge/report_utility.py,
+                        # which this previously disagreed with in both directions: the
+                        # normalization plot reached the PDF but not the ZIP, and the
+                        # overview heatmap the ZIP but not the PDF. "report_qc_heatmap_fig"
+                        # and "report_ma_fig" are gone; nothing ever set them.
                         plot_keys = [
+                            "report_norm_fig", "report_missing_fig",
                             "report_pca_fig", "report_corr_fig", "report_density_fig",
-                            "report_sample_clustering_fig", "report_overview_heatmap_fig", "report_qc_heatmap_fig",
+                            "report_sample_clustering_fig", "report_overview_heatmap_fig",
                             "report_glycan_class_fig",
-                            "report_volcano_fig", "report_waterfall_fig", "report_ma_fig",
-                            "report_heatmap_fig", "report_boxplot_fig", "report_lollipop_fig"
+                            "report_volcano_fig", "report_waterfall_fig",
+                            "report_heatmap_fig", "report_boxplot_fig", "report_lollipop_fig",
                         ]
 
                         for plot_key in plot_keys:

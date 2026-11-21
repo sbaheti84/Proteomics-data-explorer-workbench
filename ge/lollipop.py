@@ -268,6 +268,18 @@ def create_lollipop_interactive(df, gene: str, glycan_col: str = "Glycan", sig_c
     # Render Plotly graph in Streamlit
     st.plotly_chart(fig, width="stretch")
 
+    # Keep a matplotlib rendition for the report. The plotly figure above cannot
+    # be exported without a Chrome install, so without this the report shows no
+    # lollipop at all. Failure here must not take the plot on screen down with
+    # it, which is already drawn by this point.
+    try:
+        png = create_lollipop_static(df, gene, glycan_col=glycan_col,
+                                     sig_col=sig_col, use_legend=use_legend)
+        if png:
+            st.session_state["report_lollipop_fig"] = png
+    except Exception:
+        pass
+
     # ---------- Restored Standalone Download Interface ----------
     try:
         col1, col2 = st.columns(2)
@@ -293,6 +305,153 @@ def create_lollipop_interactive(df, gene: str, glycan_col: str = "Glycan", sig_c
     except Exception as e:
         # Fallback handling if kaleido isn't properly built inside environment setup
         st.info("Interactive modebar export available via camera icon on top right corner of graph.")
+
+
+_STATIC_MARKERS = ["o", "s", "D", "^", "v", "p", "*", "X", "P", "<", ">", "h", "H", "d", "8"]
+
+
+def create_lollipop_static(df, gene: str, glycan_col: str = "Glycan",
+                           sig_col: str = "q-value", use_legend: bool = True):
+    """
+    The same lollipop drawn with matplotlib, returned as PNG bytes.
+
+    The plot on screen is plotly, which can only be turned into an image with
+    kaleido and a Chrome install on the machine. A hosted deployment has neither
+    and a packaged build cannot carry a browser, so the report had no lollipop at
+    all. This draws the same thing: one stalk per glycoform, up or down by its
+    log2 fold change, grouped over the site it sits on, coloured by significance.
+
+    Returns None rather than raising if there is nothing to draw, so a caller can
+    store the result without guarding every call.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.colors import Normalize
+    from io import BytesIO
+
+    if "Genes" not in df.columns or "ProSites" not in df.columns or "log2FC" not in df.columns:
+        return None
+
+    subset = df[df["Genes"].astype(str).str.contains(gene, case=False, na=False)].copy()
+    if subset.empty or sig_col not in subset.columns:
+        return None
+
+    def _parse_site(val):
+        nums = re.findall(r"\d+", str(val))
+        return int(nums[0]) if nums else np.nan
+
+    subset["ProSiteNum"] = subset["ProSites"].apply(_parse_site)
+    subset = subset.dropna(subset=["ProSiteNum"])
+    if subset.empty:
+        return None
+
+    subset["neglog10q"] = -np.log10(
+        pd.to_numeric(subset[sig_col], errors="coerce").replace(0, np.nan)
+    ).fillna(0)
+    subset = subset.sort_values("ProSiteNum")
+    unique_sites = sorted(subset["ProSiteNum"].unique())
+
+    min_sig, max_sig = float(subset["neglog10q"].min()), float(subset["neglog10q"].max())
+    if min_sig == max_sig:
+        max_sig += 1.0
+
+    # Spacing worked out exactly as the interactive plot does, so the two agree.
+    GLYCAN_SPACING, MIN_SITE_GAP = 0.35, 1.2
+    BASE_LENGTH, MAX_STALK, GAP = 0.1, 2.8, 0.8
+
+    site_spreads = {}
+    for site, group in subset.groupby("ProSiteNum"):
+        biggest = max(len(group[group["log2FC"] > 0.01]), len(group[group["log2FC"] < -0.01]))
+        site_spreads[site] = max(0.2, (biggest - 1) * GLYCAN_SPACING)
+
+    site_map, current_x = {}, 0.0
+    for i, site in enumerate(unique_sites):
+        if i == 0:
+            site_map[site] = 0.0
+            continue
+        previous = unique_sites[i - 1]
+        current_x += (site_spreads[previous] / 2) + (site_spreads[site] / 2) + MIN_SITE_GAP
+        site_map[site] = current_x
+
+    fc_values = pd.to_numeric(subset["log2FC"], errors="coerce").abs()
+    fc_max = float(np.nanmax(fc_values)) if len(fc_values) and np.isfinite(fc_values).any() else 1.0
+    scale = MAX_STALK / fc_max if fc_max > 0 else 1.0
+
+    # The same fallback the interactive plot uses, so a missing structure still
+    # gets a composition rather than an empty label.
+    display = []
+    for _, row in subset.iterrows():
+        value = str(row.get(glycan_col, ""))
+        if (pd.isna(row.get(glycan_col)) or not value.strip()
+                or "not available" in value.lower() or "unknown" in value.lower()):
+            value = "{} {} {} {}".format(
+                int(row.get("Hex", 0) or 0), int(row.get("HexNAc", 0) or 0),
+                int(row.get("Fuc", 0) or 0), int(row.get("NeuAc", 0) or 0))
+        display.append(value)
+    subset["DisplayGlycan"] = display
+    unique_glycans = sorted(subset["DisplayGlycan"].unique())
+    marker_map = {g: _STATIC_MARKERS[i % len(_STATIC_MARKERS)]
+                  for i, g in enumerate(unique_glycans)}
+
+    width = min(16.0, max(7.0, 1.1 * len(unique_sites) + 3.0))
+    fig, ax = plt.subplots(figsize=(width, 6.0))
+    norm = Normalize(vmin=min_sig, vmax=max_sig)
+    cmap = plt.get_cmap("viridis_r")
+
+    low_x = site_map[unique_sites[0]] - site_spreads[unique_sites[0]] / 2
+    high_x = site_map[unique_sites[-1]] + site_spreads[unique_sites[-1]] / 2
+    ax.plot([low_x - 1.0, high_x + 1.0], [0, 0], color="black", lw=4, zorder=2)
+
+    for site, group in subset.groupby("ProSiteNum"):
+        xpos = site_map[site]
+        for direction, side in ((1, group[group["log2FC"] > 0.01]),
+                                (-1, group[group["log2FC"] < -0.01])):
+            if side.empty:
+                continue
+            fan = (len(side) - 1) * GLYCAN_SPACING
+            ends = (np.linspace(xpos - fan / 2, xpos + fan / 2, len(side))
+                    if len(side) > 1 else [xpos])
+            for (_, row), x_end in zip(side.iterrows(), ends):
+                y_start = direction * BASE_LENGTH
+                y_kink = direction * GAP
+                y_end = y_kink + direction * abs(float(row["log2FC"])) * scale
+                ax.plot([xpos, x_end, x_end], [y_start, y_kink, y_end],
+                        color="black", lw=1.1, zorder=3)
+                ax.scatter([x_end], [y_end], s=110, zorder=4,
+                           marker=marker_map.get(row["DisplayGlycan"], "o"),
+                           c=[cmap(norm(float(row["neglog10q"])))],
+                           edgecolors="black", linewidths=0.9)
+
+    ax.set_xticks([site_map[s] for s in unique_sites])
+    ax.set_xticklabels([f"N{int(s)}" for s in unique_sites], fontsize=9)
+    ax.set_xlabel("Glycosylation site on the protein", fontsize=10)
+    ax.set_ylabel("Down            log2 fold change            Up", fontsize=10)
+    ax.set_yticks([])
+    ax.set_title(f"Glycosite lollipop: {gene}", fontsize=12)
+    for spine in ("top", "right", "left", "bottom"):
+        ax.spines[spine].set_visible(False)
+
+    bar = fig.colorbar(ScalarMappable(norm=norm, cmap=cmap), ax=ax,
+                       fraction=0.025, pad=0.02)
+    bar.set_label(f"-log10({sig_col})", fontsize=9)
+
+    if use_legend and len(unique_glycans) <= 15:
+        ax.legend(handles=[
+            Line2D([0], [0], marker=marker_map[g], color="none", label=str(g),
+                   markerfacecolor="#bbbbbb", markeredgecolor="black", markersize=8)
+            for g in unique_glycans
+        ], title="Glycan", frameon=False, fontsize=8, title_fontsize=9,
+            loc="upper left", bbox_to_anchor=(1.09, 1.0))
+
+    fig.tight_layout()
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=300, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.getvalue()
 
 
 def create_lollipop(df, gene: str, sig_col: str = "q-value"):

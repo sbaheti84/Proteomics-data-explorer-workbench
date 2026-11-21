@@ -60,24 +60,68 @@ def is_desktop_build() -> bool:
     return bool(getattr(sys, "frozen", False) or hasattr(sys, "_MEIPASS"))
 
 
+def hosting_marker() -> Optional[str]:
+    """
+    A short description of the server this is running on, or None for a desktop.
+
+    Checked positively, one platform at a time, rather than by assuming a server
+    whenever the packaged build is not recognised. That assumption was safe
+    against writing files into a server container, but it also meant running the
+    app from source on your own computer offered no Save As dialog, which is how
+    most people try it.
+    """
+    for var in ("POSIT_PRODUCT", "RSTUDIO_PRODUCT"):
+        if os.environ.get(var, "").upper() == "CONNECT":
+            return "Posit Connect"
+
+    if any(os.environ.get(v) for v in (
+        "CONNECT_CONTENT_GUID", "RSCONNECT_CONTENT_GUID", "RSCONNECT_APP_NAME",
+        "CONNECT_SERVER", "POSIT_CONNECT", "RSTUDIO_CONNECT",
+    )):
+        return "Posit Connect"
+
+    # Streamlit Community Cloud serves the repository from /mount/src, which is
+    # the only dependable sign it gives.
+    try:
+        if str(Path(__file__).resolve()).startswith("/mount/src") or \
+           str(Path.cwd()).startswith("/mount/src"):
+            return "Streamlit Community Cloud"
+    except Exception:
+        pass
+
+    if os.environ.get("KUBERNETES_SERVICE_HOST"):
+        return "a Kubernetes cluster"
+
+    try:
+        if Path("/.dockerenv").exists():
+            return "a container"
+    except Exception:
+        pass
+
+    return None
+
+
 def is_hosted_mode() -> bool:
     """
     True when the app is not running on the user's own computer.
 
-    The inverse of is_desktop_build(), and deliberately so. This used to look for
-    Posit Connect environment variables and assume a local machine when it found
-    none. Streamlit Community Cloud sets no such variable, so the app concluded
-    it was local and the save buttons wrote files into the server container,
-    where the user could never find them. Assuming a server unless the packaged
-    build is recognised fails the safe way instead.
+    GLYCOEXPLORER_HOSTED overrides, which is what the Dockerfile sets. Otherwise
+    the packaged build is a desktop by definition, and everything else is judged
+    by hosting_marker().
 
-    GLYCOEXPLORER_HOSTED still overrides, which is what the Dockerfile sets.
+    A platform nobody thought to check for would be read as a desktop here. That
+    is safe in practice because the one thing it changes is offering a Save As
+    dialog, and a dialog cannot open without a desktop session: on a server it
+    fails and the download falls back to the browser.
     """
     explicit = env_to_bool(os.environ.get("GLYCOEXPLORER_HOSTED"))
     if explicit is not None:
         return explicit
 
-    return not is_desktop_build()
+    if is_desktop_build():
+        return False
+
+    return hosting_marker() is not None
 
 
 def get_save_mode() -> str:
@@ -111,9 +155,9 @@ def get_save_mode() -> str:
     if mode in {"browser", "local", "hybrid"}:
         return mode
 
-    # Unset, or a name nobody recognises: ask where to save when that is possible
-    # at all, and otherwise let the browser handle it.
-    return "dialog" if is_desktop_build() else "browser"
+    # Unset, or a name nobody recognises: ask where to save unless this is a
+    # server, where a file dialog cannot be opened on the viewer's machine.
+    return "browser" if is_hosted_mode() else "dialog"
 
 
 def safe_filename(filename: str) -> str:
@@ -211,6 +255,22 @@ class NotRunningLocallyError(RuntimeError):
     """Raised when something tries to write a file to a folder on a server."""
 
 
+def has_desktop_session() -> bool:
+    """
+    Whether this machine has a screen a file dialog could appear on.
+
+    A second line of defence, independent of recognising any particular hosting
+    platform. Writing into a folder only reaches the person using the app on a
+    real desktop, and a Linux server has no display, so Streamlit Community
+    Cloud, Docker and Kubernetes all fail this whether or not hosting_marker()
+    happens to know them. macOS and Windows always have a session.
+    """
+    if sys.platform in ("darwin", "win32"):
+        return True
+
+    return bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+
+
 def _get_downloads_dir() -> Path:
     """
     The folder a direct save writes to on this computer.
@@ -225,7 +285,7 @@ def _get_downloads_dir() -> Path:
     copies of this helper and not all of them checked anything; an error the user
     can see is better than a file that silently goes nowhere.
     """
-    if is_hosted_mode():
+    if is_hosted_mode() or not has_desktop_session():
         raise NotRunningLocallyError(
             "This app is not running on your computer, so it cannot save a file to "
             "a folder here. Use the browser download button instead."
@@ -426,16 +486,30 @@ def add_download_button(
                 st.success(f"Saved to: {outpath}")
                 return True
             except Exception as e:
-                st.error(f"Could not save file: {e}")
-                return False
-        return False
+                # No dialog could be opened: no desktop session, or tkinter is
+                # not in this build. Say so once and hand the file to the
+                # browser, which still works, rather than losing the click.
+                st.session_state[f"_no_dialog_{button_key}"] = str(e)
+                st.warning(
+                    "This computer could not open a Save As window, so use the "
+                    "download button instead."
+                )
+        if not st.session_state.get(f"_no_dialog_{button_key}"):
+            return False
+
+        # Falling through after the Save As button: that button already holds
+        # button_key, and Streamlit requires one key per element, so the download
+        # button beneath it needs its own.
+        download_key = f"{button_key}_download"
+    else:
+        download_key = button_key
 
     return st.download_button(
         label=label or f"Download {safe_name}",
         data=file_bytes,
         file_name=safe_name,
         mime=mime or guess_mime(safe_name),
-        key=button_key,
+        key=download_key,
         width=("stretch" if use_container_width else "content"),
         help=help,
         type=type,

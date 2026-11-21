@@ -35,6 +35,7 @@ from PIL import Image
 
 import urllib3
 from figure_utils import show_figure, close_figure  # draw a figure, then free it
+import occupancy  # glycopeptide abundance over a denominator from the same samples
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 try:
@@ -547,6 +548,12 @@ def detect_intensity_cols(df: pd.DataFrame) -> List[str]:
         r"(?i)log2", r"(?i)fold", r"(?i)^p[._\- ]?val", r"(?i)^q[._\- ]?val",
         r"(?i)adj[._\- ]?p", r"(?i)fdr", r"(?i)ratio", r"(?i)score",
         r"(?i)prob", r"(?i)confid", r"(?i)error", r"(?i)cv$", r"(?i)percent",
+        # Proteome Discoverer writes "Abundances (Grouped) CV [%]: 126" next to
+        # "Abundances (Grouped): 126". Both carry the channel in the name, and the
+        # earlier "cv$" and "percent" patterns miss them: the name ends in the
+        # channel rather than in CV, and the sign is "[%]" rather than the word.
+        r"(?i)\bcv\b", r"(?i)\[%\]", r"(?i)occupancy",
+        r"(?i)found\s+in\s+sample", r"(?i)^#", r"(?i)theo\.",
     ]
     include_patterns = [
         r"(?i)abundance",
@@ -560,18 +567,68 @@ def detect_intensity_cols(df: pd.DataFrame) -> List[str]:
         r"(?i)^channel",
         r"(?i)^sample[._\- ].*(intensity|quantity|abundance)",
     ]
+    # A channel written as the whole column name ("128C"), and a channel written at
+    # the end of a sample name ("C1-2180-126", "M7-1927-134"). The second shape is
+    # what a renamed results table looks like after samples are labelled, and it was
+    # previously not detected at all: such a file reported zero quantitation columns,
+    # which silently emptied every view that divides glyco by protein.
+    bare_channel = re.compile(r"(12[6-9]|13[0-5])[NC]?")
+    trailing_channel = re.compile(r"(?:^|[-_.:\s])(12[6-9]|13[0-5])[NC]?$")
+
+    trailing_hits = []
     for c in df.columns:
         s_col = str(c).strip()
         if any(re.search(pat, s_col) for pat in exclude_patterns):
             continue
-        if re.fullmatch(r"(12[6-9]|13[0-4])[NC]?", s_col):
+        if bare_channel.fullmatch(s_col):
             cols.append(c)
             continue
         if any(re.search(pat, s_col) for pat in include_patterns):
             vals = pd.to_numeric(df[c], errors="coerce")
             if vals.notna().sum() > 0:
                 cols.append(c)
-    return list(dict.fromkeys(cols))
+            continue
+        if trailing_channel.search(s_col):
+            vals = pd.to_numeric(df[c], errors="coerce")
+            if vals.notna().sum() > 0:
+                trailing_hits.append(c)
+
+    # Only trusted as a set. One column happening to end in a number in that range
+    # is more likely a coincidence than a labelled reporter channel, and a real
+    # plex always has several.
+    if len(trailing_hits) >= 3:
+        cols.extend(trailing_hits)
+
+    cols = list(dict.fromkeys(cols))
+    if cols:
+        return cols
+
+    # Nothing in the names identified a sample. An analysed table is usually
+    # renamed to whatever the sample sheet called the samples, which can be
+    # anything at all, so the last resort is to find the columns by what they
+    # hold. This is a suggestion rather than an answer: callers put it in front of
+    # the user to confirm instead of relying on it.
+    try:
+        return list(occupancy.find_abundance_columns(df))
+    except Exception:
+        return []
+
+# The names a glycopeptide backbone sequence is exported under. Kept in one place
+# because several modules need the same answer: a file that names the column
+# "Peptide_N" was previously read as having no peptide column at all, which left
+# the site-occupancy denominator with nothing to match on and no error to show.
+PEPTIDE_COL_CANDIDATES = [
+    "Peptide", "Peptide_N", "Peptide N", "PeptideN",
+    "Annotated Sequence", "Sequence", "Peptide Sequence",
+    "Stripped Sequence", "Backbone", "Backbone Peptide",
+]
+
+# The names a protein accession is exported under, same reasoning.
+PROTEIN_COL_CANDIDATES = [
+    "Accession", "Protein", "Proteins", "Protein Accessions",
+    "Master Protein Accessions", "Protein Accession", "Protein ID",
+]
+
 
 def detect_feature_col(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
     for c in candidates:
@@ -2742,6 +2799,21 @@ def generate_report_bundle(
         zf.writestr("tables/gpi_integrated_results.csv", merged_df.to_csv(index=False))
         zf.writestr("tables/gpi_glyco_data.csv", glyco_df.to_csv(index=False))
         zf.writestr("tables/gpi_proteome_data.csv", prot_df.to_csv(index=False))
+
+        # Tables from the modules the bundle used to leave out. Each is a table
+        # rather than a picture: their plots are plotly, which cannot be exported
+        # without a Chrome install on the machine.
+        for state_key, csv_name in (
+            ("report_normalized_stats_table", "tables/gpi_normalized_statistics.csv"),
+            ("report_enrichment_table", "tables/gpi_pathway_enrichment.csv"),
+        ):
+            extra = st.session_state.get(state_key)
+            if isinstance(extra, pd.DataFrame) and not extra.empty:
+                zf.writestr(csv_name, extra.to_csv(index=False))
+
+        methods_text = st.session_state.get("report_enrichment_methods")
+        if isinstance(methods_text, str) and methods_text.strip():
+            zf.writestr("tables/gpi_pathway_enrichment_methods.txt", methods_text)
         for name, fig in figure_pack.figures.items():
             img_buf = io.BytesIO()
             fig.savefig(img_buf, format="png", dpi=300, bbox_inches="tight")
@@ -3634,6 +3706,302 @@ GPI_PANELS = [
 ]
 
 
+def _confirm_sample_columns(df, detected, what, key):
+    """
+    Show the sample columns that were found and let them be corrected.
+
+    How they were found decides how loudly to say so. Where the names carried a
+    reporter channel or the word abundance, they identified themselves and the
+    list is just reported. Where the names said nothing and the columns were
+    picked by what they hold, that is a guess, and a guess that silently put a
+    fold change or a score in place of a sample would produce a plausible-looking
+    table of wrong numbers. So it is labelled as a guess and left editable.
+    """
+    by_name = occupancy.find_abundance_columns(df, by_name_only=True)
+    how = "name" if by_name else ("content" if detected else "none")
+
+    if how == "content":
+        st.warning(
+            f"The {what} file has no reporter channel numbers or abundance labels in "
+            f"its column names, so these {len(detected)} columns were picked by what "
+            "they contain. Check them."
+        )
+    elif how == "none":
+        st.warning(f"No sample columns could be found in the {what} file. Pick them below.")
+
+    numeric = [c for c in df.columns
+               if pd.to_numeric(df[c], errors="coerce").notna().any()]
+    options = list(dict.fromkeys(list(detected) + numeric))
+
+    chosen = st.multiselect(
+        f"Sample columns — {what}", options, default=list(detected), key=key,
+        help="The per-sample quantitation columns. Statistics columns such as log2FC, "
+             "a p-value or a fold change must not be in this list.",
+    )
+    if how == "name" and chosen == list(detected):
+        st.caption(f"{len(chosen)} sample columns read from the {what} column names.")
+    return chosen, how
+
+
+def render_normalized_statistics(glyco_df, prot_df, g_int_cols, p_int_cols,
+                                 g_peptide_col=None, g_protein_col=None):
+    """
+    Glycopeptide fold changes with a denominator measured in the same samples.
+
+    Two denominators are offered. The parent protein answers whether a change is
+    just the protein becoming more abundant. The unglycosylated form of the same
+    peptide answers whether occupancy at that site changed, and is the better of
+    the two where it exists, because it shares digestion and ionisation with the
+    glycosylated form and is specific to one site. It needs a peptide-level
+    export, so it appears only once one is uploaded.
+    """
+    st.markdown("### Abundance-Level Normalization")
+
+    # The backbone sequence is what the naked-peptide denominator matches on, so a
+    # file naming it anything other than "Peptide" has to be detected, not assumed.
+    g_peptide_col = g_peptide_col or detect_feature_col(glyco_df, PEPTIDE_COL_CANDIDATES)
+    g_protein_col = g_protein_col or detect_feature_col(glyco_df, PROTEIN_COL_CANDIDATES)
+
+    # Sample columns are renamed to whatever the sample sheet called the samples,
+    # so their names cannot be relied on to say which sample, or even that they
+    # hold quantitation. Whatever was detected is therefore shown and left
+    # editable rather than used silently: a wrong column here would be divided
+    # into every row and the result would still look like a result.
+    g_int_cols, g_how = _confirm_sample_columns(
+        glyco_df, g_int_cols, "glyco results", "gpi_norm_gcols")
+    p_int_cols, p_how = _confirm_sample_columns(
+        prot_df, p_int_cols, "total protein results", "gpi_norm_pcols")
+
+    if len(g_int_cols) < 4 or len(p_int_cols) < 4:
+        st.info("Pick at least four sample columns in each file to go on.")
+        return
+
+    pairs, only_glyco, only_prot = occupancy.match_channels(
+        glyco_df, prot_df, g_int_cols, p_int_cols
+    )
+
+    if not pairs:
+        # Neither the reporter channel nor the column name lined the two files up.
+        # Order is the only thing left, and only the person running this knows
+        # whether it holds, so it is asked for rather than assumed.
+        st.warning(
+            "No sample could be matched between the two files. Neither file carries "
+            "reporter channel numbers in its column names, and the names themselves "
+            "differ, so there is nothing to match on."
+        )
+        if len(g_int_cols) == len(p_int_cols):
+            if st.checkbox(
+                f"Both files list the same {len(g_int_cols)} samples in the same order",
+                key="gpi_norm_positional",
+                help="Pair the columns by position. Correct when both files came out of "
+                     "one pipeline. Wrong, with no warning, if a channel was dropped from "
+                     "one of them or the columns were reordered. Check the pairing below.",
+            ):
+                pairs, only_glyco, only_prot = occupancy.match_channels(
+                    glyco_df, prot_df, g_int_cols, p_int_cols, allow_positional=True
+                )
+                st.dataframe(
+                    pd.DataFrame({"glyco file": list(pairs.keys()),
+                                  "total protein file": list(pairs.values())}),
+                    width="stretch", hide_index=True,
+                )
+                st.caption("Check every row of this pairing before trusting the result below.")
+        else:
+            st.caption(
+                f"The files hold a different number of sample columns "
+                f"({len(g_int_cols)} and {len(p_int_cols)}), so they cannot be paired by "
+                "order either. Rename the sample columns to match in both files, or keep "
+                "the reporter channel in the names."
+            )
+        if not pairs:
+            return
+
+    if len(pairs) < 4:
+        st.info(
+            f"Found {len(pairs)} channel(s) present in both files. This needs the same "
+            "samples in each, with at least two per group. "
+            + (f"Only in the glyco file: {', '.join(only_glyco)}. " if only_glyco else "")
+            + (f"Only in the protein file: {', '.join(only_prot)}." if only_prot else "")
+        )
+        return
+
+    with st.container(border=True):
+        st.caption(
+            f"{len(pairs)} channels matched between the two files."
+            + (f"  Unmatched and therefore unused: {', '.join(only_glyco + only_prot)}."
+               if (only_glyco or only_prot) else "")
+        )
+
+        glyco_channels = list(pairs.keys())
+
+        col_a, col_b = st.columns(2)
+        with col_a:
+            control = st.multiselect(
+                "Control channels", glyco_channels,
+                default=glyco_channels[: len(glyco_channels) // 2],
+                key="gpi_norm_control",
+                help="The same samples as in the protein file. Dividing happens within "
+                     "each sample, so the channels must line up.",
+            )
+        with col_b:
+            test = st.multiselect(
+                "Test channels", [c for c in glyco_channels if c not in control],
+                default=[c for c in glyco_channels[len(glyco_channels) // 2:]],
+                key="gpi_norm_test",
+            )
+
+        if len(control) < 2 or len(test) < 2:
+            st.info("Pick at least two channels for each group.")
+            return
+
+        peptide_file = st.file_uploader(
+            "Peptide-level proteome export, for site occupancy (optional)",
+            type=["csv", "tsv", "txt", "xlsx"], key="gpi_peptide_up",
+            help="Proteome Discoverer PeptideGroups export from the same project. Used to "
+                 "find the unglycosylated form of each glycopeptide backbone. Without it, "
+                 "only parent-protein normalization is shown.",
+        )
+
+        choices = ["Parent protein"]
+        peptides_aggregated = None
+        if peptide_file is not None:
+            try:
+                peptides = read_table(peptide_file)
+                seq_col = detect_feature_col(
+                    peptides,
+                    ["Annotated Sequence", "Sequence"] + PEPTIDE_COL_CANDIDATES,
+                )
+                pep_pairs, _, _ = occupancy.match_channels(
+                    glyco_df, peptides, g_int_cols, detect_intensity_cols(peptides)
+                )
+                if seq_col is None:
+                    st.warning(
+                        "No sequence column found in that file. Expected one of: "
+                        "Annotated Sequence, Sequence, Peptide."
+                    )
+                elif not g_peptide_col:
+                    # Without a backbone column in the glyco table there is nothing to
+                    # match the naked peptides against. Saying so beats offering the
+                    # option and returning a table with no denominator on any row.
+                    st.warning(
+                        "The glyco results table has no peptide/backbone sequence column, "
+                        "so the unglycosylated form cannot be looked up. Expected one of: "
+                        + ", ".join(PEPTIDE_COL_CANDIDATES[:6])
+                        + ". Parent-protein normalization still works."
+                    )
+                elif len(pep_pairs) < 4:
+                    st.warning(
+                        f"Only {len(pep_pairs)} channel(s) matched between the glyco file and "
+                        "the peptide file, so site occupancy cannot be calculated from it."
+                    )
+                else:
+                    peptides_aggregated = occupancy.aggregate_peptide_abundances(
+                        peptides, seq_col, list(pep_pairs.values())
+                    )
+                    st.caption(
+                        f"{len(peptides)} peptide rows collapsed to "
+                        f"{len(peptides_aggregated)} sequences; {len(pep_pairs)} channels matched."
+                    )
+                    choices.append("Unglycosylated form of the same peptide")
+            except Exception as exc:
+                st.warning(f"Could not read that peptide file: {exc}")
+
+        denominator_choice = st.radio(
+            "Denominator", choices, horizontal=True, key="gpi_norm_denominator",
+            help="Parent protein: is the protein simply more abundant? Same peptide "
+                 "unglycosylated: did occupancy at this site change?",
+        )
+
+        if denominator_choice == "Parent protein":
+            denominator = occupancy.build_protein_denominator(glyco_df, prot_df, pairs)
+            extra_cols = ["denominator_match", "protein_rows_matched"]
+        else:
+            pep_pairs, _, _ = occupancy.match_channels(
+                glyco_df, peptides_aggregated, g_int_cols,
+                [c for c in peptides_aggregated.columns if c in detect_intensity_cols(peptides_aggregated)],
+            )
+            denominator = occupancy.build_peptide_denominator(
+                glyco_df, peptides_aggregated, pep_pairs or pairs,
+                peptide_col=g_peptide_col or "Peptide",
+            )
+            extra_cols = ["denominator_match", "backbone", "forms_summed", "sequons_in_peptide"]
+
+        ratios = occupancy.normalize_to_denominator(glyco_df, denominator, glyco_channels)
+        stats_df = occupancy.compare_groups(ratios, control, test)
+
+        # Detected names first, so a table exported as "Peptide_N" / "Protein" still
+        # comes back with its sequence and accession beside the statistics instead of
+        # rows that cannot be told apart.
+        wanted = ["Feature_ID", g_peptide_col, "Glycan", "Genes", g_protein_col,
+                  "Proteins", "Protein", "ProSites", "GlycanClass"]
+        id_cols = list(dict.fromkeys(
+            c for c in wanted if c and c in glyco_df.columns
+        ))
+        # The file's own fold change and significance, carried through under an
+        # "unnormalized_" prefix so the two answers sit side by side in one sheet.
+        # Names vary by pipeline: a table can call its test "ttest" and its
+        # significance "neglog10p", and leaving those out left nothing to compare
+        # the normalized result against.
+        carried = [c for c in [
+            "log2FC", "p-value", "q-value", "pvalue", "qvalue", "p_value", "q_value",
+            "ttest", "t-test", "t_test", "neglog10p", "negLog10P", "FDR", "adj.P.Val",
+        ] if c in glyco_df.columns]
+        carried += [c for c in glyco_df.columns
+                    if str(c).upper().startswith("FC ") and c not in carried]
+
+        out = pd.concat(
+            [
+                glyco_df[id_cols].reset_index(drop=True),
+                glyco_df[carried].add_prefix("unnormalized_").reset_index(drop=True),
+                stats_df.reset_index(drop=True),
+                denominator[[c for c in extra_cols if c in denominator.columns]].reset_index(drop=True),
+            ],
+            axis=1,
+        )
+
+        # Hand the result to the report. Without this the panel's whole output
+        # existed only on screen: it reached neither the PDF nor the bundle.
+        st.session_state["report_normalized_stats_table"] = out.copy()
+
+        usable = out["normalized_log2FC"].notna()
+        tested = out["p-value"].notna()
+        matched = (out["denominator_match"] != "none") if "denominator_match" in out else usable
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Glycopeptides", f"{len(out):,}")
+        m2.metric("With a denominator", f"{int(matched.sum()):,}")
+        m3.metric("Fold change obtained", f"{int(usable.sum()):,}")
+        m4.metric("Testable", f"{int(tested.sum()):,}")
+
+        if int(matched.sum()) < len(out):
+            st.caption(
+                f"{len(out) - int(matched.sum()):,} glycopeptides had no denominator and carry no "
+                "normalized value. For the unglycosylated denominator this is expected: the bare "
+                "form of a sequon peptide often goes undetected."
+            )
+
+        shown = out[usable].sort_values("p-value", na_position="last")
+        st.dataframe(shown, width="stretch", hide_index=True)
+        add_dataframe_download_buttons(
+            out, "gpi_normalized_statistics", key_suffix="gpi_norm_stats"
+        )
+
+        help_popover(
+            "The fold change here is the glycopeptide's log2 fold change minus the "
+            "denominator's, which is what dividing the two ratios gives, to the last decimal. "
+            "What the per-sample division buys is a smaller error bar: a channel that ran light "
+            "moves a glycopeptide and its denominator together, and dividing inside the sample "
+            "cancels that, which averaging first cannot. This only holds when the two files "
+            "describe the same samples.\n\n"
+            "The ratio itself has no meaningful unit. A glyco-enriched fraction and a total "
+            "fraction sit on different scales by an unknown factor, so this is not an occupancy "
+            "percentage. The factor is the same in both groups and cancels, which is why the "
+            "change between groups can be read and the value cannot.\n\n"
+            "A peptide carrying two or more sequons cannot be site-specific: its unglycosylated "
+            "form does not say which site changed. The sequons_in_peptide column flags those."
+        )
+
+
 def render_gpi_navigation():
     """Four workflow buttons. Callbacks (not 'if st.button') so no click is lost."""
     def _toggle(state_key):
@@ -3821,7 +4189,7 @@ def main():
 
         g_int_cols = detect_intensity_cols(glyco_df)
         p_int_cols = detect_intensity_cols(prot_df)
-        g_peptide_col = detect_feature_col(glyco_df, ["Peptide", "Annotated Sequence", "Sequence", "Peptide Sequence"])
+        g_peptide_col = detect_feature_col(glyco_df, PEPTIDE_COL_CANDIDATES)
         g_site_col = detect_glycosite_col(glyco_df)
         p_protein_col = detect_feature_col(prot_df, ["Accession", "Protein", "Protein Accessions", "Master Protein Accessions"])
 
@@ -4566,6 +4934,20 @@ def main():
                         st.markdown("**Proteome rows**")
                         st.dataframe(prot_sub, width="stretch")
                         add_dataframe_download_buttons(prot_sub, f"{chosen_gene}_proteome_rows", key_suffix=f"prot_rows_{chosen_gene}")
+
+    # ---------------------------------------------------------------------
+    # Module 2b: Abundance-level normalization
+    #
+    # The per-gene view above divides channel by channel for one gene at a time
+    # and shows it as a consistency check. This runs the same division across
+    # every glycopeptide and then compares the groups, which turns it into a
+    # result: a fold change per glycopeptide with the denominator already taken
+    # out, and a p-value that benefits from the division having happened inside
+    # each sample rather than after averaging.
+    # ---------------------------------------------------------------------
+    render_normalized_statistics(glyco_df, prot_df, g_int_cols, p_int_cols,
+                                 g_peptide_col=g_peptide_col,
+                                 g_protein_col=detect_feature_col(glyco_df, PROTEIN_COL_CANDIDATES))
 
     # ---------------------------------------------------------------------
     # Module 3: Advanced views

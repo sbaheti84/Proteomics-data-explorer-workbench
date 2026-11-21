@@ -445,6 +445,14 @@ def render_ge_structural_waterfall(
                 "log2FC", sig_col, metric_label, alpha_thr, log2fc_thr,
             )
 
+            # The plot on screen is plotly, which cannot be exported without a
+            # Chrome install, so the report never received a waterfall at all.
+            # These are the same bytes the download button below offers, drawn with
+            # matplotlib, so keeping them costs nothing and gives the report the
+            # figure it was always meant to have.
+            st.session_state["report_waterfall_fig"] = png_bytes
+            st.session_state["report_waterfall_table"] = label_df[export_cols].copy()
+
             d1, d2, d3 = st.columns(3)
 
             with d1:
@@ -473,4 +481,3 @@ def render_ge_structural_waterfall(
                     key="ge_wfl_csv",
                     mime="text/csv"
                 )
-

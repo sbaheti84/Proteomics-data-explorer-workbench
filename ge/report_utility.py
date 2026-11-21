@@ -272,9 +272,18 @@ def _add_dataframe_table(pdf, df, title, max_rows=25, note: Optional[str] = None
 
     # Keep table readable: limit to common informative columns first, then any remaining.
     preferred = [
+        # "Term" leads, so an enrichment table reads as the term and then its
+        # statistics rather than putting the supporting gene list first.
+        "Term", "Library",
         "Feature_ID", "Point_ID", "Gene", "Genes", "Peptide", "Glycan", "Glycan(H,N,A,F)", "GlycanClass",
-        "ProSites", "Proteins", "log2FC", "Mean_log2FC", "p-value", "q-value",
-        "adj.p-value", "Best_q_value", "Regulation", "Status", "Rank",
+        "ProSites", "Proteins",
+        # The normalized fold change sits with the ordinary one, ahead of the
+        # significance columns, and the denominator is named next to it so a row
+        # resting on no denominator can be seen.
+        "log2FC", "Mean_log2FC", "normalized_log2FC", "denominator_match", "backbone",
+        "p-value", "q-value",
+        "adj.p-value", "Adjusted P-value", "FDR q-value", "Best_q_value",
+        "Regulation", "Status", "Rank",
         "Significant_Peptides", "Significant_Features", "Upregulated_Hits", "Downregulated_Hits",
     ]
     ordered = [c for c in preferred if c in df.columns] + [c for c in df.columns if c not in preferred]
@@ -369,16 +378,30 @@ def _add_dataframe_table(pdf, df, title, max_rows=25, note: Optional[str] = None
 # =============================================================================
 
 def _save_fig_to_temp(fig, dpi=180) -> str:
+    """
+    Write a report figure to a temporary PNG.
+
+    Three things can be handed in. A matplotlib figure, which is drawn here. Raw
+    PNG bytes, which some plots produce for their own download button and which
+    are then reused rather than drawn a second time. And a plotly figure, which
+    needs Chrome installed on the machine to export, so it is tried last and the
+    caller is expected to cope with it failing.
+    """
     with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_img:
         temp_img_path = tmp_img.name
 
-    if hasattr(fig, "savefig"):
+    if isinstance(fig, (bytes, bytearray)):
+        with open(temp_img_path, "wb") as handle:
+            handle.write(fig)
+    elif hasattr(fig, "savefig"):
         fig.savefig(temp_img_path, format="png", dpi=dpi, bbox_inches="tight", facecolor="white")
     elif hasattr(fig, "write_image"):
-        # Requires kaleido for plotly. If not installed, this raises and will be reported in PDF.
+        # Plotly. Export needs the kaleido package and a Chrome install, so this
+        # is not available on a hosted deployment or in a packaged build. Plots
+        # meant for the report therefore keep a matplotlib or PNG rendition.
         fig.write_image(temp_img_path, scale=2)
     else:
-        raise TypeError("Unsupported figure type. Expected matplotlib figure or plotly figure.")
+        raise TypeError("Unsupported figure type. Expected a matplotlib figure, PNG bytes or a plotly figure.")
 
     return temp_img_path
 
@@ -391,6 +414,12 @@ def _figure_interpretation(title: str) -> str:
         return "Interpretation: Each box is one TMT channel. Boxes at different heights mean unequal sample loading. The lower panel (when present) shows the channels after the normalization that was used for the statistics."
     if "missing values" in t:
         return "Interpretation: Left, the share of glycoforms not measured in each sample; a sample far above its group is a weak run. Right, missing values by intensity quartile; more missing values at low intensity means values are mostly below detection."
+    if "overview heatmap" in t:
+        return "Interpretation: Every glycopeptide that passed filtering, shown across all samples before any significance test. Use it to see whether the samples of one group look alike and whether any sample stands apart from the rest."
+    if "enrichment" in t:
+        return "Interpretation: Terms over-represented among the changed glycoproteins, ranked by significance. A term rests on the genes behind it, so a term supported by only a handful of proteins should be read with care."
+    if "same-sample denominator" in t:
+        return "Interpretation: The glycopeptide change after dividing by a denominator measured in the same samples, so a change that came only from the protein becoming more abundant is removed. The ratio carries an arbitrary unit and is not an occupancy fraction; only its change between groups can be read."
     if "pca" in t or "principal component" in t:
         return "Interpretation: Samples that cluster together have more similar glycopeptide abundance profiles. Separation by group supports biological differences; a sample far from its own group may be a technical outlier."
     if "correlation" in t:
@@ -448,6 +477,12 @@ def _add_figure_page(pdf: AnalysisReport, fig, title: str, subtitle: str = None)
 
 def _collect_report_figures(ss) -> List[Dict[str, Any]]:
     # Added 'report_sample_clustering_fig' and 'report_waterfall_fig' to the list
+    # Quality control first, then the differential result, in the order the
+    # analysis is run in. This module serves both glyco apps, so a slot is kept
+    # when either of them fills it: the missing-values figure comes from the
+    # label-free app only, and the glycan class summary from the TMT app only.
+    # "MA Plot" was dropped, as neither glyco app draws one; the proteome apps
+    # that do have their own report in tp/report_utility.py.
     figure_specs = [
         ("report_norm_fig", str(ss.get("report_norm_fig_title") or "Channel Loading Before / After Normalization")),
         ("report_missing_fig", "Missing Values per Sample"),
@@ -455,10 +490,10 @@ def _collect_report_figures(ss) -> List[Dict[str, Any]]:
         ("report_corr_fig", "Sample Correlation Heatmap"),
         ("report_density_fig", "Abundance Density Plot"),
         ("report_sample_clustering_fig", "Sample Clustering"),
+        ("report_overview_heatmap_fig", "Overview Heatmap of Abundances"),
         ("report_glycan_class_fig", "Glycan Classification Summary"),
         ("report_volcano_fig", "Differential Volcano Plot"),
         ("report_waterfall_fig", "Waterfall Plot of Differential Glycopeptides"),
-        ("report_ma_fig", "MA Plot"),
         ("report_heatmap_fig", "Clustered Heatmap of Top Hits"),
         ("report_boxplot_fig", "Differential Box Plot"),
         ("report_lollipop_fig", "Glycosite Lollipop Plot"),
@@ -927,6 +962,42 @@ def generate_final_pdf():
                 title="Top Differential Results",
                 max_rows=25,
             )
+
+    # -------------------------------------------------------------------------
+    # Tables from the later modules
+    #
+    # These were absent from the report altogether. Each is carried as a table
+    # rather than as a picture: the plots that go with them are plotly, which
+    # cannot be turned into an image without a Chrome install, and redrawing them
+    # in matplotlib would put a second, differently drawn version of a working
+    # plot into the report. The numbers are what these modules are read for.
+    # -------------------------------------------------------------------------
+    for state_key, table_title, table_note in (
+        ("report_enrichment_table", "Pathway Enrichment Results",
+         "Terms over-represented among the changed glycoproteins. A term rests on the "
+         "genes behind it, so one supported by few proteins should be read with care."),
+        ("report_waterfall_table", "Waterfall Plot Features",
+         "The features numbered in the waterfall figure, in the same rank order."),
+        ("report_normalized_stats_table",
+         "Glycopeptide Change Against a Same-Sample Denominator",
+         "Fold change after dividing by a denominator measured in the same samples, so "
+         "a change caused only by the protein becoming more abundant is removed. The "
+         "ratio carries an arbitrary unit and is not an occupancy fraction; only its "
+         "change between groups can be read."),
+    ):
+        table = ss.get(state_key)
+        if isinstance(table, pd.DataFrame) and not table.empty:
+            try:
+                _add_dataframe_table(pdf, table, title=table_title,
+                                     max_rows=25, note=table_note)
+            except Exception:
+                pass
+
+    methods = ss.get("report_enrichment_methods")
+    if isinstance(methods, str) and methods.strip():
+        pdf.add_page()
+        pdf.section_title("Pathway Enrichment Methods")
+        pdf.section_text(methods.strip(), font_size=9)
 
     # -------------------------------------------------------------------------
     # Plots

@@ -1275,7 +1275,14 @@ def ge_norm_boxplot_figure(raw_df: pd.DataFrame, norm_df: "pd.DataFrame | None",
     group_of = group_of or {}
     groups = list(dict.fromkeys(group_of.get(c, "") for c in cols))
     default_cols = ["#8dd3c7", "#fdb462", "#bebada", "#fb8072", "#80b1d3", "#b3de69"]
-    palette = palette or {g: default_cols[i % len(default_cols)] for i, g in enumerate(groups)}
+    # Every group found in the data gets a colour, and a palette passed in is laid
+    # over the top rather than used in place of it. A caller's palette is built
+    # from its own picture of the groups and can be missing one the data has, and
+    # the legend below then looked that group up and the whole page failed.
+    palette = {
+        **{g: default_cols[i % len(default_cols)] for i, g in enumerate(groups)},
+        **(palette or {}),
+    }
     if not panels:
         panels = [("Before normalization (raw abundances)", raw_df)]
         if norm_df is not None:
@@ -1305,7 +1312,7 @@ def ge_norm_boxplot_figure(raw_df: pd.DataFrame, norm_df: "pd.DataFrame | None",
     axes[-1, 0].set_xticklabels([fmt(c) for c in cols], rotation=45, ha="right", fontsize=7)
     if groups and any(groups):
         from matplotlib.patches import Patch
-        handles = [Patch(facecolor=palette[g], edgecolor="#555555", label=g) for g in groups if g]
+        handles = [Patch(facecolor=palette.get(g, "#d9d9d9"), edgecolor="#555555", label=g) for g in groups if g]
         axes[0, 0].legend(handles=handles, fontsize=7, frameon=False, loc="upper left", bbox_to_anchor=(1.0, 1.0))
     plt.tight_layout()
     return fig
@@ -1347,7 +1354,11 @@ def missing_values_figure(df: pd.DataFrame, cols: list, fmt=None, group_of: "dic
     pct = 100.0 * miss.mean(axis=0)
     groups = list(dict.fromkeys(group_of.get(c, "") for c in cols))
     default_cols = ["#8dd3c7", "#fdb462", "#bebada", "#fb8072", "#80b1d3", "#b3de69"]
-    palette = palette or {g: default_cols[i % len(default_cols)] for i, g in enumerate(groups)}
+    # As above: a colour for every group in the data, with a supplied palette on top.
+    palette = {
+        **{g: default_cols[i % len(default_cols)] for i, g in enumerate(groups)},
+        **(palette or {}),
+    }
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(max(6.4, 0.26 * len(cols) + 3.8), 3.4),
                                    gridspec_kw={"width_ratios": [max(2.0, 0.26 * len(cols)), 1.9]})
@@ -1363,7 +1374,7 @@ def missing_values_figure(df: pd.DataFrame, cols: list, fmt=None, group_of: "dic
     ax1.set_ylim(0, max(5.0, float(pct.max()) * 1.35 if len(pct) else 5.0))
     if groups and any(groups):
         from matplotlib.patches import Patch
-        ax1.legend(handles=[Patch(facecolor=palette[g], edgecolor="#555555", label=g) for g in groups if g],
+        ax1.legend(handles=[Patch(facecolor=palette.get(g, "#d9d9d9"), edgecolor="#555555", label=g) for g in groups if g],
                    fontsize=7, frameon=False, loc="upper left", ncol=min(3, len([g for g in groups if g])))
 
     L = np.log2(X.where(X > 0))

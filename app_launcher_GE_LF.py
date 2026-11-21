@@ -4220,21 +4220,48 @@ def main():
                             if rows:
                                 zf.writestr("tables/sample_metadata_mapping.csv", pd.DataFrame(rows).to_csv(index=False))
 
+                        # Kept in step with the PDF's list in ge/report_utility.py, which
+                        # this disagreed with: the channel loading, missing values, sample
+                        # clustering and glycan class figures were all written to the PDF
+                        # and left out of the bundle, while "report_qc_heatmap_fig" and
+                        # "report_ma_fig" are set by the proteome apps only and so could
+                        # never fill here.
                         plot_keys = [
-                            "report_pca_fig", "report_corr_fig", "report_density_fig", 
-                            "report_overview_heatmap_fig", "report_qc_heatmap_fig", 
-                            "report_volcano_fig", "report_waterfall_fig", "report_ma_fig", "report_heatmap_fig", 
-                            "report_boxplot_fig", "report_lollipop_fig"
+                            "report_norm_fig", "report_missing_fig",
+                            "report_pca_fig", "report_corr_fig", "report_density_fig",
+                            "report_sample_clustering_fig", "report_overview_heatmap_fig",
+                            "report_glycan_class_fig",
+                            "report_volcano_fig", "report_waterfall_fig",
+                            "report_heatmap_fig", "report_boxplot_fig", "report_lollipop_fig",
                         ]
-                        
+
                         for plot_key in plot_keys:
-                            if plot_key in ss and ss[plot_key]:
-                                buf = BytesIO()
-                                ss[plot_key].savefig(buf, format="png", dpi=300, bbox_inches="tight")
+                            if plot_key in ss and ss[plot_key] is not None:
+                                figure = ss[plot_key]
                                 clean_name = plot_key.replace('report_', '').replace('_fig', '')
-                                zf.writestr(f"plots/{clean_name}.png", buf.getvalue())
                                 try:
-                                    plt.close(ss[plot_key])
+                                    # A slot may hold PNG bytes rather than a figure: a plot
+                                    # drawn with plotly keeps a rendered copy for the report,
+                                    # because plotly export needs a Chrome install. Calling
+                                    # savefig on those bytes used to raise out of this loop
+                                    # and fail the whole report with nothing to say why.
+                                    if isinstance(figure, (bytes, bytearray)):
+                                        png_bytes = bytes(figure)
+                                    elif hasattr(figure, "savefig"):
+                                        buf = BytesIO()
+                                        figure.savefig(buf, format="png", dpi=300, bbox_inches="tight")
+                                        png_bytes = buf.getvalue()
+                                    elif hasattr(figure, "to_image"):
+                                        png_bytes = figure.to_image(format="png", scale=2)
+                                    else:
+                                        png_bytes = None
+                                    if png_bytes:
+                                        zf.writestr(f"plots/{clean_name}.png", png_bytes)
+                                except Exception:
+                                    pass
+                                try:
+                                    if hasattr(figure, "savefig"):
+                                        plt.close(figure)
                                 except Exception:
                                     pass
 

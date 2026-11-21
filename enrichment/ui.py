@@ -295,6 +295,11 @@ def render_pathway_enrichment(results, app_key: str, glyco: bool = False) -> Non
         if fig is not None:
             st.plotly_chart(fig, width="stretch", key=k("plot"))
 
+        # Keep the results for the final report, which previously received nothing
+        # from this module at all. The table is kept rather than the plot: the plot
+        # is plotly and cannot be exported without a Chrome install on the machine.
+        st.session_state["report_enrichment_table"] = table.copy()
+
         from download_utility import add_dataframe_download_buttons, add_plotly_download_buttons
         st.markdown("###### Download")
         add_dataframe_download_buttons(table, base_filename=f"pathway_enrichment_{app_key}",
@@ -305,6 +310,7 @@ def render_pathway_enrichment(results, app_key: str, glyco: bool = False) -> Non
 
     with st.expander("Methods text and gene-set versions"):
         text = core.methods_paragraph(s, manifest, {})
+        st.session_state["report_enrichment_methods"] = text
         st.code(text, language=None, wrap_lines=True)
         libs = manifest["species"][s["species"]]["libraries"]
         st.markdown("\n".join(f"- **{libs[l]['title']}**: {libs[l]['source']}. {libs[l].get('citation', '')}"
