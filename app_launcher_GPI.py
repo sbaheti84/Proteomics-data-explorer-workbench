@@ -11,6 +11,7 @@ import re
 import uuid
 import math
 import zipfile
+import traceback
 import base64
 import datetime
 import html as html_lib
@@ -130,14 +131,15 @@ inject_custom_css()
 # State defaults
 # -----------------------------------------------------------------------------
 for _k in [
-    "show_overview", "show_targeted", "show_advanced", "show_export",
+    "show_overview", "show_targeted", "show_occupancy", "show_advanced", "show_export",
     "upload_sig", "gpi_pdf_bytes", "gpi_zip_bytes"
 ]:
     if _k not in ss:
         ss[_k] = False if _k.startswith("show_") else None
 
 def _reset_module_flags():
-    for key in ["show_overview", "show_targeted", "show_advanced", "show_export"]:
+    for key in ["show_overview", "show_targeted", "show_occupancy",
+                "show_advanced", "show_export"]:
         ss[key] = False
 
 # -----------------------------------------------------------------------------
@@ -3697,13 +3699,73 @@ GPI_PANELS = [
     ("show_targeted", "Targeted Protein/Glycosite Evidence",
      "Check one protein at a time: glycopeptides, sites, glycans and the protein change.",
      "Step 2 · Check single proteins before reporting them"),
+    ("show_occupancy", "Occupancy & Abundance Normalization",
+     "Divide each glycopeptide by a denominator measured in the same samples: the "
+     "parent protein, or the unglycosylated form of the same peptide for site occupancy.",
+     "Step 3 · Is the change glycosylation, or just more protein"),
     ("show_advanced", "Advanced Integration Views",
      "Summary plots: evidence landscape, UpSet, clustermap, enrichment.",
-     "Step 3 · Summary plots once thresholds are final"),
+     "Step 4 · Summary plots once thresholds are final"),
     ("show_export", "Generate Report & Export",
      "PDF report and ZIP bundle of tables and figures.",
-     "Step 4 · PDF report and ZIP of tables and figures"),
+     "Step 5 · PDF report and ZIP of tables and figures"),
 ]
+
+
+def _take_columns(df, names):
+    """
+    Those columns, one each, even where the file repeats a heading.
+
+    Selecting by name returns every column of that name, so one repeated heading
+    in the upload became a repeated column in the result, and a table with two
+    columns of one name can be neither drawn nor written to a sheet. The first
+    occurrence is taken, which is the one the rest of the app already reads.
+    """
+    positions, seen = [], set()
+    for wanted in names:
+        if wanted in seen:
+            continue
+        for position, name in enumerate(df.columns):
+            if name == wanted:
+                positions.append(position)
+                seen.add(wanted)
+                break
+    return df.iloc[:, positions].reset_index(drop=True)
+
+
+def _numeric_column_names(df):
+    """
+    Names of the columns holding numbers, safe on a file with repeated headings.
+
+    df[name] gives back a frame rather than a column when two columns share a
+    name, and pd.to_numeric rejects a frame, so reading the columns by name
+    failed outright on an export that repeats one. Proteomics exports repeat
+    headings often enough that this has to be positional.
+    """
+    out = []
+    for position, name in enumerate(df.columns):
+        try:
+            values = pd.to_numeric(df.iloc[:, position], errors="coerce")
+        except Exception:
+            continue
+        if values.notna().any() and name not in out:
+            out.append(name)
+    return out
+
+
+def _sanitise_multiselect_state(key, options):
+    """
+    Drop anything remembered for a multiselect that the options no longer offer.
+
+    Streamlit refuses to draw a multiselect whose remembered value is not among
+    its options, and the remembered value outlives a change of file, so loading
+    a second dataset took the page down rather than showing the new columns.
+    """
+    remembered = st.session_state.get(key)
+    if isinstance(remembered, list):
+        kept = [v for v in remembered if v in options]
+        if len(kept) != len(remembered):
+            st.session_state[key] = kept
 
 
 def _confirm_sample_columns(df, detected, what, key):
@@ -3729,22 +3791,60 @@ def _confirm_sample_columns(df, detected, what, key):
     elif how == "none":
         st.warning(f"No sample columns could be found in the {what} file. Pick them below.")
 
-    numeric = [c for c in df.columns
-               if pd.to_numeric(df[c], errors="coerce").notna().any()]
+    numeric = _numeric_column_names(df)
     options = list(dict.fromkeys(list(detected) + numeric))
+    _sanitise_multiselect_state(key, options)
 
-    chosen = st.multiselect(
-        f"Sample columns — {what}", options, default=list(detected), key=key,
-        help="The per-sample quantitation columns. Statistics columns such as log2FC, "
-             "a p-value or a fold change must not be in this list.",
-    )
-    if how == "name" and chosen == list(detected):
-        st.caption(f"{len(chosen)} sample columns read from the {what} column names.")
+    # Tucked away when the column names identified themselves, which is most of
+    # the time, and open when they did not. A picker listing every numeric column
+    # in the file is a lot of screen for a question that usually has an obvious
+    # answer, but it has to be reachable, because a wrong column here is divided
+    # into every row and the result still looks like a result.
+    confident = how == "name"
+    with st.expander(
+        f"Sample columns — {what}"
+        + (f" ({len(detected)} found)" if confident else " — check these"),
+        expanded=not confident,
+    ):
+        chosen = st.multiselect(
+            "Per-sample quantitation columns", options,
+            default=[c for c in detected if c in options], key=key,
+            help="Statistics columns such as log2FC, a p-value or a fold change "
+                 "must not be in this list.",
+        )
     return chosen, how
 
 
 def render_normalized_statistics(glyco_df, prot_df, g_int_cols, p_int_cols,
                                  g_peptide_col=None, g_protein_col=None):
+    """
+    Wrapper that keeps a fault in this panel from taking the page down with it.
+
+    Everything above this panel is already on screen by the time it runs, and
+    losing all of it to a generic "something went wrong" hides both the earlier
+    results and which panel actually failed. The fault is reported here, in
+    place, with the detail needed to act on it.
+    """
+    st.markdown("### Abundance-Level Normalization")
+    try:
+        _render_normalized_statistics(glyco_df, prot_df, g_int_cols, p_int_cols,
+                                      g_peptide_col=g_peptide_col,
+                                      g_protein_col=g_protein_col)
+    except Exception as exc:
+        st.error(f"This panel could not run: {type(exc).__name__}: {exc}")
+        if isinstance(exc, TypeError) and "unexpected keyword" in str(exc):
+            st.info(
+                "That error means occupancy.py is older than this app file. Copy the "
+                "current occupancy.py into the same folder as app_launcher_GPI.py and "
+                "reload."
+            )
+        with st.expander("Details"):
+            st.code(traceback.format_exc(), language=None)
+        st.caption("Everything above this panel is unaffected.")
+
+
+def _render_normalized_statistics(glyco_df, prot_df, g_int_cols, p_int_cols,
+                                  g_peptide_col=None, g_protein_col=None):
     """
     Glycopeptide fold changes with a denominator measured in the same samples.
 
@@ -3755,8 +3855,6 @@ def render_normalized_statistics(glyco_df, prot_df, g_int_cols, p_int_cols,
     glycosylated form and is specific to one site. It needs a peptide-level
     export, so it appears only once one is uploaded.
     """
-    st.markdown("### Abundance-Level Normalization")
-
     # The backbone sequence is what the naked-peptide denominator matches on, so a
     # file naming it anything other than "Peptide" has to be detected, not assumed.
     g_peptide_col = g_peptide_col or detect_feature_col(glyco_df, PEPTIDE_COL_CANDIDATES)
@@ -3926,6 +4024,76 @@ def render_normalized_statistics(glyco_df, prot_df, g_int_cols, p_int_cols,
             )
             extra_cols = ["denominator_match", "backbone", "forms_summed", "sequons_in_peptide"]
 
+            # Nothing matched is a result, not a failure, and the two files have
+            # to be put side by side to see why: usually the backbone column
+            # carries the glycan or the site alongside the sequence, or the
+            # unglycosylated form simply was not detected in the proteome run.
+            matched_rows = int((denominator["denominator_match"] != "none").sum())
+            if matched_rows == 0:
+                st.warning(
+                    "No glycopeptide backbone matched any sequence in the peptide file, "
+                    "so site occupancy cannot be calculated. Parent-protein "
+                    "normalization is unaffected."
+                )
+                backbones = [b for b in denominator["backbone"].tolist() if b]
+                available = set(peptides_aggregated["_sequence"])
+
+                # Which way of writing the peptide, if any, would have matched.
+                # A single character can differ between the two files, and saying
+                # which one beats leaving the reader to guess from two columns.
+                counts = {}
+                for backbone in backbones:
+                    for candidate, rule in occupancy.sequence_variants(backbone):
+                        if candidate in available:
+                            counts[rule] = counts.get(rule, 0) + 1
+                            break
+                # A peptide one residue longer or shorter than a backbone, which is
+                # what a missed cleavage or a trailing character in one file looks
+                # like. Compared both ways round, since either file can be the
+                # longer one.
+                trimmed = {b[:-1] for b in backbones if len(b) > 4}
+                whole = set(backbones)
+                partial = sum(1 for s in available
+                              if (len(s) > 4 and s[:-1] in whole) or s in trimmed)
+
+                st.markdown("**What matched under each way of writing the peptide**")
+                st.dataframe(
+                    pd.DataFrame([
+                        {"Written as": "the sequence itself",
+                         "Backbones matched": counts.get("sequence", 0),
+                         "Means": "the unglycosylated peptide, as a proteome run reports it"},
+                        {"Written as": "J in place of the glycosylated N",
+                         "Backbones matched": counts.get("marked", 0),
+                         "Means": "a site marker from the search software"},
+                        {"Written as": "D in place of a sequon N",
+                         "Backbones matched": counts.get("deamidated", 0),
+                         "Means": "glycans released with PNGase F, which deamidates the site"},
+                        {"Written as": "nearly, off by the last residue",
+                         "Backbones matched": partial,
+                         "Means": "a different digestion or a trailing character in one file"},
+                    ]),
+                    width="stretch", hide_index=True,
+                )
+
+                st.dataframe(
+                    pd.DataFrame({
+                        f"read from '{g_peptide_col}' in the glyco file":
+                            backbones[:5] + [""] * max(0, 5 - len(backbones[:5])),
+                        "found in the peptide file":
+                            list(peptides_aggregated["_sequence"].head(5))
+                            + [""] * max(0, 5 - len(available)),
+                    }),
+                    width="stretch", hide_index=True,
+                )
+                st.caption(
+                    "All zero with two plain-looking sequence columns means the "
+                    "unglycosylated forms were not identified in this proteome run, "
+                    "which is common: the glycosylated population carries most of the "
+                    "signal. If the left column holds more than a sequence, pick the "
+                    "column with the plain backbone above."
+                )
+                return
+
         ratios = occupancy.normalize_to_denominator(glyco_df, denominator, glyco_channels)
         stats_df = occupancy.compare_groups(ratios, control, test)
 
@@ -3951,13 +4119,16 @@ def render_normalized_statistics(glyco_df, prot_df, g_int_cols, p_int_cols,
 
         out = pd.concat(
             [
-                glyco_df[id_cols].reset_index(drop=True),
-                glyco_df[carried].add_prefix("unnormalized_").reset_index(drop=True),
+                _take_columns(glyco_df, id_cols),
+                _take_columns(glyco_df, carried).add_prefix("unnormalized_"),
                 stats_df.reset_index(drop=True),
-                denominator[[c for c in extra_cols if c in denominator.columns]].reset_index(drop=True),
+                _take_columns(denominator, [c for c in extra_cols if c in denominator.columns]),
             ],
             axis=1,
         )
+        # A heading repeated in the uploaded file would otherwise be repeated here,
+        # and a table with two columns of one name cannot be drawn or written out.
+        out = out.loc[:, ~out.columns.duplicated()]
 
         # Hand the result to the report. Without this the panel's whole output
         # existed only on screen: it reached neither the PDF nor the bundle.
@@ -4009,7 +4180,9 @@ def render_gpi_navigation():
         _reset_module_flags()
         ss[state_key] = not was_open
 
-    cols = st.columns(4)
+    # One column per panel, counted rather than fixed at four, so adding a step
+    # does not silently drop its button off the end of the row.
+    cols = st.columns(len(GPI_PANELS))
     for col, (state_key, label, help_text, caption) in zip(cols, GPI_PANELS):
         col.button(("▾ " if ss.get(state_key) else "▸ ") + label, use_container_width=True,
                    key=f"gpi_nav_{state_key}", help=help_text, on_click=_toggle, args=(state_key,))
@@ -4936,18 +5109,23 @@ def main():
                         add_dataframe_download_buttons(prot_sub, f"{chosen_gene}_proteome_rows", key_suffix=f"prot_rows_{chosen_gene}")
 
     # ---------------------------------------------------------------------
-    # Module 2b: Abundance-level normalization
+    # Step 3: Occupancy and abundance-level normalization
     #
-    # The per-gene view above divides channel by channel for one gene at a time
-    # and shows it as a consistency check. This runs the same division across
-    # every glycopeptide and then compares the groups, which turns it into a
-    # result: a fold change per glycopeptide with the denominator already taken
-    # out, and a p-value that benefits from the division having happened inside
-    # each sample rather than after averaging.
+    # The per-gene view in step 2 divides channel by channel for one gene at a
+    # time and shows it as a consistency check. This runs the same division
+    # across every glycopeptide and then compares the groups, which turns it
+    # into a result: a fold change per glycopeptide with the denominator already
+    # taken out, and a p-value that benefits from the division having happened
+    # inside each sample rather than after averaging.
+    #
+    # It has a step of its own because it was previously rendered at the top
+    # level of main(), which put its uploader, its column pickers and its whole
+    # result on screen under every other step and with no step open at all.
     # ---------------------------------------------------------------------
-    render_normalized_statistics(glyco_df, prot_df, g_int_cols, p_int_cols,
-                                 g_peptide_col=g_peptide_col,
-                                 g_protein_col=detect_feature_col(glyco_df, PROTEIN_COL_CANDIDATES))
+    if ss["show_occupancy"]:
+        render_normalized_statistics(glyco_df, prot_df, g_int_cols, p_int_cols,
+                                     g_peptide_col=g_peptide_col,
+                                     g_protein_col=detect_feature_col(glyco_df, PROTEIN_COL_CANDIDATES))
 
     # ---------------------------------------------------------------------
     # Module 3: Advanced views
@@ -5206,7 +5384,8 @@ def main():
                         ss["gpi_zip_bytes"] = None
                         st.rerun()
 
-    if not any([ss["show_overview"], ss["show_targeted"], ss["show_advanced"], ss["show_export"]]):
+    if not any([ss["show_overview"], ss["show_targeted"], ss["show_occupancy"],
+                ss["show_advanced"], ss["show_export"]]):
         faq_section()
 
 

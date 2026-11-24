@@ -257,9 +257,28 @@ def _add_dataframe_table(pdf, df, title, max_rows=25):
 
 
 def _save_fig_to_temp(fig, dpi=180) -> str:
+    """
+    Write a report figure to a temporary PNG.
+
+    A matplotlib figure is drawn. Raw PNG bytes are written straight out, for a
+    plot that already rendered itself for its own download button. A plotly
+    figure is tried last: exporting one needs the kaleido package and a Chrome
+    install, which a hosted deployment does not have and a packaged build cannot
+    carry, so the caller is expected to cope with it failing.
+    """
     with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_img:
         temp_img_path = tmp_img.name
-    fig.savefig(temp_img_path, format="png", dpi=dpi, bbox_inches="tight", facecolor="white")
+
+    if isinstance(fig, (bytes, bytearray)):
+        with open(temp_img_path, "wb") as handle:
+            handle.write(fig)
+    elif hasattr(fig, "savefig"):
+        fig.savefig(temp_img_path, format="png", dpi=dpi, bbox_inches="tight", facecolor="white")
+    elif hasattr(fig, "write_image"):
+        fig.write_image(temp_img_path, scale=2)
+    else:
+        raise TypeError("Unsupported figure type. Expected a matplotlib figure, PNG bytes or a plotly figure.")
+
     return temp_img_path
 
 
@@ -327,10 +346,14 @@ def _add_figure_page(pdf: AnalysisReport, fig, title: str, subtitle: str = None)
 
 
 def _collect_report_figures(ss) -> List[Dict[str, Any]]:
+    # Three slots that were here before have been removed, because nothing in
+    # either proteome app ever set them and so they could never fill: the two
+    # PCA variants, which are both covered by the single "report_pca_fig" the
+    # PCA plot actually stores whether or not ellipses are drawn, and the log2
+    # fold change distribution, for which no plot exists anywhere. The numbering
+    # is left as it was so a report does not change its figure numbers.
     figure_specs = [
         ("report_norm_fig", "2b. Sample Loading Before / After Normalization"),
-        ("report_pca_no_ellipse_fig", "3a. Principal Component Analysis (PCA) - No Ellipse"),
-        ("report_pca_ellipse_fig", "3b. Principal Component Analysis (PCA) - With Ellipse"),
         ("report_pca_fig", "3. Principal Component Analysis (PCA)"),
         ("report_corr_fig", "4. Sample Correlation Heatmap"),
         ("report_density_raw_fig", "5a. Sample Density (Raw Un-transformed)"),
@@ -341,7 +364,6 @@ def _collect_report_figures(ss) -> List[Dict[str, Any]]:
         ("report_dendrogram_fig", "9. Hierarchical Clustering Dendrogram"),
         ("report_volcano_fig", "10. Differential Expression Volcano Plot"),
         ("report_ma_fig", "11. MA Plot"),
-        ("report_log2fc_density_fig", "12. Log2 Fold Change Distribution"),
         ("report_heatmap_fig", "13. Clustered Heatmap of Top Differential Hits"),
         ("report_waterfall_fig", "14. Total Protein Waterfall Plot"),
         ("report_boxplot_fig", "15. Protein Profile Box Plot"),
@@ -607,6 +629,31 @@ def generate_final_pdf():
                 df_to_plot = df_to_plot.sort_values(by=sort_by, ascending=ascending)
             df_to_plot = df_to_plot.drop(columns="_abs_fc", errors="ignore")
             _add_dataframe_table(pdf, df_to_plot, title="Top Overall Differential Results", max_rows=30)
+
+    # ---------------------------------------------------------
+    # Tables from the later modules
+    #
+    # Pathway enrichment produced a table, a plot and its own download buttons
+    # and left nothing behind, so none of it reached the report. It is carried
+    # here as a table rather than a picture: its plot is plotly, which cannot be
+    # turned into an image without a Chrome install on the machine.
+    # ---------------------------------------------------------
+    for state_key, table_title in (
+        ("report_enrichment_table", "Pathway Enrichment Results"),
+        ("report_waterfall_table", "Waterfall Plot Features"),
+    ):
+        table = ss.get(state_key)
+        if isinstance(table, pd.DataFrame) and not table.empty:
+            try:
+                _add_dataframe_table(pdf, table, title=table_title, max_rows=25)
+            except Exception:
+                pass
+
+    methods = ss.get("report_enrichment_methods")
+    if isinstance(methods, str) and methods.strip():
+        pdf.add_page()
+        pdf.section_title("Pathway Enrichment Methods")
+        pdf.section_text(methods.strip(), font_size=9)
 
     # ---------------------------------------------------------
     # Figures

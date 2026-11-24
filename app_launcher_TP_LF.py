@@ -4015,6 +4015,14 @@ def main():
 
                             show_figure(wf_fig, use_container_width=True)
 
+                            # The report has a slot for this plot that nothing ever
+                            # filled, so "14. Total Protein Waterfall Plot" was always
+                            # absent. Saving a figure works after it has been drawn and
+                            # closed, so keeping it here costs nothing.
+                            ss["report_waterfall_fig"] = wf_fig
+                            if wf_label_df is not None and not wf_label_df.empty:
+                                ss["report_waterfall_table"] = wf_label_df.copy()
+
                             png_buf = BytesIO()
                             wf_fig.savefig(png_buf, format="png", dpi=300, bbox_inches="tight")
                             png_buf.seek(0)
@@ -4356,15 +4364,31 @@ def main():
                 st.write("")
                 st.write("")
                 def _fig_to_png_bytes(fig):
-                    buf = BytesIO()
-                    fig.savefig(buf, format="png", dpi=300, bbox_inches="tight")
-                    buf.seek(0)
-                    return buf.getvalue()
+                    """
+                    PNG bytes for a report slot, which may hold more than a figure.
+
+                    Raw PNG bytes pass straight through, a matplotlib figure is
+                    drawn, and a plotly figure is exported only where kaleido and
+                    a Chrome install are present, which a hosted deployment and a
+                    packaged build do not have.
+                    """
+                    if isinstance(fig, (bytes, bytearray)):
+                        return bytes(fig)
+                    if hasattr(fig, "savefig"):
+                        buf = BytesIO()
+                        fig.savefig(buf, format="png", dpi=300, bbox_inches="tight")
+                        buf.seek(0)
+                        return buf.getvalue()
+                    if hasattr(fig, "to_image"):
+                        return fig.to_image(format="png", scale=2)
+                    raise TypeError("Unsupported figure type for export.")
+
                 def _add_fig_to_zip(zf, folder, name, fig):
                     """Add a session-state figure without closing the source figure."""
                     try:
                         png_bytes = _fig_to_png_bytes(fig)
-                        zf.writestr(f"{folder}/{name}.png", png_bytes)
+                        if png_bytes:
+                            zf.writestr(f"{folder}/{name}.png", png_bytes)
                     except Exception as e:
                         zf.writestr(
                             f"{folder}/{name}_EXPORT_WARNING.txt",
@@ -4386,6 +4410,20 @@ def main():
                             zf.writestr("tables/differential_results.csv", ss["diff_results"].to_csv(index=False))
                         if ss.get("filtered_df") is not None and not ss["filtered_df"].empty:
                             zf.writestr("tables/filtered_results.csv", ss["filtered_df"].to_csv(index=False))
+
+                        # Tables from the later modules, none of which used to reach
+                        # the bundle.
+                        for state_key, csv_name in (
+                            ("report_enrichment_table", "tables/pathway_enrichment.csv"),
+                            ("report_waterfall_table", "tables/waterfall_features.csv"),
+                        ):
+                            extra = ss.get(state_key)
+                            if isinstance(extra, pd.DataFrame) and not extra.empty:
+                                zf.writestr(csv_name, extra.to_csv(index=False))
+
+                        methods_text = ss.get("report_enrichment_methods")
+                        if isinstance(methods_text, str) and methods_text.strip():
+                            zf.writestr("tables/pathway_enrichment_methods.txt", methods_text)
                         if (
                             ss.get("global_sample_cols")
                             and ss.get("global_group_samples") is not None
@@ -4423,11 +4461,16 @@ def main():
                             if rows:
                                 sample_map_df = pd.DataFrame(rows)
                                 zf.writestr("tables/sample_metadata_mapping.csv", sample_map_df.to_csv(index=False))
+                        # Kept in step with the PDF's own list in tp/report_utility.py,
+                        # which this disagreed with: the sample loading plot and the
+                        # waterfall reached the PDF and not the bundle, while
+                        # "report_log2fc_density_fig" is set by nothing at all.
                         plot_keys = [
+                            "report_norm_fig",
                             "report_pca_fig", "report_corr_fig", "report_density_raw_fig", "report_density_proc_fig",
                             "report_qc_boxplot_fig", "report_qc_missing_fig", "report_qc_heatmap_fig",
                             "report_dendrogram_fig", "report_volcano_fig", "report_ma_fig",
-                            "report_log2fc_density_fig", "report_heatmap_fig", "report_boxplot_fig"
+                            "report_heatmap_fig", "report_waterfall_fig", "report_boxplot_fig",
                         ]
                         for plot_key in plot_keys:
                             if plot_key in ss and ss[plot_key] is not None:
