@@ -3815,6 +3815,289 @@ def _confirm_sample_columns(df, detected, what, key):
     return chosen, how
 
 
+# Colour separates the groups being compared; the track is named on the axis.
+_GROUP_COLORS = ["#9FC8EC", "#EFA07E"]
+
+
+def prepare_peptide_aggregate(glyco_df, g_int_cols, g_peptide_col):
+    """
+    The uploaded peptide export, collapsed to one row per sequence and matched
+    to this glyco table's channels.
+
+    Returns (aggregated, channel_pairs, problem). Exactly one of aggregated and
+    problem is set, so a caller can show the result or say why there is none
+    without repeating any of the checks.
+
+    Both the per-site plots in step 2 and the occupancy statistics in step 3
+    need this, and they used to ask for the file separately. One function, one
+    answer, computed once per upload.
+    """
+    raw = ss.get("gpi_peptide_raw")
+    if raw is None or getattr(raw, "empty", True):
+        return None, None, "no file"
+
+    cached = ss.get("gpi_peptide_cache")
+    # Keyed on the uploaded file and on the two things about the glyco table that
+    # change the answer, so step 2 and step 3 share one result and a new upload
+    # replaces it. Not on id(raw): an address is reused once an object is freed.
+    key = (ss.get("gpi_peptide_sig"), tuple(g_int_cols), g_peptide_col)
+    if cached and cached.get("key") == key:
+        return cached["aggregated"], cached["pairs"], cached["problem"]
+
+    aggregated, pairs, problem = None, None, None
+    try:
+        seq_col = detect_feature_col(
+            raw, ["Annotated Sequence", "Sequence"] + PEPTIDE_COL_CANDIDATES)
+        pairs, _, _ = occupancy.match_channels(
+            glyco_df, raw, g_int_cols, detect_intensity_cols(raw))
+
+        if seq_col is None:
+            problem = ("That peptide file has no sequence column. Expected one of: "
+                       "Annotated Sequence, Sequence, Peptide.")
+        elif not g_peptide_col:
+            problem = ("The glyco results table has no peptide/backbone sequence column, "
+                       "so the unglycosylated form cannot be looked up. Expected one of: "
+                       + ", ".join(PEPTIDE_COL_CANDIDATES[:6]) + ".")
+        elif len(pairs) < 4:
+            problem = (f"Only {len(pairs)} channel(s) matched between the glyco file and the "
+                       "peptide file, so the unglycosylated form cannot be used.")
+        else:
+            aggregated = occupancy.aggregate_peptide_abundances(
+                raw, seq_col, list(pairs.values()))
+    except Exception as exc:
+        problem = f"Could not use that peptide file: {type(exc).__name__}: {exc}"
+
+    ss["gpi_peptide_cache"] = {"key": key, "aggregated": aggregated,
+                               "pairs": pairs, "problem": problem}
+    return aggregated, pairs, problem
+
+
+def _site_track_values(frame, rows, channel_map, how="median"):
+    """
+    One value per sample for a track, taken from the rows that belong to it.
+
+    Returns a dict keyed by the glyco file's own channel names, so the three
+    tracks end up on one set of samples even though each came out of a file that
+    names its columns differently.
+
+    Protein rows are several measurements of one protein, so the median of them
+    is the protein's level. Glycoforms at a site, and the modified forms of one
+    peptide, are pieces of one pool measured separately, so those are summed: a
+    site carrying four glycans is not less occupied than one carrying a single
+    glycan of the same total abundance.
+    """
+    if rows is None or rows.empty:
+        return {}
+
+    out = {}
+    for glyco_col, source_col in channel_map.items():
+        if source_col not in rows.columns:
+            continue
+        values = pd.to_numeric(rows[source_col], errors="coerce").dropna()
+        values = values[values > 0]
+        if values.empty:
+            continue
+        out[glyco_col] = float(values.median() if how == "median" else values.sum())
+    return out
+
+
+def render_site_abundance_boxplots(glyco_sub, prot_sub, g_int_cols, p_int_cols,
+                                   gene_label, peptide_col, site_col):
+    """
+    Protein, unglycosylated peptide and glycopeptide side by side, for one site.
+
+    The three are measured on different scales and in different runs, so their
+    heights are not comparable to each other as raw numbers. What is comparable
+    is how each one moves between the groups, which is the question the plot is
+    for: a glycopeptide that rises with its protein is a protein change, and one
+    that rises while its protein and its unglycosylated form sit still is a
+    glycosylation change.
+    """
+    if glyco_sub is None or glyco_sub.empty or not g_int_cols:
+        st.info("No glycopeptide rows with quantitation for this gene.")
+        return
+
+    sites = [s for s in glyco_sub.get(site_col, pd.Series(dtype=object)).dropna().unique()]
+    if not sites:
+        st.info(f"No site column ('{site_col}') on the glyco rows, so sites cannot be separated.")
+        return
+
+    chosen_site = sites[0] if len(sites) == 1 else st.selectbox(
+        "Glycosylation site", sites, key=f"gpi_site_box_{gene_label}",
+        help="Each site is drawn on its own. The parent protein is the same for "
+             "every site of this protein and is repeated as the reference.",
+    )
+    scale_choice = st.radio(
+        "Scale", ["0 to 100% of the highest value in each track", "Original abundance"],
+        key=f"gpi_site_box_scale_{gene_label}", horizontal=True,
+        help="The three tracks differ by orders of magnitude, so on one raw axis the "
+             "glycopeptides are usually a flat line. Scaling each track to its own "
+             "maximum makes the group difference visible in all three. It also means "
+             "heights cannot be compared between tracks.",
+    )
+    as_percent = scale_choice.startswith("0 to 100")
+
+    site_rows = glyco_sub[glyco_sub[site_col] == chosen_site]
+    prot_pairs, _, _ = occupancy.match_channels(glyco_sub, prot_sub, g_int_cols, p_int_cols)
+
+    tracks = {}
+    tracks["Parent protein"] = _site_track_values(prot_sub, prot_sub, prot_pairs, how="median")
+    tracks["Glycopeptides at site"] = _site_track_values(
+        site_rows, site_rows, {c: c for c in g_int_cols}, how="sum")
+
+    aggregated, pep_pairs, peptide_problem = prepare_peptide_aggregate(
+        glyco_sub, g_int_cols, peptide_col)
+    naked_note = None
+    if aggregated is None or not pep_pairs:
+        naked_note = (
+            "Upload the peptide-level proteome export under **Upload Data** at the top "
+            "to add the unglycosylated form of this peptide to the plot."
+            if peptide_problem == "no file" else peptide_problem
+        )
+    else:
+        backbones = [occupancy.strip_peptide_sequence(v)
+                     for v in site_rows.get(peptide_col, pd.Series(dtype=object))]
+        wanted, rule_used = [], None
+        for backbone in dict.fromkeys(b for b in backbones if b):
+            for candidate, rule in occupancy.sequence_variants(backbone):
+                hit = aggregated[aggregated["_sequence"] == candidate]
+                if not hit.empty:
+                    wanted.append(hit)
+                    rule_used = rule_used or rule
+                    break
+        if wanted:
+            found = pd.concat(wanted)
+            tracks["Unglycosylated peptide"] = _site_track_values(
+                found, found, pep_pairs, how="sum")
+            if rule_used and rule_used != "sequence":
+                naked_note = (f"The unglycosylated form was matched as '{rule_used}', not on "
+                              "the sequence itself, so read it as the released peptide "
+                              "rather than an unoccupied site.")
+        else:
+            naked_note = ("No unglycosylated form of this backbone was identified in the "
+                          "peptide file, which is common at an occupied site.")
+
+    tracks = {k: v for k, v in tracks.items() if v}
+    if not tracks:
+        st.info("No usable abundances for this site.")
+        return
+
+    control = [c for c in (ss.get("gpi_norm_control") or []) if c in g_int_cols]
+    test = [c for c in (ss.get("gpi_norm_test") or []) if c in g_int_cols]
+    if len(control) >= 2 and len(test) >= 2:
+        groups = [("Control", control), ("Test", test)]
+    else:
+        groups = [("All samples", list(g_int_cols))]
+
+    order = [t for t in ("Parent protein", "Unglycosylated peptide", "Glycopeptides at site")
+             if t in tracks]
+    fig = build_site_boxplot_figure(tracks, order, groups, as_percent,
+                                    f"{gene_label} — site {chosen_site}")
+    if fig is None:
+        st.info("No samples fall in the chosen groups for this site.")
+        return
+
+    show_figure(fig)
+    add_plot_download_buttons(fig, f"{gene_label}_{chosen_site}_track_boxplots")
+
+    if naked_note:
+        st.caption(naked_note)
+    st.caption(
+        "Each point is one sample. "
+        + ("Each track is scaled to its own highest value, so heights cannot be "
+           "compared between tracks; only the movement between groups can."
+           if as_percent else
+           "Raw abundances, so the tracks sit at different heights by scale alone.")
+    )
+
+    tidy = pd.DataFrame([
+        {"Track": track, "Sample": channel, "Group": group_name,
+         "Value": tracks[track][channel]}
+        for track in order
+        for group_name, channels in groups
+        for channel in channels if channel in tracks[track]
+    ])
+    add_dataframe_download_buttons(tidy, f"{gene_label}_{chosen_site}_track_values",
+                                   key_suffix=f"tracks_{gene_label}_{chosen_site}")
+
+
+def build_site_boxplot_figure(tracks, order, groups, as_percent, title):
+    """
+    Draw the tracks. Kept free of Streamlit so the figure can be checked on its own.
+
+    Colour carries the group being compared, because that comparison is the whole
+    point of the plot. The track is already named on the axis below it, so
+    colouring by track would spend the only strong visual channel on something
+    the reader can already see.
+
+    Returns None where no track has a sample in any group, which the caller
+    reports rather than showing an empty pair of axes.
+    """
+    group_span = 0.8
+    track_span = len(groups) * group_span + 1.1
+
+    positions, data, colors, ticks, tick_labels = [], [], [], [], []
+    for track_index, track in enumerate(order):
+        values_by_channel = tracks[track]
+        scale = max(values_by_channel.values()) if as_percent and values_by_channel else None
+        base = track_index * track_span
+        for group_index, (group_name, channels) in enumerate(groups):
+            series = [values_by_channel[c] for c in channels if c in values_by_channel]
+            if as_percent and scale:
+                series = [v / scale * 100.0 for v in series]
+            if not series:
+                continue
+            positions.append(base + group_index * group_span)
+            data.append(series)
+            colors.append(_GROUP_COLORS[group_index % len(_GROUP_COLORS)])
+        ticks.append(base + (len(groups) - 1) * group_span / 2)
+        tick_labels.append(track)
+
+    if not data:
+        return None
+
+    fig, ax = plt.subplots(figsize=(max(6.0, 2.6 * len(order) + 1.4), 4.3))
+
+    drawn = ax.boxplot(data, positions=positions, widths=group_span * 0.72,
+                       patch_artist=True, showfliers=False,
+                       medianprops=dict(color="#222222", linewidth=1.3))
+    for patch, color in zip(drawn["boxes"], colors):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.85)
+        patch.set_edgecolor("#555555")
+        patch.set_linewidth(0.8)
+
+    rng = np.random.default_rng(0)
+    for position, series in zip(positions, data):
+        ax.plot(position + rng.normal(0, 0.045, len(series)), series, "o",
+                color="#333333", markersize=3.2, alpha=0.6, linestyle="none", zorder=3)
+
+    if len(groups) > 1:
+        from matplotlib.patches import Patch
+        ax.legend(handles=[Patch(facecolor=_GROUP_COLORS[i % len(_GROUP_COLORS)],
+                                 edgecolor="#555555", label=name)
+                           for i, (name, _) in enumerate(groups)],
+                  frameon=False, fontsize=9, loc="upper left",
+                  bbox_to_anchor=(1.01, 1.0))
+
+    ax.set_xticks(ticks)
+    ax.set_xticklabels(tick_labels, fontsize=9)
+    ax.set_xlim(-group_span, (len(order) - 1) * track_span + len(groups) * group_span)
+    ax.set_ylabel("Relative abundance (%)" if as_percent else "Abundance")
+    if as_percent:
+        ax.set_ylim(0, 115)
+    ax.set_title(title, fontsize=11)
+    ax.spines[["top", "right"]].set_visible(False)
+    # The app-wide seaborn whitegrid style draws both axes. A vertical line
+    # between two boxes of the same track reads as a divider that is not there,
+    # so the x grid is turned off for this figure only.
+    ax.grid(False)
+    ax.grid(axis="y", alpha=0.25, linewidth=0.5)
+    ax.set_axisbelow(True)
+    plt.tight_layout()
+    return fig
+
+
 def render_normalized_statistics(glyco_df, prot_df, g_int_cols, p_int_cols,
                                  g_peptide_col=None, g_protein_col=None):
     """
@@ -3826,6 +4109,12 @@ def render_normalized_statistics(glyco_df, prot_df, g_int_cols, p_int_cols,
     place, with the detail needed to act on it.
     """
     st.markdown("### Abundance-Level Normalization")
+    st.caption(
+        "Every glycopeptide divided by a denominator measured in the same samples, then "
+        "compared between the groups. To see one site drawn out instead — the protein, "
+        "the unglycosylated peptide and the glycopeptides side by side — use **Abundance "
+        "by Site** in step 2."
+    )
     try:
         _render_normalized_statistics(glyco_df, prot_df, g_int_cols, p_int_cols,
                                       g_peptide_col=g_peptide_col,
@@ -3952,57 +4241,24 @@ def _render_normalized_statistics(glyco_df, prot_df, g_int_cols, p_int_cols,
             st.info("Pick at least two channels for each group.")
             return
 
-        peptide_file = st.file_uploader(
-            "Peptide-level proteome export, for site occupancy (optional)",
-            type=["csv", "tsv", "txt", "xlsx"], key="gpi_peptide_up",
-            help="Proteome Discoverer PeptideGroups export from the same project. Used to "
-                 "find the unglycosylated form of each glycopeptide backbone. Without it, "
-                 "only parent-protein normalization is shown.",
-        )
+        # The file itself is asked for once, at the top with the other two.
+        peptides_aggregated, pep_pairs, peptide_problem = prepare_peptide_aggregate(
+            glyco_df, g_int_cols, g_peptide_col)
 
         choices = ["Parent protein"]
-        peptides_aggregated = None
-        if peptide_file is not None:
-            try:
-                peptides = read_table(peptide_file)
-                seq_col = detect_feature_col(
-                    peptides,
-                    ["Annotated Sequence", "Sequence"] + PEPTIDE_COL_CANDIDATES,
-                )
-                pep_pairs, _, _ = occupancy.match_channels(
-                    glyco_df, peptides, g_int_cols, detect_intensity_cols(peptides)
-                )
-                if seq_col is None:
-                    st.warning(
-                        "No sequence column found in that file. Expected one of: "
-                        "Annotated Sequence, Sequence, Peptide."
-                    )
-                elif not g_peptide_col:
-                    # Without a backbone column in the glyco table there is nothing to
-                    # match the naked peptides against. Saying so beats offering the
-                    # option and returning a table with no denominator on any row.
-                    st.warning(
-                        "The glyco results table has no peptide/backbone sequence column, "
-                        "so the unglycosylated form cannot be looked up. Expected one of: "
-                        + ", ".join(PEPTIDE_COL_CANDIDATES[:6])
-                        + ". Parent-protein normalization still works."
-                    )
-                elif len(pep_pairs) < 4:
-                    st.warning(
-                        f"Only {len(pep_pairs)} channel(s) matched between the glyco file and "
-                        "the peptide file, so site occupancy cannot be calculated from it."
-                    )
-                else:
-                    peptides_aggregated = occupancy.aggregate_peptide_abundances(
-                        peptides, seq_col, list(pep_pairs.values())
-                    )
-                    st.caption(
-                        f"{len(peptides)} peptide rows collapsed to "
-                        f"{len(peptides_aggregated)} sequences; {len(pep_pairs)} channels matched."
-                    )
-                    choices.append("Unglycosylated form of the same peptide")
-            except Exception as exc:
-                st.warning(f"Could not read that peptide file: {exc}")
+        if peptides_aggregated is not None:
+            choices.append("Unglycosylated form of the same peptide")
+            st.caption(
+                f"Peptide file: {len(peptides_aggregated):,} sequences, "
+                f"{len(pep_pairs)} channels matched. Site occupancy is available below."
+            )
+        elif peptide_problem == "no file":
+            st.caption(
+                "Only parent-protein normalization is available. To add site occupancy, "
+                "upload the peptide-level proteome export under **Upload Data** at the top."
+            )
+        else:
+            st.warning(peptide_problem + " Parent-protein normalization still works.")
 
         denominator_choice = st.radio(
             "Denominator", choices, horizontal=True, key="gpi_norm_denominator",
@@ -4211,6 +4467,40 @@ def main():
             "2) Total protein results", type=["csv", "tsv", "txt", "xlsx"], key="prot_up",
             help="Total Proteome (TMT or Label-Free) → Statistical Analysis Suite → Download Full Dataset (Unfiltered).",
         )
+        peptide_file = st.file_uploader(
+            "3) Peptide-level proteome export — optional, for site occupancy",
+            type=["csv", "tsv", "txt", "xlsx"], key="gpi_peptide_up",
+            help="Proteome Discoverer PeptideGroups export from the same project. Used to find "
+                 "the unglycosylated form of each glycopeptide backbone, which gives site "
+                 "occupancy and adds that track to the per-site box plots. Everything else "
+                 "works without it.",
+        )
+
+        # Read once, here, and keep the table. Streamlit discards an uploader's
+        # state on any rerun that does not draw that uploader, so a file asked
+        # for inside a collapsible step disappeared whenever the user opened a
+        # different step and came back. Asking at the start, beside the other two
+        # files, is both the fix and the more obvious place to ask.
+        if peptide_file is not None:
+            signature = (peptide_file.name, peptide_file.size)
+            if ss.get("gpi_peptide_sig") != signature:
+                try:
+                    ss["gpi_peptide_raw"] = read_table(peptide_file)
+                    ss["gpi_peptide_sig"] = signature
+                    ss.pop("gpi_peptide_cache", None)
+                except Exception as exc:
+                    ss["gpi_peptide_raw"] = None
+                    ss["gpi_peptide_sig"] = signature
+                    st.warning(f"Could not read that peptide file: {exc}")
+            held = ss.get("gpi_peptide_raw")
+            if held is not None:
+                st.caption(f"Peptide file held: {len(held):,} rows. "
+                           "Used in step 2's per-site plots and step 3's site occupancy.")
+        elif ss.get("gpi_peptide_sig") is not None:
+            # The user cleared the uploader, so drop what was read from it rather
+            # than leaving step 3 offering occupancy from a file that is gone.
+            for stale in ("gpi_peptide_raw", "gpi_peptide_sig", "gpi_peptide_cache"):
+                ss.pop(stale, None)
 
         example_dir = Path(__file__).resolve().parent / "assets" / "example" / "GPI"
         with st.expander("Download example files", expanded=False):
@@ -4867,7 +5157,9 @@ def main():
 
         with filters_right:
             if gene_options:
-                tabs = st.tabs(["Glycopeptide Evidence", "Protein-Normalized Ratios", "Integrated Summary", "Site-Glycan Matrix", "Raw Tables"])
+                tabs = st.tabs(["Glycopeptide Evidence", "Abundance by Site",
+                                "Protein-Normalized Ratios", "Integrated Summary",
+                                "Site-Glycan Matrix", "Raw Tables"])
 
                 with tabs[0]:
                     with st.container(border=True):
@@ -5039,6 +5331,25 @@ def main():
 
                 with tabs[1]:
                     with st.container(border=True):
+                        st.markdown("#### Abundance at one site, track by track")
+                        st.caption(
+                            "The parent protein, the unglycosylated form of the peptide and "
+                            "the glycopeptides carrying that site, each across the samples. "
+                            "A glycopeptide that moves with its protein is a protein change; "
+                            "one that moves while the other two sit still is a glycosylation "
+                            "change. For the same comparison as a number across every "
+                            "glycopeptide at once, see step 3."
+                        )
+                        render_site_abundance_boxplots(
+                            glyco_sub, prot_sub, g_int_cols, p_int_cols,
+                            gene_label=str(chosen_gene),
+                            peptide_col=(g_peptide_col if g_peptide_col else "Peptide"),
+                            site_col=("Glycosite" if "Glycosite" in glyco_sub.columns
+                                      else (g_peptide_col or "Peptide")),
+                        )
+
+                with tabs[2]:
+                    with st.container(border=True):
                         st.markdown("#### Channel-wise scale-aware glyco-protein signal")
                         ratio_df = build_long_ratio_df(
                             glyco_sub, prot_sub, g_int_cols, p_int_cols,
@@ -5070,7 +5381,7 @@ def main():
                                 "Sample-direction consistency near 1 means all samples agree on the direction."
                             )
 
-                with tabs[2]:
+                with tabs[3]:
                     with st.container(border=True):
                         st.markdown("#### Protein/gene-level integration summary")
                         if gene_row.empty:
@@ -5092,13 +5403,13 @@ def main():
                             st.dataframe(summary_download_df, width="stretch")
                             add_dataframe_download_buttons(summary_download_df.reset_index().rename(columns={"index": "Field"}), f"{chosen_gene}_protein_gene_summary", key_suffix=f"summary_{chosen_gene}")
 
-                with tabs[3]:
+                with tabs[4]:
                     with st.container(border=True):
                         render_targeted_site_glycan_matrix(
                             glyco_sub, gene_row, chosen_gene, g_lfc_col, g_metric_col, glyco_alpha, glyco_lfc_thr
                         )
 
-                with tabs[4]:
+                with tabs[5]:
                     with st.container(border=True):
                         st.markdown("#### Raw evidence tables")
                         st.markdown("**Glycoproteome rows**")
